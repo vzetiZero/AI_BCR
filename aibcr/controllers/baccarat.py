@@ -3,7 +3,7 @@
 
 Chỉ điều phối Model (``aibcr.models``) và Adapter (``aibcr.adapters``); không dùng tkinter
 và không biết gì về Electron. Tầng transport (``aibcr.service.engine``) gọi
-``dispatch`` để phục vụ giao diện, giống tab LONG-LONG.
+``dispatch`` để phục vụ giao diện Electron.
 
 Trách nhiệm:
     - mở/gắn Chrome (CDP 9222) và MỘT nút duy nhất “VÀO BÀN HỢP LỆ”: tự nhận tab sảnh,
