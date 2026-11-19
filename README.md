@@ -93,9 +93,12 @@ Một lần bấm chạy đúng chuỗi:
 1. Gắn Chrome CDP 9222 (chưa mở thì mở Chrome profile rồi yêu cầu đăng nhập + mở
    sảnh, bấm lại nút).
 2. Nhận tab sảnh → quét toàn bộ danh sách (cuộn hết, gom mọi ô bàn đã render).
+   Nhận cả sảnh EVO (`/frontend/evo/r3`) và sảnh Petalive (`/live-games/lobby/bcr`);
+   với Petalive, cầu được đọc trực tiếp từ ô bàn nên không cần WebSocket sảnh.
 3. Mở **ô bàn đầu tiên có mã bàn**. Không chấm điểm/lọc cầu, không bỏ bàn Siêu
    Tốc Độ, không đối chiếu shoe.
-4. Bấm đúng ô bàn bằng pointer event thật, chờ URL có `table_id`.
+4. Bấm đúng ô bàn bằng pointer event thật, chờ URL xác nhận bàn: EVO dùng
+   `table_id`, Petalive dùng đường dẫn `/live-games/bcr/<id>`.
 5. Xác nhận chỉ cần đọc được cầu trong bàn.
 6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa bấm chip
    (`sim.running = false`, `pending = null`).

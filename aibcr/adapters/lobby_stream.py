@@ -135,6 +135,160 @@ TILES_JS = """(() => {
     }).filter((r) => r.id), scroll: (() => { const sc = pick(); return {top: sc.scrollTop, max: sc.scrollHeight, client: sc.clientHeight}; })()};
 })()"""
 
+# ---------------------------------------------------------------- Petalive (site hiện tại)
+# Sảnh Petalive không phát lobby.histories qua WebSocket và không dùng data-role="table-tile".
+# Mỗi ô bàn là một React component với props.id / props.name; cầu được vẽ sẵn trong
+# .live-games-result-grid-board-baccarat__cell.bead-road (chữ B/P/T). Đọc thẳng DOM ô bàn
+# và bấm ô bằng chuột thật — cùng cơ chế với EVO, chỉ khác selector.
+PETALIVE_ROOM_SELECTOR = ".live-games-lobby-room.live-games-lobby-room-baccarat"
+PETALIVE_SCROLL_SELECTOR = ".wui-live-games-layout__body-container"
+PETALIVE_TILES_JS = """(() => {
+    const rooms = [...document.querySelectorAll(%s)];
+    const scroller = (() => {
+        const hint = document.querySelector(%s);
+        if (hint && /(auto|scroll)/.test(getComputedStyle(hint).overflowY)) return hint;
+        let n = rooms[0] || null;
+        while (n) {
+            if (/(auto|scroll)/.test(getComputedStyle(n).overflowY)) return n;
+            n = n.parentElement;
+        }
+        return document.scrollingElement;
+    })();
+    const tiles = rooms.map((room) => {
+        const fk = Object.keys(room).find((k) => k.startsWith('__reactFiber$'));
+        let f = fk ? room[fk] : null, props = null;
+        while (f && !props) {
+            const q = f.memoizedProps || {};
+            if (typeof q.id === 'string' && q.gameId === 'BCR') props = q;
+            f = f.return;
+        }
+        const board = room.querySelector('.live-games-lobby-room__result-board');
+        const beads = board
+            ? [...board.querySelectorAll('.live-games-result-grid-board-baccarat__cell.bead-road')]
+            : [];
+        // Bead-road xếp theo CỘT, mỗi cột 6 hàng từ trên xuống: sort theo cột rồi hàng,
+        // không dùng DOM order vì React có thể render lại ô theo thứ tự khác.
+        beads.sort((a, b) => {
+            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+            return (Math.round(ra.x / 6) - Math.round(rb.x / 6)) || (ra.y - rb.y);
+        });
+        let letters = '', readError = '';
+        for (const cell of beads) {
+            // Đọc CHỮ trong ô: class có thể mang thêm player-pair/banker-pair (huy hiệu)
+            // nên không được suy từ class — "banker player-pair" vẫn là B.
+            const side = (cell.textContent || '').trim().toUpperCase();
+            if (side !== 'B' && side !== 'P' && side !== 'T') {
+                letters = '';
+                readError = 'Cầu bàn có ký hiệu lạ; không suy đoán kết quả.';
+                break;
+            }
+            letters += side;
+            if (letters.length > 400) {
+                letters = '';
+                readError = 'Lịch sử vượt giới hạn 400 tay.';
+                break;
+            }
+        }
+        if (!letters && !readError) readError = 'Chưa đọc được cầu trong ô bàn.';
+        return {
+            id: (props && typeof props.id === 'string') ? props.id : '',
+            title: (props && typeof props.name === 'string') ? props.name : '',
+            game_type: 'baccarat',
+            lightning: false,
+            favorite: null,
+            letters, read_error: readError,
+            top: Math.round(room.getBoundingClientRect().top)
+        };
+    }).filter((r) => /^[A-Za-z0-9_-]{1,80}$/.test(r.id));
+    return {tiles, scroll: {top: scroller.scrollTop, max: scroller.scrollHeight,
+                            client: scroller.clientHeight}};
+})()""" % (json.dumps(PETALIVE_ROOM_SELECTOR), json.dumps(PETALIVE_SCROLL_SELECTOR))
+
+PETALIVE_SCROLL_JS = """(() => {
+    let n = document.querySelector(%s);
+    if (!n || !/(auto|scroll)/.test(getComputedStyle(n).overflowY)) {
+        n = document.querySelector(%s);
+        while (n) {
+            if (/(auto|scroll)/.test(getComputedStyle(n).overflowY)) break;
+            n = n.parentElement;
+        }
+    }
+    if (!n) return -1;
+    n.scrollTop = %d;
+    return Math.round(n.scrollTop);
+})()"""
+
+PETALIVE_SCROLL_BOX_JS = """(() => {
+    let n = document.querySelector(%s);
+    if (!n || !/(auto|scroll)/.test(getComputedStyle(n).overflowY)) {
+        n = document.querySelector(%s);
+        while (n) {
+            if (/(auto|scroll)/.test(getComputedStyle(n).overflowY)) break;
+            n = n.parentElement;
+        }
+    }
+    if (!n) return null;
+    const r = n.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10) return null;
+    return {x: r.x + r.width / 2, y: r.y + r.height / 2,
+            width: r.width, height: r.height};
+})()"""
+
+PETALIVE_TILE_BOX_JS = """(() => {
+    const id = %s;
+    let found = null;
+    for (const room of document.querySelectorAll(%s)) {
+        const fk = Object.keys(room).find((k) => k.startsWith('__reactFiber$'));
+        let f = fk ? room[fk] : null;
+        while (f) {
+            const q = f.memoizedProps || {};
+            if (q.id === id && q.gameId === 'BCR') { found = {room, props: q}; break; }
+            f = f.return;
+        }
+        if (found) break;
+    }
+    if (!found) return {reason: 'tile_not_found'};
+    const room = found.room;
+    room.scrollIntoView({block: 'center'});
+    const rect = room.getBoundingClientRect();
+    if (rect.width < 20 || rect.height < 20) return {reason: 'tile_hidden'};
+    if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
+        return {reason: 'tile_offscreen'};
+    }
+    return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
+            title: found.props.name || id};
+})()"""
+
+
+def scroll_js(petalive, top):
+    """Chọn JS đặt vị trí cuộn cho sảnh EVO hoặc Petalive."""
+    if petalive:
+        return PETALIVE_SCROLL_JS % (
+            json.dumps(PETALIVE_SCROLL_SELECTOR), json.dumps(PETALIVE_ROOM_SELECTOR), int(top))
+    return SCROLL_JS % int(top)
+
+
+def tiles_js(petalive):
+    """JS liệt kê ô bàn của sảnh EVO hoặc Petalive."""
+    return PETALIVE_TILES_JS if petalive else TILES_JS
+
+
+def tile_box_js(petalive, table_id):
+    """JS tìm toạ độ ô bàn theo mã; Petalive khớp props.id thay vì data-role."""
+    if petalive:
+        return PETALIVE_TILE_BOX_JS % (
+            json.dumps(table_id), json.dumps(PETALIVE_ROOM_SELECTOR))
+    return TILE_BOX_JS % json.dumps(table_id)
+
+
+def scroll_box_js(petalive):
+    """JS đo hộp khung cuộn của sảnh EVO hoặc Petalive."""
+    if petalive:
+        return PETALIVE_SCROLL_BOX_JS % (
+            json.dumps(PETALIVE_SCROLL_SELECTOR), json.dumps(PETALIVE_ROOM_SELECTOR))
+    return SCROLL_BOX_JS
+
+
 SCROLL_JS = """(() => {
     let n = document.querySelector('[data-role="table-tile"]');
     while (n) {
@@ -300,6 +454,7 @@ LOBBY_HEALTH_JS = """(() => {
         tiles: document.querySelectorAll('[data-role="table-tile"]').length,
         roads: document.querySelectorAll('[data-role="history-roads"] canvas').length,
         loading: !!document.querySelector('[data-role="loading-screen"], [data-role="loading-bar"]'),
+        rooms: document.querySelectorAll('.live-games-lobby-room.live-games-lobby-room-baccarat').length,
         auth: /User authentication failed|your session may be expired|Error Code:\\s*EV\\.7|Bạn đã đăng xuất|You have been logged out/i.test(text),
         launch_failed: /Mở game không thành công|launch game fail/i.test(text),
         body: text.slice(0, 180)
@@ -356,6 +511,9 @@ def lobby_list_url(url, fragment=None):
     (``fragment`` truyền vào cho từng trò; mặc định Baccarat).
     """
     parsed = urlsplit(url)
+    # Petalive đổi URL path khi vào bàn (/live-games/bcr/<id>), không dùng hash table_id.
+    if BR.is_petalive_table_url(url):
+        return urlunsplit((parsed.scheme, parsed.netloc, BR.PETALIVE_LOBBY_PATH, "", ""))
 
     def keep(part):
         return [p for p in part.split("&") if p and p.split("=", 1)[0] != "table_id"]
@@ -392,6 +550,8 @@ class LobbyStream:
         self.rng = random.Random()
         self.session_lost = False
         self.favorite_mode = ""
+        # "evo" hoặc "petalive"; đặt lại mỗi lần _lobby_context đọc được danh sách bàn.
+        self.lobby_kind = ""
 
     def _reset(self):
         self.contexts, self.histories, self._seq = [], {}, 0
@@ -519,16 +679,18 @@ class LobbyStream:
             self._dispatch_click(ws, x, y)
             self._cursor = (float(x), float(y))
 
-    def _wheel_scroll_to(self, ws, context_id, target_top, box):
+    def _wheel_scroll_to(self, ws, context_id, target_top, box, petalive=False):
         """Cuộn danh sách bàn bằng chuột lăn thật, thay vì gán ``scrollTop`` bằng JS.
 
         Di chuột (ghost-cursor) tới giữa khung danh sách rồi gửi nhiều cú lăn nhỏ
         qua ``Input.dispatchMouseWheelEvent`` cho tới khi đạt ``target_top`` hoặc hết
         kiên nhẫn — mô phỏng người dùng lăn chuột, không nhảy thẳng một bước lớn.
         Trả vị trí cuộn đọc được cuối cùng (``int``) hoặc ``-1`` nếu hỏng.
+        ``petalive=True`` dùng bộ selector cuộn của sảnh Petalive.
         """
+        set_js = scroll_js(petalive, target_top)
         if not self.human_mouse or box is None:
-            result = self._evaluate(ws, SCROLL_JS % int(target_top), context_id)
+            result = self._evaluate(ws, set_js, context_id)
             return result.get("result", {}).get("value", -1)
         command = lambda method, params=None: self._command(ws, method, params)
         if not self._cursor_overlay_shown:
@@ -544,7 +706,7 @@ class LobbyStream:
             self._cursor = (px, py)
         except Exception:
             pass
-        current = self._try_value(ws, SCROLL_JS % -1, context_id)
+        current = self._try_value(ws, scroll_js(petalive, -1), context_id)
         current = current if isinstance(current, (int, float)) else 0
         remaining = float(target_top) - float(current)
         attempts = 0
@@ -617,10 +779,17 @@ class LobbyStream:
             "bật" if active else "tắt", wait_seconds))
 
     def _lobby_context(self, ws):
+        """Tìm khung đang render danh sách bàn — EVO hoặc Petalive."""
         for context_id in list(self.contexts):
             value = self._try_value(ws, TILES_JS, context_id)
             if isinstance(value, dict) and value.get("tiles"):
                 self.frames += 1
+                self.lobby_kind = "evo"
+                return context_id, value
+            value = self._try_value(ws, PETALIVE_TILES_JS, context_id)
+            if isinstance(value, dict) and value.get("tiles"):
+                self.frames += 1
+                self.lobby_kind = "petalive"
                 return context_id, value
         return None, None
 
@@ -632,6 +801,68 @@ class LobbyStream:
             if context_id is not None or time.monotonic() >= deadline:
                 return context_id, snapshot
             time.sleep(1.5)
+
+    def _sweep_petalive(self, ws, context_id, snapshot, max_seconds, favorites_only):
+        """Quét sảnh Petalive: cầu nằm sẵn trong ô bàn, không có WebSocket lobby.histories.
+
+        Khác EVO ở ba điểm: selector ô bàn, nguồn cầu (DOM thay vì WS) và cờ Ưa thích
+        (sảnh này không có). Phần còn lại — cuộn chuột thật, gom mọi vị trí cuộn, khôi
+        phục vị trí — giữ nguyên để không lỡ bàn ngoài khung nhìn.
+        """
+        if favorites_only:
+            self.favorite_mode = "unsupported"
+        deadline = time.monotonic() + max_seconds
+        start_top = snapshot["scroll"]["top"]
+        scroll_box = self._try_value(ws, scroll_box_js(True), context_id)
+        scroll_box = scroll_box if isinstance(scroll_box, dict) else None
+        steps, position, stagnant = 0, 0, 0
+        seen, tiles = set(), {}
+        while time.monotonic() < deadline and steps < MAX_SCROLL_STEPS:
+            self._wheel_scroll_to(ws, context_id, position, scroll_box, petalive=True)
+            time.sleep(SCROLL_SETTLE)
+            result = self._evaluate(ws, PETALIVE_TILES_JS, context_id)
+            snapshot = result.get("result", {}).get("value") or snapshot
+            for tile in snapshot.get("tiles", []):
+                if tile.get("id"):
+                    tiles[tile["id"]] = tile
+            ids = {tile["id"] for tile in snapshot.get("tiles", [])}
+            bottom = max(snapshot["scroll"]["max"] - snapshot["scroll"]["client"], 0)
+            stagnant = 0 if (ids - seen or position < bottom) else stagnant + 1
+            seen |= ids
+            if stagnant >= 2:
+                break
+            position = min(position + SCROLL_STEP, bottom)
+            steps += 1
+        self._wheel_scroll_to(ws, context_id, start_top, scroll_box, petalive=True)
+        if not tiles:
+            self.diag = {"tiles_in_dom": 0, "scroll_steps": steps,
+                         "favorites_only": bool(favorites_only), "lobby": "petalive"}
+            self.last_error = ("Sảnh Petalive chưa hiển thị ô bàn sau %d giây; hãy đợi trang tải "
+                               "xong rồi quét lại." % int(max_seconds))
+            return []
+        rows = []
+        for table_id, tile in tiles.items():
+            letters = tile.get("letters") or ""
+            rows.append({
+                "table_id": table_id,
+                "label": tile.get("title") or table_id,
+                "letters": letters,
+                "game_type": "baccarat",
+                "read_error": tile.get("read_error") or "",
+                "source": "petalive-board",
+                "ws_hands": len(letters),
+                "road_match": True,  # cầu trên ô bàn là nguồn duy nhất của sảnh này
+                "observed_at": time.time(),
+                "messages": 1,
+                "favorite": False,
+            })
+        rows.sort(key=lambda r: r["label"].casefold())
+        self.diag = {"tiles_in_dom": len(tiles), "ws_tables": len(rows),
+                     "scroll_steps": steps, "matched_road": len(rows),
+                     "favorites_only": bool(favorites_only), "favorite_mode": self.favorite_mode,
+                     "lobby": "petalive"}
+        self.note = "Quét %d bước cuộn · %d bàn Petalive · cầu đọc từ ô bàn." % (steps, len(rows))
+        return rows
 
     def sweep(self, max_seconds=75, favorites_only=False):
         """Cuộn hết danh sách để sảnh gửi lịch sử mọi bàn, rồi trả về danh sách bàn.
@@ -662,6 +893,8 @@ class LobbyStream:
                 self.last_error = ("Sảnh chưa hiển thị danh sách bàn sau 25 giây chờ; "
                                    "hãy mở lại trang Baccarat.")
                 return []
+            if self.lobby_kind == "petalive":
+                return self._sweep_petalive(ws, context_id, snapshot, max_seconds, favorites_only)
             star_ids = self._star_favorites(snapshot) if favorites_only else None
             if favorites_only and star_ids is not None:
                 self.favorite_mode = "stars"
@@ -795,10 +1028,11 @@ class LobbyStream:
         rồi bỏ bàn oan (4 lần liên tiếp trong aibcr_trace.jsonl).
         """
         deadline = time.monotonic() + max(0.0, float(timeout))
-        box = self._try_value(ws, TILE_BOX_JS % json.dumps(table_id), context_id)
+        petalive = self.lobby_kind == "petalive"
+        box = self._try_value(ws, tile_box_js(petalive, table_id), context_id)
         if isinstance(box, dict) and "x" in box:
             return box
-        snapshot = self._try_value(ws, TILES_JS, context_id)
+        snapshot = self._try_value(ws, tiles_js(petalive), context_id)
         if not isinstance(snapshot, dict):
             return box
         scroll = snapshot.get("scroll") or {}
@@ -806,14 +1040,14 @@ class LobbyStream:
             bottom = max(int(scroll.get("max") or 0) - int(scroll.get("client") or 0), 0)
         except (TypeError, ValueError):
             bottom = 0
-        scroll_box = self._try_value(ws, SCROLL_BOX_JS, context_id)
+        scroll_box = self._try_value(ws, scroll_box_js(petalive), context_id)
         scroll_box = scroll_box if isinstance(scroll_box, dict) else None
         position, steps = 0, 0
         while time.monotonic() < deadline and steps < MAX_SCROLL_STEPS:
             try:
-                self._wheel_scroll_to(ws, context_id, position, scroll_box)
+                self._wheel_scroll_to(ws, context_id, position, scroll_box, petalive=petalive)
                 time.sleep(SCROLL_SETTLE)
-                box = self._try_value(ws, TILE_BOX_JS % json.dumps(table_id), context_id)
+                box = self._try_value(ws, tile_box_js(petalive, table_id), context_id)
             except Exception:
                 break
             if isinstance(box, dict) and "x" in box:
@@ -852,11 +1086,21 @@ class LobbyStream:
                 return False, "Không tìm thấy ô bàn để mở (%s)." % (box or {}).get("reason", "tile_missing")
             self._click_at(ws, box["x"], box["y"])
             deadline = time.monotonic() + max(5.0, float(wait_seconds))
-            pattern = re.compile(r"[?&#]table_id=%s(?=&|$)" % re.escape(table_id))
+            if self.lobby_kind == "petalive":
+                pattern = re.compile(r"/live-games/bcr/%s(?:/|[?#]|$)" % re.escape(table_id))
+            else:
+                pattern = re.compile(r"[?&#]table_id=%s(?=&|$)" % re.escape(table_id))
             while time.monotonic() < deadline:
                 time.sleep(1.5)
-                if pattern.search((self.session._cdp_page() or {}).get("url", "")):
+                now_url = (self.session._cdp_page() or {}).get("url", "")
+                if pattern.search(now_url):
                     return True, "Đã mở bàn %s qua ô bàn của sảnh." % box.get("title", table_id)
+                # Bấm ô Petalive có thể mở tab mới thay vì đổi tab hiện tại.
+                if self.lobby_kind == "petalive" and any(
+                        BR.is_petalive_table_url((page or {}).get("url"))
+                        and pattern.search((page or {}).get("url", ""))
+                        for page in self.session._cdp_pages()):
+                    return True, "Đã mở bàn %s trong tab mới." % box.get("title", table_id)
             return False, "Đã bấm ô bàn nhưng chưa chuyển vào bàn %s." % table_id
         except Exception as exc:
             return False, "Không mở được bàn (%s)." % type(exc).__name__
@@ -927,7 +1171,9 @@ class LobbyStream:
         while True:
             page = self.session._cdp_page() or {}
             now_url = page.get("url", "")
-            if "table_id" not in urlsplit(now_url).fragment and "table_id=" not in now_url:
+            if (not BR.is_petalive_table_url(now_url)
+                    and "table_id" not in urlsplit(now_url).fragment
+                    and "table_id=" not in now_url):
                 if not self.contexts:
                     self._wait_context(ws)
                 if self._lobby_context(ws)[0]:
@@ -950,8 +1196,9 @@ class LobbyStream:
         try:
             page = self.session._cdp_page()
             url = (page or {}).get("url", "")
-            if not BR.is_lobby_url(url):
-                return False, "Không có tab sảnh Evolution trong Chrome CDP 9222."
+            petalive_table = BR.is_petalive_table_url(url)
+            if not BR.is_lobby_url(url) and not petalive_table:
+                return False, "Không có tab sảnh Baccarat trong Chrome CDP 9222."
             ws = websocket.create_connection(BR.validated_endpoint(page), suppress_origin=True,
                                              timeout=BR.SCRIPT_TIMEOUT, redirect_limit=0,
                                              http_no_proxy=["127.0.0.1", "localhost", "::1"])
@@ -961,6 +1208,15 @@ class LobbyStream:
             self._command(ws, "Runtime.enable")
             if not self._wait_context(ws):
                 return False, "Không lấy được ngữ cảnh trang sảnh để trở về danh sách bàn."
+            if petalive_table:
+                # Sảnh Petalive route theo path (/live-games/bcr/<id>), không có hash
+                # table_id để đổi và không có nút X của EVO: mở thẳng URL sảnh tổng.
+                self._navigate_to_list(ws, lobby_list_url(url))
+                if self._list_is_back(ws, wait_seconds):
+                    self.note = "Đã về danh sách bàn Baccarat."
+                    return True, "Đã rời bàn · mở lại sảnh Petalive."
+                return False, ("Đã thử mở lại sảnh Petalive nhưng %d giây chưa thấy danh "
+                               "sách bàn." % wait_seconds)
             fragment = urlsplit(url).fragment
             if "table_id" not in fragment and "table_id=" not in url:
                 self.note = "Đã ở danh sách bàn Baccarat sẵn."
@@ -1048,7 +1304,7 @@ class LobbyStream:
                 return dict(value, status="auth")
             if value.get("launch_failed"):
                 return dict(value, status="launch_failed")
-            if value.get("tiles") or value.get("roads"):
+            if value.get("tiles") or value.get("roads") or value.get("rooms"):
                 return dict(value, status="ok")
             if value.get("loading") or not fallback:
                 fallback = value
@@ -1127,7 +1383,8 @@ class LobbyStream:
             if BR.cdp_port_closed(exc):
                 return False, BR.CDP_CLOSED_NOTE
             return False, "Không đọc được danh sách tab Chrome CDP 9222 (%s)." % type(exc).__name__
-        lobbies = [page for page in pages if BR.is_lobby_url(page.get("url"))]
+        lobbies = [page for page in pages if (BR.is_lobby_url(page.get("url"))
+                                              or BR.is_petalive_table_url(page.get("url")))]
         if not lobbies:
             if any(isinstance(page, dict) and page.get("type") == "page"
                    and BR.is_evo_entry_url(page.get("url"))
@@ -1149,9 +1406,10 @@ class LobbyStream:
                 return False, self._health_note(state)
             url = lobby.get("url", "")
             self.note = "Đã nhận tab sảnh Baccarat."
-            if "table_id" in urlsplit(url).fragment or "table_id=" in urlsplit(url).query:
-                return True, ("Đã nhận tab sảnh Baccarat · đang ở màn hình bàn; bấm nút quay lại "
-                              "sảnh của EVO nếu muốn quét toàn sảnh.")
+            if (BR.is_petalive_table_url(url) or "table_id" in urlsplit(url).fragment
+                    or "table_id=" in urlsplit(url).query):
+                return True, ("Đã nhận tab sảnh Baccarat · đang ở màn hình bàn; bấm “Quay lại "
+                              "sảnh” nếu muốn quét toàn sảnh.")
             if status == "loading":
                 return True, ("Đã nhận tab sảnh Baccarat · sảnh còn đang tải; chờ vài giây rồi "
                               "bấm “Quét toàn sảnh”.")

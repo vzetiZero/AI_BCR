@@ -20,6 +20,10 @@ PROFILE_DIR = os.path.join(HERE, "chrome_profile")
 READER_JS = os.path.join(HERE, "reader.js")
 DRIVER_PATH = os.path.join(HERE, "drivers", "chromedriver.exe")
 LOBBY_PATH = "/frontend/evo/r3"
+# Sảnh Baccarat của Petalive (site đang dùng) không đi qua EVO /frontend/evo/r3.
+PETALIVE_LOBBY_PATH = "/live-games/lobby/bcr"
+PETALIVE_TABLE_PREFIX = "/live-games/bcr/"
+LOBBY_PATHS_TEXT = "%s hoặc %s" % (LOBBY_PATH, PETALIVE_LOBBY_PATH)
 START_URL = "https://www.neo179.com/gamelobby/live"
 PORTAL_HOST = urlsplit(START_URL).hostname
 PORTAL_PATH = urlsplit(START_URL).path
@@ -60,24 +64,44 @@ CHROME_CANDIDATES = (
 def is_lobby_host(host):
     """Sảnh Evolution đổi mirror liên tục nên chỉ cần một tên miền DNS công khai.
 
-    Không nhận IP, localhost hay tên nội bộ. Đường dẫn /frontend/evo/r3 được kiểm
-    tra riêng trong is_lobby_url; nhờ vậy mirror hiện tại vẫn dùng được mà không
-    phải sửa danh sách đuôi cứng mỗi lần site đổi tên.
+    Không nhận IP, localhost hay tên nội bộ. Đường dẫn sảnh (/frontend/evo/r3 hoặc
+    /live-games/lobby/bcr) được kiểm tra riêng trong is_lobby_url; nhờ vậy mirror hiện
+    tại vẫn dùng được mà không phải sửa danh sách đuôi cứng mỗi lần site đổi tên.
     """
     return is_public_host(host)
 
 
 def is_lobby_url(url):
-    """URL sảnh EVO thật: https, tên miền công khai, đúng đường dẫn lobby, không userinfo."""
+    """URL sảnh hợp lệ: EVO `/frontend/evo/r3` hoặc Petalive `/live-games/lobby/bcr`."""
     if not isinstance(url, str) or not url or "\\" in url:
         return False
     if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
         return False
     try:
         parsed = urlsplit(url)
-        path = parsed.path
+        path = parsed.path.rstrip("/") or "/"
+        evo = path == LOBBY_PATH or path.startswith(LOBBY_PATH + "/")
+        petalive = path == PETALIVE_LOBBY_PATH or path.startswith(PETALIVE_LOBBY_PATH + "/")
         return (parsed.scheme == "https" and is_lobby_host(parsed.hostname)
-                and (path == LOBBY_PATH or path.startswith(LOBBY_PATH + "/"))
+                and (evo or petalive)
+                and parsed.username is None and parsed.password is None
+                and parsed.port in (None, 443))
+    except (ValueError, TypeError):
+        return False
+
+
+def is_petalive_table_url(url):
+    """URL màn hình bàn Petalive: `/live-games/bcr/<room-id>` (không phải sảnh)."""
+    if not isinstance(url, str) or not url or "\\" in url:
+        return False
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
+        return False
+    try:
+        parsed = urlsplit(url)
+        path = parsed.path.rstrip("/")
+        room_id = path[len(PETALIVE_TABLE_PREFIX):] if path.startswith(PETALIVE_TABLE_PREFIX) else ""
+        return (parsed.scheme == "https" and is_public_host(parsed.hostname)
+                and bool(valid_table_id(room_id))
                 and parsed.username is None and parsed.password is None
                 and parsed.port in (None, 443))
     except (ValueError, TypeError):
@@ -448,9 +472,11 @@ class BrowserSession:
 
     def _cdp_page(self):
         pages = self._cdp_pages()
-        # Ưu tiên tab sảnh EVO; nếu sảnh nằm trong iframe của trang vào thì lấy trang vào.
+        # Ưu tiên tab sảnh (EVO hoặc Petalive); nếu đã vào bàn Petalive thì giữ đúng tab
+        # đó, không rơi sang tab cổng khác trong cùng Chrome.
         for page in pages:
-            if is_lobby_url(page.get("url")):
+            url = page.get("url")
+            if is_lobby_url(url) or is_petalive_table_url(url):
                 return page
         return pages[0] if pages else None
 
@@ -474,8 +500,8 @@ class BrowserSession:
                         self.last_diag = {"reason": "evo_entry_auth_error"}
                         self.connection_state = "waiting"
                         return False
-                    self.note = ("Không có tab nào trong Chrome CDP 9222 mở %s hoặc sảnh EVO "
-                                 "(https://<mirror>%s)." % (PORTAL_HOST, LOBBY_PATH))
+                    self.note = ("Không có tab nào trong Chrome CDP 9222 mở %s hoặc sảnh Baccarat "
+                                 "(https://<mirror>%s)." % (PORTAL_HOST, LOBBY_PATHS_TEXT))
                     self.last_diag = {"reason": "no_approved_tab"}
                     self.connection_state = "waiting"
                     return False
@@ -593,9 +619,9 @@ class BrowserSession:
                 return False
             url = START_URL if url is None else url
             if not valid_site_url(url):
-                self.note = ("URL không được phép: chỉ https://%s%s hoặc sảnh EVO "
+                self.note = ("URL không được phép: chỉ https://%s%s hoặc sảnh Baccarat "
                              "https://<mirror>%s; cổng 443, không userinfo, không hỗ trợ "
-                             "file hay trang khác." % (PORTAL_HOST, PORTAL_PATH, LOBBY_PATH))
+                             "file hay trang khác." % (PORTAL_HOST, PORTAL_PATH, LOBBY_PATHS_TEXT))
                 self.last_error = self.note
                 if self.driver is None:
                     self.connection_state = "error"

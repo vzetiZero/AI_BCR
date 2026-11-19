@@ -20,6 +20,10 @@ from aibcr.live import decode
 DEFAULT_PORT = 9222
 TAB_PATTERN = "live-games|/bcr/|petalive"
 RECONNECT_SECONDS = 3.0
+# Tab sảnh Petalive cũng chứa "live-games" nên phải loại nó khi tìm tab BÀN; nếu không
+# LiveReader sẽ bám vào sảnh và không thấy khung kết quả nào.
+PETALIVE_LOBBY_RE = r"/live-games/lobby/"
+PETALIVE_TABLE_RE = r"/live-games/bcr/[A-Za-z0-9_-]+"
 
 
 def list_pages(port=DEFAULT_PORT):
@@ -29,13 +33,23 @@ def list_pages(port=DEFAULT_PORT):
 
 
 def find_table_page(port=DEFAULT_PORT, pattern=TAB_PATTERN):
+    """Chọn tab BÀN, bỏ qua tab sảnh Petalive dù cùng khớp pattern chung."""
     import re
     found = re.compile(pattern, re.I)
+    lobby = re.compile(PETALIVE_LOBBY_RE, re.I)
+    table = re.compile(PETALIVE_TABLE_RE, re.I)
+    matches = []
     for page in list_pages(port):
         url = str(page.get("url") or "")
-        if url and found.search(url):
+        if url and found.search(url) and not lobby.search(url):
+            matches.append(page)
+    if not matches:
+        return None
+    # Ưu tiên URL bàn Petalive rõ ràng (/live-games/bcr/<id>) hơn tab bất kỳ.
+    for page in matches:
+        if table.search(str(page.get("url") or "")):
             return page
-    return None
+    return matches[0]
 
 
 class LiveReader(threading.Thread):
