@@ -7,7 +7,8 @@ Nguyên tắc giữ nguyên:
       hay sửa số, và **không** được đổi quyết định ``playable``.
     - Thiếu cấu hình thì mọi hàm trả ``{"ok": False, "error": ...}`` và app vẫn chạy.
     - Chỉ dùng ``urllib`` (có sẵn), không thêm thư viện.
-    - Không lưu key vào repo: key luôn đọc từ biến môi trường ``BCR_AI_KEY``.
+    - Không lưu key vào repo/env file/state: key chỉ đọc từ ``BCR_AI_KEY`` hoặc nhận
+      override RAM từ UI (``ai.key.set``).
 
 Chế độ (``BCR_AI_MODE`` hoặc truyền qua ``cfg`` từ UI):
 
@@ -18,7 +19,7 @@ Chế độ (``BCR_AI_MODE`` hoặc truyền qua ``cfg`` từ UI):
 Biến môi trường:
 
     BCR_AI_MODE     off | local | api (để trống = tự suy từ key/URL)
-    BCR_AI_KEY      API key (chỉ cần cho api) — KHÔNG lưu vào repo
+    BCR_AI_KEY      API key (chỉ cần cho api) — KHÔNG lưu vào repo; UI có thể override RAM
     BCR_AI_MODEL    tên model (mặc định chib/deepseek-v4.1-flash)
     BCR_AI_URL      endpoint chat/completions (mặc định https://api.vilao.ai/...)
     BCR_AI_TIMEOUT  timeout giây (mặc định 8 cho UI)
@@ -113,7 +114,7 @@ def _config_error(settings):
     """Lỗi dễ hiểu, có tên biến môi trường để người dùng tự sửa."""
     mode = settings.get("mode")
     if mode == "api":
-        return "Chưa cấu hình AI: đặt BCR_AI_KEY trong biến môi trường."
+        return "Chưa cấu hình AI: đặt BCR_AI_KEY hoặc nhập key trong tab AI."
     if mode == "local":
         return "Chưa cấu hình AI local: kiểm tra BCR_AI_URL."
     return "Chưa bật AI: chọn chế độ local hoặc api."

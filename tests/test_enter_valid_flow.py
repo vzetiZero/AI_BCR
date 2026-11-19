@@ -10,7 +10,7 @@ Khoá lại các điều:
 
     1. Chỉ một lệnh ``table.enterValid`` là đủ để đi từ sảnh tới bàn đầu tiên có mã.
     2. Không còn lọc cầu: bàn bệt / bàn Siêu Tốc Độ vẫn được vào nếu đứng trước.
-    3. Vào bàn xong thì ĐỨNG YÊN: không arm kế hoạch, không bấm chip, phiên chưa chạy.
+    3. Vào bàn xong thì ĐỨNG YÊN: không chốt lệnh, không bấm chip, phiên chưa chạy.
     4. Bật tool sau đó mới chuyển sang theo dõi (và vẫn chờ hết tay hiện tại).
     5. Không có bàn nào có mã / quá hạn chờ thì báo rõ, không treo chế độ.
 """
@@ -23,7 +23,7 @@ import unittest
 from aibcr.controllers import baccarat as BA
 from aibcr.service import engine
 
-# B 13 · P 9 (lệch 4), bệt tối đa 3, không có cầu 3-3.
+# B 13 · P 9 (lệch 4), bệt tối đa 3 — chỉ là cầu mẫu để test pipeline.
 GOOD = "".join(side * count for side, count in (
     ("B", 3), ("P", 2), ("B", 3), ("P", 2), ("B", 2), ("P", 3), ("B", 2), ("P", 2), ("B", 3)))
 # Bệt 6 tay liền ở đầu — trước đây bị loại, nay không còn lọc nên vẫn vào được.

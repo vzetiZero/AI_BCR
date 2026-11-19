@@ -484,7 +484,7 @@ def place_bet(session, side, chips, unit=DEFAULT_CHIP_UNIT, human_mouse=True,
     chips: danh sách mệnh giá hiển thị (đơn vị) cần bấm, từ ``decompose``.
     amount: số tiền cần đặt. Có ``amount`` thì mệnh giá được CHỐT LẠI theo khay đọc tươi
     ngay trong vòng chờ, ``chips`` chỉ còn là gợi ý: khay thường render sau lúc app chốt
-    kế hoạch, quyết định theo bản đọc cũ thì lượt bấm bị bỏ trước khi bàn kịp mở khay.
+    lệnh cược, quyết định theo bản đọc cũ thì lượt bấm bị bỏ trước khi bàn kịp mở khay.
 
     Trả (ok, note, placed) trong đó placed là dict mệnh giá -> số chip đã bấm được.
     Không ném lỗi ra UI; mọi lỗi gói vào note.

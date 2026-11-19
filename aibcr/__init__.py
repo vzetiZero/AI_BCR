@@ -7,7 +7,7 @@ Tầng (trên xuống):
     aibcr.service         Transport  - JSON-RPC stdin/stdout, một tiến trình Baccarat
     aibcr.controllers     Controller - điều phối Model + Adapter (composition root)
     aibcr.adapters        Adapter    - Chrome/Selenium/CDP: đọc DOM, bấm chuột, đặt chip
-    aibcr.models          Model      - luật cầu, thang cược, sổ vốn (thuần, không I/O)
+    aibcr.models          Model      - luật cầu, lệnh cược, sổ vốn (thuần, không I/O)
 
 Luồng một lệnh: Electron -> preload/IPC -> aibcr.service.engine -> controller
 -> adapter/model, rồi sự kiện ``state``/``log`` trả ngược lên giao diện.

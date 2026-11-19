@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tang Model: chia so tien thanh menh gia chip (thuan so hoc, khong I/O).
 
-Truoc day ham nay nam trong ``table_bets`` (tang Adapter) nen ``method`` - mot module
-Model - phai import Adapter. Tach ra day de Model khong con phu thuoc Adapter.
+Truoc day ham nay nam trong ``table_bets`` (tang Adapter) nen Model phai import Adapter.
+Tach ra day de Model khong con phu thuoc Adapter.
 """
 
 # 1 don vi chip = 1 don vi hien thi tren san (VN2). Chip "100" = 100, "20" = 20.

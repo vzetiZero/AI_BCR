@@ -22,7 +22,8 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from aibcr.adapters import browser as BR
-from aibcr.models import method as ME
+from aibcr.models import engine as E
+from aibcr.models.live_sim import table_stats
 
 ENTRY_WAIT = 75
 
@@ -50,10 +51,10 @@ def print_board(rows):
     width = max([len(str(row.get("label"))) for row in rows] + [8])
     print("%-*s %5s %-7s %s" % (width, "BÀN", "TAY", "MẠNH", "MÃ BÀN"))
     for row in rows:
-        info = ME.table_stats(list(row.get("letters") or ""))
+        info = table_stats(list(row.get("letters") or ""))
         print("%-*s %5d %-7s %s" % (
             width, str(row.get("label"))[:width], info["hands"],
-            ME.SIDE_NAME.get(info["strong"], "—"), row.get("table_id") or "—"))
+            E.SIDE_NAME.get(info["strong"], "—"), row.get("table_id") or "—"))
 
 
 def main():

@@ -32,7 +32,7 @@ class LiveSession:
 
     def __init__(self, decks=8, trials=predict.DEFAULT_TRIALS,
                  markov_weight=predict.DEFAULT_MARKOV_WEIGHT, table="",
-                 ai_mode="off", ai_url="", ai_model="", ai_every=5, ai_timeout=8,
+                 ai_mode="off", ai_url="", ai_model="", ai_key="", ai_every=5, ai_timeout=8,
                  on_prediction=None, on_status=None):
         self.shoe = cards.Shoe(decks)
         self.decks = int(decks)
@@ -42,6 +42,8 @@ class LiveSession:
         self.ai_mode = str(ai_mode or "off")
         self.ai_url = str(ai_url or "")
         self.ai_model = str(ai_model or "")
+        # Chỉ nằm trong RAM; env BCR_AI_KEY là mặc định khi rỗng.
+        self.ai_key = str(ai_key or "")
         self.ai_every = max(1, int(ai_every))
         self.ai_timeout = max(2, int(ai_timeout))
         self.on_prediction = on_prediction
@@ -63,7 +65,7 @@ class LiveSession:
     def configure(self, **kwargs):
         """Cập nhật cấu hình từ UI mà không tạo lại shoe/lịch sử."""
         allowed = ("decks", "trials", "markov_weight", "ai_mode", "ai_url",
-                   "ai_model", "ai_every", "ai_timeout")
+                   "ai_model", "ai_key", "ai_every", "ai_timeout")
         with self.lock:
             for key in allowed:
                 if key in kwargs and kwargs[key] is not None:
@@ -73,7 +75,7 @@ class LiveSession:
 
     def _ai_cfg(self):
         return {"mode": self.ai_mode, "url": self.ai_url, "model": self.ai_model,
-                "timeout": self.ai_timeout}
+                "key": self.ai_key, "timeout": self.ai_timeout}
 
     def _notify(self):
         if self.on_prediction is None:

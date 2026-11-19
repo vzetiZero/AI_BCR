@@ -134,13 +134,19 @@ class NoTkinterAnymoreTests(unittest.TestCase):
 class StructureTests(unittest.TestCase):
     def test_mvc_modules_are_present(self):
         for rel in ("aibcr/config.py", "aibcr/__main__.py",
-                    "aibcr/models/method.py", "aibcr/models/money.py", "aibcr/models/live_sim.py",
+                    "aibcr/models/money.py", "aibcr/models/live_sim.py",
                     "aibcr/adapters/browser.py", "aibcr/adapters/lobby_stream.py",
                     "aibcr/adapters/table_bets.py",
                     "aibcr/controllers/baccarat.py",
                     "aibcr/service/engine.py",
                     "README.md"):
             self.assertTrue((ROOT / rel).exists(), rel)
+
+    def test_method_module_and_backtest_are_gone(self):
+        self.assertFalse((ROOT / "aibcr/models/method.py").exists(),
+                         "không còn phương pháp 3-3/3-2")
+        self.assertFalse((ROOT / "tools/backtest.py").exists(),
+                         "không còn script backtest của phương pháp cũ")
 
     def test_electron_ui_files_are_present(self):
         for rel in ("ui/package.json", "ui/main.js", "ui/preload.js",

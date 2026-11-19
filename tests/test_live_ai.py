@@ -10,6 +10,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -173,17 +174,138 @@ class RpcTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def test_live_methods_are_wired(self):
+    def make_controller(self):
+        events = []
+
+        class Emitter:
+            def event(self, name, data):
+                events.append((name, data))
+
         controller = BaccaratController(
-            str(pathlib.Path(self.tmp.name) / "state.json"),
-            type("Emitter", (), {"event": lambda self, *a, **kw: None})())
+            str(pathlib.Path(self.tmp.name) / "state.json"), Emitter())
         self.addCleanup(controller.shutdown)
+        return controller, events
+
+    @staticmethod
+    def live_view(playable=True, best_side="P", focus_side="T"):
+        return {
+            "running": True, "rounds": 3, "table": "Bàn test",
+            "prediction": {"ok": True, "playable": playable, "best_side": best_side,
+                           "least_bad_side": "B"},
+            # focus_side là lời AI: cố tình khác best_side để chứng minh AI không đổi cửa.
+            "analysis": {"verdict": "Đánh", "focus_side": focus_side,
+                         "confidence": "cao", "explanation": "AI nói"},
+        }
+
+    def test_live_methods_are_wired(self):
+        controller, _ = self.make_controller()
         result, error = controller.dispatch("live.state", {})
         self.assertIsNone(error)
         self.assertFalse(result["running"])
         result, error = controller.dispatch("live.analyze", {})
         self.assertIsNone(error)
         self.assertFalse(result["ok"])
+
+    def test_api_key_stays_in_ram_only(self):
+        controller, _ = self.make_controller()
+        result, error = controller.dispatch("ai.key.set", {"key": "dummy-ram-only"})
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["has_key"])
+        self.assertEqual(controller.ai_key_override, "dummy-ram-only")
+
+        # Khi live session đã tồn tại, key phải đi thẳng vào RAM của session đó.
+        controller.live_session = LiveSession(ai_mode="api")
+        result, error = controller.dispatch("ai.key.set", {"key": "dummy-second"})
+        self.assertIsNone(error)
+        self.assertEqual(controller.live_session.ai_key, "dummy-second")
+        self.assertNotIn("dummy-second", json.dumps(controller.live_session.snapshot(),
+                                                    ensure_ascii=False))
+
+        for method in ("state", "config.get", "live.state"):
+            result, error = controller.dispatch(method, {})
+            self.assertIsNone(error)
+            self.assertNotIn("dummy-second", json.dumps(result, ensure_ascii=False))
+        controller._save_state()
+        self.assertNotIn("dummy-second",
+                         controller.state_path.read_text(encoding="utf-8"))
+
+        result, error = controller.dispatch("ai.key.set", {"key": ""})
+        self.assertIsNone(error)
+        self.assertFalse(result["has_key"])
+        self.assertEqual(controller.ai_key_override, "")
+
+    def test_bet_place_uses_predicted_side_and_fixed_stake(self):
+        controller, _ = self.make_controller()
+
+        class FakeLive:
+            def __init__(self, view):
+                self.view = view
+
+            def snapshot(self):
+                return self.view
+
+        controller.live_session = FakeLive(self.live_view())
+        result, error = controller.dispatch("bet.config", {"side": "AUTO", "stake": 123})
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"], result)
+
+        row = {"key": "id:t1", "label": "Bàn test", "letters": "BBP",
+               "ts": time.time(), "table_id": "t1", "stable": 3}
+        controller.tables = {row["key"]: row}
+        controller.sim.bind(row)
+        self.assertTrue(controller.sim.start(row))
+        controller.sim.entry_waiting = False
+        controller.tool_running = True
+
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+        result, error = controller.dispatch("bet.place", {})
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(placed), 1)
+        # AI nói T nhưng predict chốt P: lệnh phải đi theo predict.
+        self.assertEqual(placed[0]["side"], "P")
+        self.assertEqual(placed[0]["stake"], 123.0)
+        self.assertIn("AI", placed[0]["reason"])
+
+    def test_bet_place_refuses_auto_when_predict_says_botay(self):
+        controller, _ = self.make_controller()
+
+        class FakeLive:
+            def __init__(self, view):
+                self.view = view
+
+            def snapshot(self):
+                return self.view
+
+        controller.live_session = FakeLive(
+            self.live_view(playable=False, best_side=None, focus_side="P"))
+        controller.dispatch("bet.config", {"side": "AUTO", "stake": 90})
+        row = {"key": "id:t1", "label": "Bàn test", "letters": "BBP",
+               "ts": time.time(), "table_id": "t1", "stable": 3}
+        controller.tables = {row["key"]: row}
+        controller.sim.bind(row)
+        controller.sim.start(row)
+        controller.sim.entry_waiting = False
+        controller.tool_running = True
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+
+        result, error = controller.dispatch("bet.place", {})
+        self.assertIsNone(error)
+        self.assertFalse(result["ok"])
+        self.assertIn("BỎ TAY", result["error"])
+        self.assertEqual(placed, [])
+        self.assertIsNone(controller.sim.pending)
+
+        # Người dùng chọn thủ công thì vẫn được đặt — AI không ép bỏ tay.
+        result, error = controller.dispatch("bet.config", {"side": "B", "stake": 90})
+        self.assertTrue(result["ok"], result)
+        result, error = controller.dispatch("bet.place", {})
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(placed[-1]["side"], "B")
 
 
 if __name__ == "__main__":

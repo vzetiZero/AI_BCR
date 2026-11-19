@@ -6,7 +6,7 @@ Không cần Chrome: bàn/Chrome được thay bằng đối tượng giả. M�
 
     - chỉ có một dịch vụ Baccarat, dispatch đúng method, method lạ báo lỗi
     - nút “VÀO BÀN HỢP LỆ” tìm + mở + xác nhận bàn nhưng KHÔNG đặt cược
-    - lọc bàn theo 5 điều kiện (lệch B/P, bệt, cầu 3-3, khoảng tay, hoà ưu tiên đỏ)
+    - vào bàn đầu tiên có mã, không lọc cầu; lệnh cược do UI/AI chốt từng tay
     - đóng Chrome bằng tay thì app thấy mất kết nối và còn đường mở lại
 """
 
@@ -102,18 +102,57 @@ class DispatchTests(unittest.TestCase):
         self.assertTrue(reply["ok"])
         self.assertEqual(methods, ["cancel"])
 
+    def test_dispatch_exposes_bet_and_key_commands_without_leaking_the_key(self):
+        service = make_service()
+        reply, error = engine.dispatch(service, "bet.config", {"side": "B", "stake": 180})
+        self.assertIsNone(error)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(service.bet_config, {"side": "B", "stake": 180.0})
+
+        reply, error = engine.dispatch(service, "ai.key.set", {"key": "dummy-ram-only"})
+        self.assertIsNone(error)
+        self.assertTrue(reply["ok"], reply)
+        self.assertTrue(reply["has_key"])
+
+        snapshot, error = engine.dispatch(service, "state", {})
+        self.assertIsNone(error)
+        self.assertNotIn("dummy-ram-only", json.dumps(snapshot, ensure_ascii=False))
+        service._save_state()
+        saved = service.state_path.read_text(encoding="utf-8")
+        self.assertNotIn("dummy-ram-only", saved)
+
+    def test_bet_place_refuses_before_a_table_is_chosen(self):
+        service = make_service()
+        reply, error = engine.dispatch(service, "bet.place", {})
+        self.assertIsNone(error)
+        self.assertFalse(reply["ok"])
+        self.assertIn("VÀO BÀN", reply["error"])
+
 
 class ConfigTests(unittest.TestCase):
-    def test_config_set_persists_the_live_exit_threshold(self):
+    def test_config_set_persists_the_per_hand_bet_order(self):
         service = make_service()
-        reply = service.config_set({"live_exit_streak": 9})
+        reply = service.config_set({"bet_side": "P", "bet_stake": 250.5})
         self.assertTrue(reply["ok"], reply)
         saved = json.loads(service.state_path.read_text(encoding="utf-8"))["settings"]
-        self.assertEqual(saved["live_exit_streak"], 9)
-        self.assertEqual(service.sim.live_exit_streak, 9)
-        self.assertNotIn("min_hands", saved)
-        self.assertNotIn("max_streak", saved)
-        self.assertNotIn("min_lead", saved)
+        self.assertEqual(saved["bet_side"], "P")
+        self.assertEqual(saved["bet_stake"], 250.5)
+        self.assertEqual(service.bet_config, {"side": "P", "stake": 250.5})
+
+    def test_removed_method_config_is_never_saved(self):
+        service = make_service()
+        reply = service.config_set({
+            "profile": "3-3", "ladder": [100, 300], "ladder_mode": "multiply",
+            "ladder_base": 100, "block_mode": "repeat", "live_exit_streak": 9,
+            "auto_cycle": True,
+        })
+        self.assertTrue(reply["ok"], reply)
+        saved = json.loads(service.state_path.read_text(encoding="utf-8"))["settings"]
+        for key in ("profile", "ladder", "ladder_mode", "ladder_base", "block_mode",
+                    "live_exit_streak", "auto_cycle", "min_hands", "max_streak",
+                    "min_lead"):
+            self.assertNotIn(key, saved)
+            self.assertNotIn(key, service.config)
 
     def test_removed_filter_keys_are_ignored(self):
         service = make_service()
@@ -161,7 +200,7 @@ class ToolLifecycleTests(unittest.TestCase):
 class BaccaratEnterValidTests(unittest.TestCase):
     """Nút duy nhất “VÀO BÀN HỢP LỆ”: tìm + mở + xác nhận nhưng KHÔNG cược."""
 
-    # 22 tay: B 13 · P 9 (lệch 4), không bệt quá 3, không có cầu 3-3 → đạt cả 5 điều kiện.
+    # 22 tay: B 13 · P 9 (lệch 4), không bệt quá 3 — chỉ là cầu mẫu cho pipeline.
     VALID = "".join(side * count for side, count in (
         ("B", 3), ("P", 2), ("B", 3), ("P", 2), ("B", 2),
         ("P", 3), ("B", 2), ("P", 2), ("B", 3)))
@@ -186,7 +225,7 @@ class BaccaratEnterValidTests(unittest.TestCase):
         self.assertFalse(service.enter_valid)
         self.assertEqual(service.sim.table_key, "id:t1")
         self.assertFalse(service.sim.running, "chưa bật tool thì chưa chạy phiên")
-        self.assertIsNone(service.sim.pending, "chưa được arm kế hoạch cược")
+        self.assertIsNone(service.sim.pending, "chưa được chốt lệnh cược")
         self.assertFalse(service.place_busy, "không được đặt chip")
         self.assertIn("CHƯA đặt cược", service.valid_note)
 
@@ -200,14 +239,14 @@ class BaccaratEnterValidTests(unittest.TestCase):
         self.assertEqual(service.sim.table_key, "id:t1")
         self.assertFalse(service.sim.running)
 
-    def test_tool_start_arms_the_verified_table(self):
+    def test_tool_start_tracks_the_verified_table(self):
         service = self.service()
         self.prime(service)
         service._auto_start_verified_table()
         reply = service.tool_start()
         self.assertTrue(reply["ok"])
         self.assertTrue(service.sim.running)
-        self.assertTrue(service.sim.entry_waiting, "vẫn chờ hết tay hiện tại mới cược")
+        self.assertTrue(service.sim.entry_waiting, "vẫn chờ hết tay hiện tại mới nhận lệnh")
         self.assertIsNone(service.sim.pending)
 
     def test_enter_valid_hunts_without_the_tool(self):
@@ -335,10 +374,12 @@ class BaccaratNoFilterTests(unittest.TestCase):
         service.auto_open_table()
         self.assertEqual(opened, ["id:first"])
 
-    def test_new_session_keeps_the_live_exit_threshold(self):
+    def test_new_session_keeps_the_bet_order(self):
         service = self.service(self.LEAD4)
-        self.assertTrue(service.session_new({"capital": 2500, "live_exit_streak": 5})["ok"])
-        self.assertEqual(service.sim.live_exit_streak, 5)
+        self.assertTrue(service.session_new({"capital": 2500, "bet_side": "T",
+                                             "bet_stake": 75})["ok"])
+        self.assertEqual(service.bet_config, {"side": "T", "stake": 75.0})
+        self.assertEqual(service.sim.money.unit, 75.0)
 
 
 class ChromeClosedRecoveryTests(unittest.TestCase):

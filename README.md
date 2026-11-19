@@ -1,14 +1,15 @@
 # AI_BCR Desktop
 
 Tool **Baccarat** (một trò duy nhất) theo kiến trúc MVC: engine Python đọc bàn qua
-Chrome CDP, giao diện Electron chỉ vẽ và gửi lệnh. Toàn bộ logic nghiệp vụ của bản
-BCR gốc được giữ nguyên — **không có LONG-LONG**.
+Chrome CDP, giao diện Electron chỉ vẽ và gửi lệnh. Dự án **không có LONG-LONG** và
+**không còn phương pháp chia khối/thang cược cũ**: mỗi tay được cấu hình trực tiếp
+trên UI (cửa + số chip cố định) hoặc lấy cửa từ kết quả `predict`.
 
 > **BẮT BUỘC — push GitHub sau MỖI lần cập nhật hoặc sửa đổi**
 >
 > Remote: `https://github.com/vzetiZero/AI_BCR.git` (nhánh `main`).
 > Mọi thay đổi (code, cấu hình mặc định, tài liệu) phải được đẩy lên ngay trong cùng
-> lần làm việc, không để tồn đọng.
+> lần làm việc, không để tồn đọng. Chạy test trước khi push.
 >
 > ```
 > push_update.bat                          # commit "Update <thời gian>" rồi push
@@ -25,7 +26,7 @@ BCR gốc được giữ nguyên — **không có LONG-LONG**.
 ```
 AI_BCR/
 ├─ aibcr/                    backend Python (MVC)
-│  ├─ config.py              hằng số chung (nhịp quét, ngưỡng, đường dẫn)
+│  ├─ config.py              hằng số chung (nhịp quét, gate đặt chip, CDP…)
 │  ├─ adapters/              Chrome/Selenium/CDP: đọc DOM, bấm chuột, đặt chip
 │  │  ├─ browser.py          mở/gắn Chrome CDP 9222, đọc bàn, đọc số dư
 │  │  ├─ lobby_stream.py     đọc sảnh, quét ô bàn, bấm mở bàn bằng chuột thật
@@ -34,21 +35,27 @@ AI_BCR/
 │  │  ├─ human_mouse.py      chuyển động chuột "người thật" qua CDP
 │  │  ├─ mouse_chromedriver.py  fallback ChromeDriver
 │  │  └─ ghost_mouse.py      con trỏ ảo vẽ trong trang
-│  ├─ controllers/
-│  │  └─ baccarat.py         BaccaratController - composition root
+│  ├─ live/                  bộ đọc WebSocket Petalive + dự đoán + AI
+│  │  ├─ cards.py            id lá 1..52 → điểm, đếm bài còn lại
+│  │  ├─ decode.py           tách khung `onGetGameResult`
+│  │  ├─ reader.py           gắn CDP, phát on_round/on_state
+│  │  ├─ predict.py          Monte Carlo + Markov + EV (nguồn số liệu)
+│  │  ├─ ai.py               gọi AI local/API, chỉ diễn giải
+│  │  └─ session.py          trạng thái một bàn, chạy AI ở thread riêng
 │  ├─ models/                logic thuần, không I/O
 │  │  ├─ engine.py           trạng thái ván, SIDE_NAME
-│  │  ├─ method.py           kế hoạch cược, so chip, ladder (không lọc bàn)
 │  │  ├─ money.py            sổ tiền, định dạng
 │  │  ├─ chips.py            mệnh giá chip
-│  │  └─ live_sim.py         LiveSimulation + cổng kiểm tra dữ liệu
+│  │  └─ live_sim.py         vòng đời phiên, đối chiếu chip, ghi lãi/lỗ
+│  ├─ controllers/
+│  │  └─ baccarat.py         BaccaratController - composition root
 │  └─ service/engine.py      transport JSON-RPC stdin/stdout
 ├─ ui/                       Electron
 │  ├─ main.js                spawn engine, IPC, cửa sổ
 │  ├─ preload.js             contextBridge `window.aibcr`
 │  └─ renderer/              index.html / app.js / styles.css
 ├─ tests/                    unittest + node --test
-├─ tools/                    script chạy tay (backtest, kiểm tra chọn bàn)
+├─ tools/                    script chạy tay (đọc WebSocket, soi CDP, kiểm chọn bàn)
 ├─ Start.bat                 mở app (tự cài Electron nếu thiếu)
 ├─ install-toan-bo.bat       cài Python deps + Electron
 └─ push_update.bat/.ps1      commit + push lên GitHub
@@ -76,79 +83,57 @@ Cấu hình Chrome: cổng CDP **9222**, profile `chrome_profile/`, file phiên
 
 ## Một nút duy nhất: VÀO BÀN HỢP LỆ
 
-Tab **Bàn chơi** chỉ có một nút thao tác bàn: **VÀO BÀN HỢP LỆ**
+Tab **Bàn chơi** có một nút thao tác bàn: **VÀO BÀN HỢP LỆ**
 (`table.enterValid`). Các nút cũ (Gắn Chrome / Nhận tab sảnh / Quét sảnh / Đọc lại
-bàn / Rời bàn / Đóng Chrome) và nút chọn bàn theo từng dòng đã bị bỏ để tránh bấm
-nhầm. Danh sách bàn bên dưới chỉ để **xem** (số tay, bên mạnh, mã bàn), không bấm được.
+bàn / Rời bàn / Đóng Chrome) đã bị bỏ để tránh bấm nhầm. Danh sách bàn bên dưới chỉ
+để **xem**, không bấm được.
 
 Một lần bấm chạy đúng chuỗi:
 
 1. Gắn Chrome CDP 9222 (chưa mở thì mở Chrome profile rồi yêu cầu đăng nhập + mở
    sảnh, bấm lại nút).
 2. Nhận tab sảnh → quét toàn bộ danh sách (cuộn hết, gom mọi ô bàn đã render).
-3. Mở **ô bàn đầu tiên có mã bàn**. Không còn chấm điểm/lọc cầu, không bỏ bàn Siêu
+3. Mở **ô bàn đầu tiên có mã bàn**. Không chấm điểm/lọc cầu, không bỏ bàn Siêu
    Tốc Độ, không đối chiếu shoe.
 4. Bấm đúng ô bàn bằng pointer event thật, chờ URL có `table_id`.
-5. Xác nhận chỉ cần đọc được cầu trong bàn (không kiểm tra ổn định/cùng shoe).
-6. **Dừng ở đây**: bàn đã vào nhưng **chưa đặt cược** (`sim.running = false`,
-   `pending = null`, không arm). Trạng thái ghi `Đã vào bàn … CHƯA đặt cược`.
+5. Xác nhận chỉ cần đọc được cầu trong bàn.
+6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa bấm chip
+   (`sim.running = false`, `pending = null`).
 
-Không có bàn nào có mã bàn trong sảnh thì tool tự quét lại (lượt đầu ngay, sau đó mỗi
-15 giây) tới khi hết `ENTER_VALID_TIMEOUT = 240` giây thì báo lỗi và dừng chế độ. Nút
-**Dừng tự quét** trên băng trạng thái huỷ ngay (`table.cancelEnter`).
+Không có bàn nào có mã bàn thì tool tự quét lại (lượt đầu ngay, sau đó mỗi 15 giây)
+tới khi hết `ENTER_VALID_TIMEOUT = 240` giây thì báo lỗi. Nút **Dừng tự quét** huỷ
+ngay (`table.cancelEnter`).
 
-Bật **Chạy tool** khi đang đứng ở bàn đã xác nhận thì chuyển thẳng sang theo dõi, vẫn
-chờ hết tay hiện tại rồi mới chốt kế hoạch và (nếu bật `auto_place`) mới bấm chip.
-Bật tool khi chưa có bàn thì tool tự chạy chuỗi "vào bàn" rồi theo dõi.
-
-## Vào bàn không điều kiện
-
-Đã bỏ **toàn bộ** logic điều kiện vào bàn:
-
-- Không còn `check_table` / 5 điều kiện (khoảng tay, bệt tối đa, cầu 3-3, lệch B/P
-  min/max) — `aibcr/models/method.py` chỉ còn `table_stats` + `strong_side`.
-- Không bỏ bàn Siêu Tốc Độ, không đối chiếu cầu WebSocket/DOM, không chờ dữ liệu
-  "ổn định", không kiểm tra `game_type`, không kiểm tra cùng shoe.
-- Chỉ cần ô bàn có mã bàn là mở; nếu lúc đọc bàn chưa có cầu thì chờ tay đầu tiên.
-
-Bên mạnh vẫn được tính để đánh khối: bên nhiều tay hơn trên toàn shoe; **B = P thì
-lấy Banker (bên đỏ)**.
-
-Chỉ còn **ngưỡng thoát khi đang chơi**: bệt hiện tại chạm `live_exit_streak` (mặc
-định 7 tay) thì rời bàn — đây là điều kiện rời bàn, không phải lọc bàn.
+Bật **Chạy tool** khi đang đứng ở bàn đã xác nhận thì chuyển thẳng sang theo dõi,
+vẫn chờ hết tay hiện tại rồi mới nhận lệnh từ UI. Bật tool khi chưa có bàn thì tool
+tự chạy chuỗi "vào bàn" rồi theo dõi.
 
 ## Đọc bàn live + dự đoán (site Petalive BCR)
 
-Ngoài engine Evolution ở trên, dự án có bộ đọc **WebSocket thật** của site
-Petalive (`w-plms*.petalive.live/live-games/bcr/...`) trong `aibcr/live/`:
-
-| File | Việc |
-| --- | --- |
-| `cards.py` | id lá 1..52 → rank/điểm; `Shoe` đếm bài còn lại |
-| `decode.py` | tách khung `;game;…;onGetGameResult;0;0;{json}` |
-| `reader.py` | gắn CDP, phát `on_round` / `on_state` |
-| `predict.py` | Monte Carlo + Markov + EV |
-| `ai.py` | gọi API AI (tuỳ chọn) để diễn giải |
-
-Mã hoá lá bài đã đối chiếu **129/129 ván thật**:
-`rank = (id-1)//4 + 1`, điểm = rank nếu ≤ 9, còn lại 0 (10/J/Q/K).
+Bộ đọc **WebSocket thật** của Petalive (`w-plms*.petalive.live/live-games/bcr/...`)
+nằm ở `aibcr/live/`:
 
 ```
 python tools/dump_ws_frames.py --seconds 180     # gắn Chrome CDP đang mở, ghi khung
 python tools/cdp_capture.py --url "<link bàn>"   # tự mở Chrome CDP riêng rồi ghi
 python tools/bcr_live.py --trials 20000          # đọc live + in dự đoán từng ván
-python tools/bcr_live.py --ai                    # thêm phần diễn giải AI (cần BCR_AI_KEY)
+python tools/bcr_live.py --ai                    # thêm phần diễn giải AI (cần key)
 ```
 
-Mỗi ván in lá bài + điểm, cửa thắng, và xác suất/EV cho ván kế. Dự đoán chạy local
-20k ván Monte Carlo ≈ 0,15 giây (100k ≈ 0,8 giây), đủ nhanh cho cửa sổ cược 25 giây.
+Mã hoá lá bài đã đối chiếu **129/129 ván thật**:
+`rank = (id-1)//4 + 1`, điểm = rank nếu ≤ 9, còn lại 0 (10/J/Q/K). Dự đoán chạy local
+20k ván Monte Carlo ≈ 0,15 giây, đủ nhanh cho cửa sổ cược ~25 giây.
 
-### AI trên giao diện Electron
+**Số liệu là của `predict.py`**: xác suất P/B/T, EV, sai số, shoe còn lại, cửa tốt
+nhất (`best_side`) và cờ `playable`. `playable = false` khi EV tốt nhất không vượt
+`2 × sai số Monte Carlo` — khi đó mọi lệnh AUTO bị từ chối.
 
-Tab **AI dự đoán** (cạnh *Bàn chơi*) bật/tắt luồng live mà không cần terminal:
+## AI trên giao diện Electron
+
+Tab **AI dự đoán** bật/tắt luồng live mà không cần terminal:
 
 1. Chọn nguồn: `off` · `local` (Ollama/llama.cpp, **không cần key**) · `api`
-   (OpenAI-compatible, cần key). Endpoint/model mặc định trong dự án:
+   (OpenAI-compatible, cần key). Endpoint/model mặc định:
    `https://api.vilao.ai/v1/chat/completions` và `chib/deepseek-v4.1-flash`.
 2. Bấm **Lưu cấu hình AI**, rồi **Bật AI live**. Engine gắn CDP 9222, đọc WebSocket
    bàn Petalive, cập nhật shoe và gọi AI mỗi N ván (mặc định 5) trong **thread riêng**
@@ -157,32 +142,55 @@ Tab **AI dự đoán** (cạnh *Bàn chơi*) bật/tắt luồng live mà không
    (`BỎ TAY` / `Cân nhắc` / `Đánh`), mức tin cậy, rủi ro và giải thích. Nút
    **Phân tích ngay** gọi AI ngay cho ván kế.
 
-API được cấu hình sẵn qua config (không nhạy cảm). **Key tuyệt đối không lưu vào
-repo**: đặt biến môi trường `BCR_AI_KEY` trước khi chạy `Start.bat`, ví dụ PowerShell:
+**Key AI chỉ có 2 nguồn, không bao giờ nằm trong repo:**
 
-```
-$env:BCR_AI_KEY = "<key của bạn>"
-.\Start.bat
-```
+- Biến môi trường `BCR_AI_KEY` (đặt trước khi chạy `Start.bat`), ví dụ PowerShell:
+
+  ```
+  $env:BCR_AI_KEY = "<key của bạn>"
+  .\Start.bat
+  ```
+
+- Ô **API key tuỳ biến** trong tab AI: engine nhận qua `ai.key.set` và giữ **trong
+  RAM của tiến trình**. Ô nhập bị xoá ngay sau khi bấm Lưu; key không vào `config`,
+  file state, log, snapshot hay JSON-RPC trả về. Bấm **Xoá key** để quay về env.
 
 Các biến tuỳ chọn khác: `BCR_AI_MODE`, `BCR_AI_MODEL`, `BCR_AI_URL`, `BCR_AI_TIMEOUT`.
-Luồng CLI dùng chung module `aibcr/live/ai.py`, nhưng `Session` của CLI vẫn nằm riêng
-trong `tools/bcr_live.py` (có seed để backtest).
 
-**AI API không tham gia quyết định**: số liệu do `predict.py` tính local, AI chỉ viết
-lời giải thích. `playable = false` (EV âm hoặc nằm trong nhiễu Monte Carlo) thì verdict
-bị ép thành `BỎ TAY` dù AI trả khác. Không hứa thắng; EV Baccarat âm ở mọi cửa khi shoe
-cân bằng nên phần lớn ván nên đứng ngoài.
+Nếu từng dán key vào code/chat/bug report thì coi như key đã lộ: **xoay key đó** ở
+nhà cung cấp. Không dán giá trị key vào README, test, log hay issue.
 
-Lưu ý trung thực: EV của Baccarat luôn âm ở mọi cửa khi shoe cân bằng, nên
-`predict` trả `playable = false` và khuyến nghị bỏ tay; card counting chỉ có ý nghĩa
-khi shoe lệch mạnh (hiếm) và không đảm bảo thắng.
+**AI không tham gia quyết định đặt cược**: AI bị ép trả `BỎ TAY` khi
+`playable=false`, và controller chỉ lấy cửa từ `prediction.best_side` — không đọc
+`analysis.focus_side` do AI viết. AI cũng không được trả số liệu mới; mọi con số trên
+UI đều lấy từ `predict.predict()`.
 
-## Chia thang theo vốn
+## Lệnh cược từng tay + tự đặt chip thật
 
-Cấu hình → **Vốn & thang**: nhập *Mức gốc*, *Vốn phiên*, chọn cách chia
-(`ladder_mode`) rồi lưu. Quy tắc chia theo hệ số: mỗi bậc = bậc trước × hệ số, làm
-tròn lên bội 10 đv, chỉ thêm bậc khi **tổng vốn còn nằm trong vốn phiên**.
+Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, phần **TAY KẾ TIẾP**:
+
+- **Cửa**: `Theo AI (AUTO)` hoặc `P` / `B` / `T`.
+- **Chip cố định**: số VN2 đặt cho tay đó (mặc định 100).
+- **Lưu lệnh** (`bet.config`): chỉ đổi cấu hình cho tay kế.
+- **Tự đặt cược** (`bet.place`): lưu form rồi chốt lệnh ngay.
+
+Hành vi của `bet.place`:
+
+1. Từ chối nếu chưa vào bàn, chưa chạy tool, đang chờ tay hiện tại kết thúc, đang
+   bấm lượt khác, hoặc đang tắt `auto_place`.
+2. `AUTO`: chỉ lấy cửa khi `predict` cho `playable=true` và có `best_side`. Nếu
+   `playable=false` / `best_side=null` thì từ chối với thông báo **BỎ TAY**, kể cả AI
+   có nói "Đánh". Muốn tự ép cửa thì chọn P/B/T thay vì AUTO.
+3. Chốt lệnh vào `sim.pending`, chờ gate `table_is_clear()` (cả 3 cửa về 0) rồi gọi
+   `TB.place_bet(...)` — bấm chip thật trên site, có tuỳ chọn chuột người thật.
+4. Chỉ tính lãi/lỗ khi có xác nhận đã bấm chip trong cửa sổ đúng. Tay nào không đặt
+   được thì ghi `not_placed`, không đụng vốn; sau `PLACE_SKIP_LIMIT` tay liên tiếp thì
+   dừng để người dùng kiểm tra khay chip.
+5. `PLACE_CONFIRM_TIMEOUT` / `PLACE_*` trong `aibcr/config.py` giới hạn thời gian gate
+   và xác nhận, tránh thread chết làm treo phiên.
+
+Sổ vốn, lịch sử và chốt lời vẫn dùng `aibcr/models/money.py`; dữ liệu lưu ở file
+state (không chứa API key).
 
 ## Lệnh JSON-RPC
 
@@ -192,7 +200,8 @@ chrome.open|attach|close|window|status,
 lobby.enter|sweep|back,
 tables, table.enterValid|cancelEnter|open|select|leave,
 tool.start|stop, scan, chips.read,
-live.start|stop|state|analyze,
+live.start|stop|state|analyze, ai.key.set,
+bet.config|bet.place,
 config.get|set, session.new|reset|recover, log.clear, export
 ```
 
@@ -203,8 +212,9 @@ lại cho script.
 
 ```
 python -m unittest discover -s tests -t . -q      # toàn bộ test Python
-python -m unittest tests.test_engine -v           # engine JSON-RPC + vào bàn + không lọc cầu
+python -m unittest tests.test_engine -v           # engine JSON-RPC + vào bàn + lệnh cược
 python -m unittest tests.test_enter_valid_flow -v # harness pipeline chọn bàn (Chrome giả)
+python -m unittest tests.test_live_ai -v          # AI, key RAM, bet.place, chặn override
 python -m unittest tests.test_architecture -v     # ranh giới tầng MVC, không LONG-LONG
 node tests/test_reader.cjs                        # test logic đọc bàn (node --test)
 ```
@@ -214,7 +224,7 @@ Kiểm tra thực tế ở mức chọn bàn (Chrome đang mở sảnh, CDP 9222
 ```
 python tools/kiem_tra_chon_ban.py                  # đọc sảnh, in danh sách bàn
 python tools/kiem_tra_chon_ban.py --vao-ban        # bấm ô bàn đầu tiên có mã + chờ đọc
-                                                   # được cầu, KHÔNG đặt cược
+                                                    # được cầu, KHÔNG đặt cược
 ```
 
 ## Ghi chú

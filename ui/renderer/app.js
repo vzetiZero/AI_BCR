@@ -15,7 +15,6 @@ const state = {
   logs: { baccarat: [] },
   sub: { baccarat: 'play' },
   tableSearch: '',
-  lastLadderSignature: '',
   huntTick: 0,
 };
 
@@ -168,25 +167,6 @@ function renderRoad(letters) {
     .join('');
 }
 
-function renderBlockStrip(table, plan) {
-  const box = $('#ba-block-strip');
-  if (!box) return;
-  const cells = Number(table.cycle_hands || 0);
-  if (!cells) { box.innerHTML = ''; return; }
-  const strongHands = Number(table.strong_hands || 0);
-  const strong = plan.strong || table.strong || null;
-  const weak = strong === 'B' ? 'P' : strong === 'P' ? 'B' : null;
-  const pos = Number(plan.block_pos || 0);
-  let html = '';
-  for (let i = 0; i < cells; i += 1) {
-    const side = i < strongHands ? strong : weak;
-    const active = i === pos && plan.action === 'bet';
-    const cls = ['ps-cell', `side-${(side || '').toLowerCase() || 'none'}`, active ? 'now' : ''].join(' ');
-    html += `<div class="${cls}"><b>${side || '·'}</b><small>tay ${i + 1}</small></div>`;
-  }
-  box.innerHTML = html;
-}
-
 function renderChips(chips, plan) {
   const statusBox = $('#ba-chip-status');
   const detailBox = $('#ba-chip-detail');
@@ -207,7 +187,7 @@ function renderChips(chips, plan) {
   if (check.suggested_chips && check.suggested_chips.length && plan.side) {
     lines.push(`Cần bấm: ${check.suggested_chips.join(' + ')} (${check.suggested_chips.length} chip) = ${fmtMoney(check.expected)}`);
   } else if (check.expected) {
-    lines.push(`Kế hoạch: ${fmtMoney(check.expected)}`);
+    lines.push(`Lệnh: ${fmtMoney(check.expected)}`);
   }
   if (live && live.ok) {
     const parts = [];
@@ -293,26 +273,13 @@ function renderHistory(history, money) {
     .join('');
 }
 
-function renderBaLadder(config) {
-  const box = $('#ba-ladder-edit');
-  if (!box) return;
-  const ladder = config.ladder || [];
-  const signature = `${config.profile}|${ladder.join(',')}`;
-  if (box.dataset.signature === signature) return;
-  box.dataset.signature = signature;
-  const readonly = config.ladder_mode === 'multiply' ? 'readonly' : '';
-  box.innerHTML = ladder
-    .map((value, index) => `<label>Bậc ${index + 1}<input data-ba-ladder="${index}" type="number" min="1" step="10" value="${value}" ${readonly} /></label>`)
-    .join('');
-}
-
 function renderBaConfig(config) {
   if (!config) return;
   setValue('#ba-capital-input', config.capital);
   setValue('#ba-tp-input', config.take_profit_pct);
-  setValue('#ba-live-exit', config.live_exit_streak);
   setValue('#ba-tables-target', config.tables_to_play);
-  setValue('#ba-ladder-base', config.ladder_base);
+  setValue('#ba-bet-side', config.bet_side);
+  setValue('#ba-bet-stake', config.bet_stake);
   setValue('#ba-start-url', config.start_url);
   setValue('#ba-ai-mode', config.ai_mode);
   setValue('#ba-ai-url', config.ai_url);
@@ -322,12 +289,7 @@ function renderBaConfig(config) {
   setValue('#ba-live-trials', config.live_trials);
   setValue('#ba-live-markov', config.live_markov_weight);
 
-  $$('input[name="ba-profile"]').forEach((input) => { input.checked = input.value === config.profile; });
-  $$('input[name="ba-block-mode"]').forEach((input) => { input.checked = input.value === config.block_mode; });
-  $$('input[name="ba-ladder-mode"]').forEach((input) => { input.checked = input.value === config.ladder_mode; });
-
   const flags = {
-    '#ba-auto-cycle': config.auto_cycle,
     '#ba-auto-hunt': config.auto_hunt,
     '#ba-auto-recover': config.auto_recover,
     '#ba-favorites-only': config.favorites_only,
@@ -345,8 +307,6 @@ function renderBaConfig(config) {
   setValue('#ba-win-w', window.width);
   setValue('#ba-win-h', window.height);
   setValue('#ba-win-scale', window.percent);
-
-  renderBaLadder(config);
 }
 
 /* --- AI live: số liệu do engine tính, AI chỉ viết nhận định --- */
@@ -504,40 +464,39 @@ function renderBaccarat(snapshot) {
     }
   }
 
-  /* --- kế hoạch tay kế tiếp --- */
+  /* --- lệnh tay kế tiếp --- */
   const planState = $('#ba-plan-state');
   const planBox = $('#ba-plan');
   const planReason = $('#ba-plan-reason');
+  let reasonText = plan.reason || '';
   if (planState && planBox) {
     if (!table.key) {
       planState.textContent = 'CHƯA CÓ BÀN';
       planState.className = 'hero-state';
       planBox.textContent = 'Bấm “VÀO BÀN HỢP LỆ” để mở bàn đầu tiên có mã bàn.';
+      reasonText = '';
     } else if (money.blocked) {
       planState.textContent = 'ĐÃ CHẶN';
       planState.className = 'hero-state stop';
       planBox.textContent = String(money.blocked[1] || 'Phiên đã chạm ngưỡng dừng.');
     } else if (plan.action === 'bet') {
-      planState.textContent = plan.armed ? 'ĐÃ CHỐT' : 'ĐẶT';
+      planState.textContent = plan.armed ? 'ĐÃ CHỐT' : 'SẴN SÀNG';
       planState.className = 'hero-state bet';
-      planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)} · bậc ${(plan.ladder_step || 0) + 1}`
-        + `/ ${(table.ladder || []).length}`;
-    } else if (plan.action === 'halt') {
-      planState.textContent = 'DỪNG';
+      const source = plan.source === 'AUTO' ? 'AI/predict' : (SIDE_NAME[plan.source] || plan.source || 'UI');
+      planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)} · ${source}`;
+      if (plan.verdict) reasonText = `${plan.verdict} · ${reasonText}`;
+    } else if (plan.playable === false) {
+      planState.textContent = 'BỎ TAY';
       planState.className = 'hero-state stop';
-      planBox.textContent = plan.reason || 'Đã thua hết thang.';
-    } else if (plan.action === 'start') {
-      planState.textContent = 'BẮT ĐẦU';
-      planState.className = 'hero-state bet';
-      planBox.textContent = `Vào khối ${table.profile || ''} · ${plan.side_name || ''} ${fmtMoney(plan.stake)}`;
+      planBox.textContent = 'predict chốt bỏ tay (EV âm/nhiễu). Chọn P/B/T nếu vẫn muốn đặt.';
     } else {
       planState.textContent = 'CHỜ';
       planState.className = 'hero-state';
-      planBox.textContent = table.running ? 'Chờ tay mới để chốt kế hoạch.' : 'Chưa theo dõi bàn.';
+      planBox.textContent = table.running
+        ? 'Chọn cửa + chip rồi bấm “Tự đặt cược”.' : 'Chưa theo dõi bàn.';
     }
-    if (planReason) planReason.textContent = plan.reason || '';
   }
-  renderBlockStrip(table, plan);
+  if (planReason) planReason.textContent = reasonText;
 
   /* --- bàn đang theo dõi --- */
   setText('#ba-table-name', table.key ? `${table.name || table.key} · ${table.hands || 0} tay` : 'Chưa chọn bàn');
@@ -545,8 +504,6 @@ function renderBaccarat(snapshot) {
   const noteBits = [];
   if (table.key) {
     noteBits.push(table.running ? 'Đang theo dõi' : 'Đã dừng');
-    noteBits.push(`khối ${table.profile_label || table.profile || ''}`);
-    noteBits.push(`bậc ${Number(plan.ladder_step || 0) + 1}/${(table.ladder || []).length}`);
     if (table.entry_waiting) noteBits.push('chờ kết quả tay hiện tại');
     if (table.place_skips) noteBits.push(`bỏ ${table.place_skips} tay`);
   } else {
@@ -647,31 +604,32 @@ $('#ba-reset-session').addEventListener('click', async () => {
   if (reply) toast(reply.note || 'Đã reset phiên.');
 });
 
-$('#ba-save-ladder').addEventListener('click', async () => {
-  const profile = ($('input[name="ba-profile"]:checked') || {}).value || '3-3';
-  const blockMode = ($('input[name="ba-block-mode"]:checked') || {}).value || 'recalculate';
-  const ladderMode = ($('input[name="ba-ladder-mode"]:checked') || {}).value || 'manual';
-  const ladder = $$('#ba-ladder-edit input').map((input) => Number(input.value)).filter((value) => value > 0);
-  const params = {
-    profile,
-    block_mode: blockMode,
-    ladder_mode: ladderMode,
-    ladder_base: Number($('#ba-ladder-base').value),
+function betFormParams() {
+  return {
+    side: $('#ba-bet-side').value,
+    stake: Number($('#ba-bet-stake').value),
   };
-  if (ladderMode === 'manual' && ladder.length) params.ladder = ladder;
-  const reply = await call('baccarat', 'config.set', params);
-  if (reply) toast(reply.note || 'Đã lưu phương pháp & thang.');
+}
+
+$('#ba-bet-save').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'bet.config', betFormParams());
+  if (reply) toast(reply.note || 'Đã lưu lệnh cược.');
+});
+
+$('#ba-bet-place').addEventListener('click', async () => {
+  const saved = await call('baccarat', 'bet.config', betFormParams());
+  if (!saved) return;
+  const reply = await call('baccarat', 'bet.place');
+  if (reply) toast(reply.note || 'Đã gửi lệnh cược.');
 });
 
 $('#ba-save-options').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', {
-    auto_cycle: $('#ba-auto-cycle').checked,
     auto_hunt: $('#ba-auto-hunt').checked,
     auto_recover: $('#ba-auto-recover').checked,
     favorites_only: $('#ba-favorites-only').checked,
     human_mouse: $('#ba-human-mouse').checked,
     auto_place: $('#ba-auto-place').checked,
-    live_exit_streak: Number($('#ba-live-exit').value),
     tables_to_play: Number($('#ba-tables-target').value),
   });
   if (reply) toast(reply.note || 'Đã lưu tùy chọn.');
@@ -745,6 +703,21 @@ $('#ba-ai-save').addEventListener('click', async () => {
     live_markov_weight: Number($('#ba-live-markov').value),
   });
   if (reply) toast(reply.note || 'Đã lưu cấu hình AI.');
+});
+
+$('#ba-ai-key-save').addEventListener('click', async () => {
+  const key = $('#ba-ai-key').value.trim();
+  const reply = await call('baccarat', 'ai.key.set', { key });
+  if (reply) {
+    $('#ba-ai-key').value = '';
+    toast(reply.note || 'Đã lưu key trong phiên này.');
+  }
+});
+
+$('#ba-ai-key-clear').addEventListener('click', async () => {
+  $('#ba-ai-key').value = '';
+  const reply = await call('baccarat', 'ai.key.set', { key: '' });
+  if (reply) toast(reply.note || 'Đã xoá key tuỳ biến.');
 });
 
 /* ---------------------------------- khởi động ---------------------------------- */

@@ -23,7 +23,7 @@
       <div class="rail-title">TRÒ CHƠI</div>
       <button class="game active" data-game="baccarat">
         <span class="g-ico">B</span>
-        <span class="g-txt"><b>Baccarat</b><small>đọc cầu 3-3</small></span>
+        <span class="g-txt"><b>Baccarat</b><small>live + AI</small></span>
         <span class="g-led" data-led="baccarat"></span>
       </button>
       <div class="rail-foot">
@@ -38,7 +38,7 @@
         <div class="view-head">
           <div class="head-txt">
             <h1>BACCARAT</h1>
-            <p>Đọc cầu 3-3 / 3-2 · tự đặt chip theo kế hoạch · một engine riêng cho Baccarat</p>
+            <p>Đọc live Petalive + AI · tự đặt chip theo lệnh từng tay · một engine riêng cho Baccarat</p>
           </div>
           <div class="head-actions">
             <span class="chip" id="ba-chrome-chip" data-state="off">Chrome: chưa kết nối</span>
@@ -103,8 +103,26 @@
               </div>
               <div class="hero-main" id="ba-plan">Chưa có bàn — bấm “VÀO BÀN HỢP LỆ”.</div>
               <div class="hero-sub" id="ba-plan-reason"></div>
-              <div class="ps-title">KHỐI HIỆN TẠI</div>
-              <div class="plan-strip" id="ba-block-strip"></div>
+              <div class="bet-form">
+                <div class="bet-grid">
+                  <label class="field">Cửa
+                    <select id="ba-bet-side">
+                      <option value="AUTO">Theo AI (AUTO)</option>
+                      <option value="P">Player (P)</option>
+                      <option value="B">Banker (B)</option>
+                      <option value="T">Hoà (T)</option>
+                    </select>
+                  </label>
+                  <label class="field">Chip cố định (VN2)
+                    <input id="ba-bet-stake" type="number" min="1" max="1000000" step="10" />
+                  </label>
+                </div>
+                <div class="row bet-actions">
+                  <button class="btn primary" id="ba-bet-save">Lưu lệnh</button>
+                  <button class="btn" id="ba-bet-place">Tự đặt cược</button>
+                </div>
+                <p class="hint">Bấm “Tự đặt cược” để chốt lệnh tay kế: engine chờ bàn dọn hết chip rồi bấm chip thật. AUTO chỉ đặt khi <code>predict</code> cho phép.</p>
+              </div>
             </div>
 
             <div class="card pad">
@@ -181,7 +199,17 @@
               <label class="field">Trọng số Markov (0–1)
                 <input id="ba-live-markov" type="number" min="0" max="1" step="0.05" />
               </label>
-              <p class="hint">Chế độ <b>api</b> cần <code>BCR_AI_KEY</code> trong biến môi trường; chế độ <b>local</b> không cần key. Xác suất/EV do engine tính, AI chỉ giải thích và không được đổi quyết định.</p>
+              <p class="hint">Chế độ <b>api</b> cần key; chế độ <b>local</b> không cần key. Xác suất/EV do engine tính, AI chỉ giải thích và không được đổi quyết định.</p>
+              <div class="key-form">
+                <label class="field">API key tuỳ biến (chỉ RAM)
+                  <input id="ba-ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="Để trống = dùng BCR_AI_KEY" />
+                </label>
+                <div class="row">
+                  <button class="btn" id="ba-ai-key-save">Lưu key (phiên này)</button>
+                  <button class="btn" id="ba-ai-key-clear">Xoá key</button>
+                </div>
+                <p class="hint">Key nhập ở đây chỉ nằm trong bộ nhớ của engine: không ghi vào state, log hay snapshot. Nếu từng dán key vào nơi khác, hãy xoay key đó.</p>
+              </div>
               <button class="btn primary" id="ba-ai-save">Lưu cấu hình AI</button>
             </div>
           </div>
@@ -207,39 +235,19 @@
             </div>
 
             <div class="card pad">
-              <h3>Phương pháp vào cầu</h3>
-              <div class="radios" id="ba-profiles">
-                <label><input type="radio" name="ba-profile" value="3-3" /> 3-3 · 6 tay (3 mạnh + 3 đổi)</label>
-                <label><input type="radio" name="ba-profile" value="3-2" /> 3-2 · 5 tay (3 mạnh + 2 đổi)</label>
-              </div>
-              <div class="radios" id="ba-block-modes">
-                <label><input type="radio" name="ba-block-mode" value="recalculate" /> Tính lại bên mạnh sau mỗi khối</label>
-                <label><input type="radio" name="ba-block-mode" value="repeat" /> Lặp lại hướng khối đầu tiên</label>
-              </div>
-              <div class="radios" id="ba-ladder-modes">
-                <label><input type="radio" name="ba-ladder-mode" value="manual" /> Tự config — điền từng bậc</label>
-                <label><input type="radio" name="ba-ladder-mode" value="multiply" /> Tự nhân — 1-3-7-15-32-64</label>
-              </div>
-              <label class="field">Bậc 1 khi tự nhân (VN2)
-                <input id="ba-ladder-base" type="number" min="1" step="10" />
-              </label>
-              <div class="ladder-edit" id="ba-ladder-edit"></div>
-              <div class="row">
-                <button class="btn primary" id="ba-save-ladder">Lưu phương pháp &amp; thang</button>
-              </div>
+              <h3>Lệnh cược mỗi tay</h3>
+              <p class="hint">Đã bỏ các phương pháp chia khối, thang cược và ngưỡng thoát cũ. Trong tab <b>Bàn chơi</b>, chọn cửa (<b>AUTO</b>/P/B/T) và số chip cố định rồi bấm <b>Tự đặt cược</b>.</p>
+              <p class="hint"><b>AUTO</b> lấy cửa từ kết quả <code>predict</code>. AI chỉ viết nhận định: khi engine chốt <code>playable=false</code> hoặc <code>best_side=null</code> thì lệnh bị từ chối, dù AI nói khác.</p>
+              <p class="hint">Muốn tự ép cửa dù AI bảo bỏ tay, hãy chọn P/B/T thay vì AUTO.</p>
             </div>
 
             <div class="card pad">
-              <h3>Chu trình &amp; tùy chọn</h3>
-              <label class="switch"><input type="checkbox" id="ba-auto-cycle" /><span>Tự rời bàn khi hết khối / chốt lời</span></label>
+              <h3>Tùy chọn</h3>
               <label class="switch"><input type="checkbox" id="ba-auto-hunt" /><span>Tự săn bàn tới khi vào được</span></label>
               <label class="switch"><input type="checkbox" id="ba-auto-recover" /><span>Tự phục hồi phiên khi bị văng (EV.7)</span></label>
               <label class="switch"><input type="checkbox" id="ba-favorites-only" /><span>Chỉ quét bàn Ưa thích</span></label>
               <label class="switch"><input type="checkbox" id="ba-human-mouse" /><span>Chuột người thật khi bấm sảnh/ô bàn</span></label>
-              <label class="switch danger"><input type="checkbox" id="ba-auto-place" /><span>TỰ ĐẶT CHIP THẬT theo kế hoạch</span></label>
-              <label class="field">Trong bàn: thoát khi bệt đạt (tay)
-                <input id="ba-live-exit" type="number" min="1" max="12" step="1" />
-              </label>
+              <label class="switch danger"><input type="checkbox" id="ba-auto-place" /><span>TỰ ĐẶT CHIP THẬT theo lệnh UI</span></label>
               <label class="field">Số bàn muốn chơi
                 <input id="ba-tables-target" type="number" min="1" step="1" />
               </label>

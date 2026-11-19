@@ -204,17 +204,10 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 .door-amount { font-size: 18px; font-weight: 800; margin-top: 6px; }
 .door-foot { font-size: 11px; color: var(--muted); }
 
-.ladder-strip { margin-top: 12px; padding: 14px 16px; }
-.ls-title { font-size: 10px; letter-spacing: 1.3px; color: var(--muted); margin-bottom: 8px; }
-.ls-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.ls-cell {
-  min-width: 76px; padding: 8px 10px; border-radius: 10px; text-align: center;
-  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line);
-}
-.ls-cell b { display: block; font-size: 13px; }
-.ls-cell small { color: var(--muted); font-size: 10px; }
-.ls-cell.now { border-color: var(--gold); background: var(--gold-soft); }
-.ls-cell.done { opacity: 0.45; }
+.bet-form { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.bet-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.bet-actions { margin-top: 2px; }
+.bet-form .hint { margin: 8px 0 0; }
 
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--muted); margin-bottom: 12px; }
 .field input,
@@ -231,15 +224,11 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 .switch input { width: 16px; height: 16px; accent-color: var(--gold); }
 .switch.danger span { color: #ffb3bd; font-weight: 700; }
 
-.ladder-edit { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.ladder-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 10px; color: var(--muted); }
-.ladder-edit input {
-  background: #0d1728; border: 1px solid var(--line-strong); color: var(--text);
-  padding: 7px 9px; border-radius: 8px; font-weight: 700;
+.key-form {
+  margin: 10px 0 14px; padding: 12px; border: 1px solid var(--line);
+  border-radius: 12px; background: rgba(255, 255, 255, 0.02);
 }
-.ladder-edit input.dirty { border-color: var(--gold); box-shadow: 0 0 0 2px rgba(245, 196, 81, 0.16); }
-.ladder-actions { margin-top: 12px; align-items: center; }
-.ladder-actions .hint { margin-left: 4px; }
+.key-form .hint { margin: 8px 0 0; }
 
 .log-card { display: flex; flex-direction: column; height: 100%; }
 .log-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
@@ -293,19 +282,6 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 .hunt-banner.hidden { display: none; }
 .hunt-spin { color: var(--gold); font-size: 14px; }
 .hunt-text { flex: 1; font-size: 12px; color: #ffd9a0; }
-
-/* khối hiện tại */
-.ps-title { font-size: 10px; letter-spacing: 1.3px; color: var(--muted); margin: 14px 0 6px; }
-.plan-strip { display: flex; gap: 6px; flex-wrap: wrap; }
-.ps-cell {
-  min-width: 58px; padding: 6px 8px; border-radius: 9px; text-align: center;
-  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line);
-}
-.ps-cell b { display: block; font-size: 12px; }
-.ps-cell small { color: var(--muted); font-size: 10px; }
-.ps-cell.side-b b { color: #ff8393; }
-.ps-cell.side-p b { color: #7fb0ff; }
-.ps-cell.now { border-color: var(--gold); background: var(--gold-soft); }
 
 /* bàn đang theo dõi */
 .table-name { font-size: 15px; font-weight: 700; margin-bottom: 8px; }

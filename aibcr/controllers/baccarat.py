@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Tầng Controller · Baccarat: đọc cầu, chốt kế hoạch, đặt chip, săn bàn, phiên.
+"""Tầng Controller · Baccarat: đọc bàn, AI dự đoán, nhận lệnh cược từ UI, đặt chip.
 
 Chỉ điều phối Model (``aibcr.models``) và Adapter (``aibcr.adapters``); không dùng tkinter
 và không biết gì về Electron. Tầng transport (``aibcr.service.engine``) gọi
 ``dispatch`` để phục vụ giao diện Electron.
 
-Trách nhiệm:
-    - mở/gắn Chrome (CDP 9222) và MỘT nút duy nhất “VÀO BÀN HỢP LỆ”: tự nhận tab sảnh,
-      quét sảnh, mở bàn đầu tiên có mã, đọc cầu trong bàn (chưa đặt cược)
-    - đọc cầu bàn, chạy LiveSimulation, chốt kế hoạch cược 3-3 / 3-2
-    - tự đặt chip thật theo kế hoạch (gate "chờ ván mới" + xác nhận đã đặt)
-    - tự săn bàn (quét lại theo chu kỳ), chốt lời, đủ số bàn thì dừng
-    - lưu/khôi phục phiên (vốn, lãi/lỗ, thang cược, cấu hình) trong file state riêng
+Không còn phương pháp 3-3/3-2, thang cược hay khối mạnh/yếu. Mỗi tay người dùng cấu
+hình cửa + số chip trên UI (hoặc chọn “theo AI”), rồi bấm “Tự đặt cược”: controller
+chốt lệnh, chờ ván mới rồi bấm chip thật và đối chiếu xác nhận.
 
-Mọi tính toán tiền/cầu nằm ở ``aibcr.models``; mọi thao tác web nằm ở ``aibcr.adapters``.
-Module này chỉ điều phối; mọi tính toán nằm ở Model, mọi thao tác web ở Adapter.
+Trách nhiệm:
+    - mở/gắn Chrome (CDP 9222), nút “VÀO BÀN HỢP LỆ”, quét sảnh, theo dõi bàn
+    - chạy luồng live Petalive + AI (xác suất/EV do ``predict`` tính, AI chỉ giải thích)
+    - nhận lệnh ``bet.config`` / ``bet.place`` từ UI và tự đặt chip thật
+    - ghi lãi/lỗ, chốt lời, lưu/khôi phục phiên
+
+API key AI chỉ nằm trong RAM (``ai.key.set``), không ghi vào state file hay snapshot.
 """
 
 import collections
@@ -31,27 +32,23 @@ from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
 from aibcr.models import engine as E
-from aibcr.models import method as ME
 from aibcr.models import money as M
-from aibcr.models.live_sim import LiveSimulation, table_is_clear
+from aibcr.models.live_sim import (LiveSimulation, compare_chips, table_is_clear,
+                                   table_stats)
 
 # Cấu hình mặc định của tab Baccarat (đơn vị VN2 như hiển thị trên sàn).
 DEFAULT_CONFIG = {
     "capital": 3000.0,          # vốn phiên (VN2)
     "take_profit_pct": 25.0,    # chốt lời % vốn
-    "profile": ME.DEFAULT_PROFILE,
-    "ladder": None,             # None = dùng thang mặc định của phương pháp
-    "ladder_mode": "manual",    # manual | multiply
-    "ladder_base": 100.0,       # bậc 1 khi dùng cơ chế tự nhân
-    "block_mode": ME.BLOCK_MODE_RECALCULATE,
-    "live_exit_streak": ME.DEFAULT_LIVE_EXIT_STREAK,
     "favorites_only": True,
     "human_mouse": True,
-    "auto_place": True,
-    "auto_cycle": True,
+    "auto_place": True,         # cho phép bấm chip thật khi bấm “Tự đặt cược”
     "auto_hunt": True,
     "auto_recover": True,
     "tables_to_play": 1,
+    # Lệnh cược mặc định; UI có thể đổi từng tay. AUTO = lấy cửa từ AI.
+    "bet_side": "AUTO",         # AUTO | P | B | T
+    "bet_stake": 100.0,         # số chip cố định cho mỗi tay (VN2)
     "start_url": BR.START_URL,
     "chrome_window": {"width": 1280, "height": 800, "percent": 100, "fullscreen": False},
     # AI live (site Petalive): off | local | api. Key AI CHỈ đọc từ env BCR_AI_KEY.
@@ -118,6 +115,9 @@ class BaccaratController:
         self.live_session = None
         self.live_reader = None
         self.live_stop = threading.Event()
+        # API key nhập từ UI: CHỈ RAM. Không đưa vào self.config, state file hay snapshot.
+        self.ai_key_override = ""
+        self.bet_config = {"side": self.config["bet_side"], "stake": self.config["bet_stake"]}
 
         # cờ bận cho các thao tác web (giống controller Tk)
         self.chrome_busy = False
@@ -160,7 +160,7 @@ class BaccaratController:
         self.session_lost = False
         self.recover_attempts = 0
 
-        self.log("Engine Baccarat sẵn sàng (đọc bàn + tự đặt cược theo kế hoạch).")
+        self.log("Engine Baccarat sẵn sàng (đọc live + AI · tự đặt cược theo lệnh UI).")
 
     # ------------------------------------------------------------- cấu hình
     def _load_config(self):
@@ -180,23 +180,20 @@ class BaccaratController:
         return self.config
 
     def _normalize_config(self, config):
-        profile = config.get("profile")
-        if profile not in ME.PROFILES:
-            profile = ME.DEFAULT_PROFILE
-        config["profile"] = profile
+        # Dọn config của phiên cũ: không để 3-3/3-2 sống sót qua file state.
+        for key in ("profile", "ladder", "ladder_mode", "ladder_base", "block_mode",
+                    "live_exit_streak", "auto_cycle", "min_hands", "max_hands",
+                    "max_streak", "min_lead", "max_lead", "tie_side"):
+            config.pop(key, None)
         config["capital"] = max(1.0, _as_float(config.get("capital"), DEFAULT_CONFIG["capital"]))
         config["take_profit_pct"] = max(1.0, _as_float(config.get("take_profit_pct"),
                                                        DEFAULT_CONFIG["take_profit_pct"]))
-        config["ladder_mode"] = "multiply" if config.get("ladder_mode") == "multiply" else "manual"
-        config["ladder_base"] = max(1.0, _as_float(config.get("ladder_base"),
-                                                   DEFAULT_CONFIG["ladder_base"]))
-        if config.get("block_mode") not in (ME.BLOCK_MODE_RECALCULATE, ME.BLOCK_MODE_REPEAT):
-            config["block_mode"] = ME.BLOCK_MODE_RECALCULATE
-        config["live_exit_streak"] = ME.normalize_streak(config.get("live_exit_streak"),
-                                                         ME.DEFAULT_LIVE_EXIT_STREAK)
-        for key in ("favorites_only", "human_mouse", "auto_place", "auto_cycle",
-                    "auto_hunt", "auto_recover"):
+        for key in ("favorites_only", "human_mouse", "auto_place", "auto_hunt", "auto_recover"):
             config[key] = bool(config.get(key, DEFAULT_CONFIG[key]))
+        side = str(config.get("bet_side") or "AUTO").strip().upper()
+        config["bet_side"] = side if side in ("AUTO", "P", "B", "T") else "AUTO"
+        config["bet_stake"] = min(1000000.0, max(1.0, _as_float(
+            config.get("bet_stake"), DEFAULT_CONFIG["bet_stake"])))
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
         mode = str(config.get("ai_mode") or "off").strip().lower()
         config["ai_mode"] = mode if mode in ("off", "local", "api") else "off"
@@ -219,29 +216,13 @@ class BaccaratController:
         config["chrome_window"] = BR.normalize_window(
             (window.get("width"), window.get("height")),
             window.get("percent"), window.get("fullscreen"))
-        config["ladder"] = self._normalize_ladder(config.get("ladder"), config)
         return config
-
-    @staticmethod
-    def _normalize_ladder(ladder, config):
-        """Chuẩn hoá thang cược; sai/thiếu thì về thang mặc định của phương pháp."""
-        profile = config["profile"]
-        if config.get("ladder_mode") == "multiply" and ladder in (None, "", []):
-            ladder = ME.multiply_ladder(config["ladder_base"], profile)
-        try:
-            return [float(s) for s in ME.ladder_stakes(profile, ladder)]
-        except (ValueError, TypeError):
-            return [float(s) for s in ME.ladder_stakes(profile, None)]
 
     def _build_sim(self):
         config = self.config
-        stakes = config["ladder"]
-        book = M.MoneyBook(capital=config["capital"], unit=stakes[0],
+        book = M.MoneyBook(capital=config["capital"], unit=config["bet_stake"],
                            take_profit_pct=config["take_profit_pct"])
-        sim = LiveSimulation(book, profile=config["profile"], ladder=stakes,
-                             live_exit_streak=config["live_exit_streak"],
-                             block_mode=config["block_mode"])
-        sim.on_arm = self._place_armed_bet
+        sim = LiveSimulation(book, unit=config["bet_stake"])
         # Khôi phục sổ vốn + lịch sử tay của phiên trước (nếu có).
         saved = getattr(self, "_saved_session", {}) or {}
         if saved.get("format") == "live-v2-engine":
@@ -351,7 +332,7 @@ class BaccaratController:
             age = now - row["ts"]
             if age > LIVE_STALE and key != self.sim.table_key:
                 continue
-            info = ME.table_stats(list(row["letters"]))
+            info = table_stats(list(row["letters"]))
             if row.get("read_error"):
                 verdict = row["read_error"]
             elif row.get("table_id"):
@@ -390,18 +371,62 @@ class BaccaratController:
         rows.sort(key=lambda item: (not item["ready"], item["label"].casefold()))
         return rows
 
+    def _ai_suggestion(self):
+        """Cửa do ``predict`` chốt; AI chỉ được đưa nhận định, không đổi cửa.
+
+        ``analysis.focus_side`` là văn bản do AI trả về nên KHÔNG được dùng để chọn
+        cửa. Khi ``playable=false`` hoặc ``best_side=None`` thì luôn trả ``side=None``.
+        """
+        live = self.live_session.snapshot() if self.live_session is not None else None
+        result = {"side": None, "verdict": "", "playable": False, "confidence": "",
+                  "explanation": "", "model": "", "round": None}
+        if not live:
+            return result
+        analysis = live.get("analysis") or {}
+        prediction = live.get("prediction") or {}
+        result.update({
+            "verdict": str(analysis.get("verdict") or ""),
+            "confidence": str(analysis.get("confidence") or ""),
+            "explanation": str(analysis.get("explanation") or ""),
+            "model": str(analysis.get("model") or ""),
+            "round": analysis.get("round"),
+        })
+        if bool(prediction.get("playable")) and prediction.get("best_side") in ("P", "B", "T"):
+            result["side"] = prediction["best_side"]
+            result["playable"] = True
+        return result
+
+    def _resolve_order(self, params=None):
+        """Ghép lệnh từ cấu hình UI (mỗi tay) + gợi ý AI cho chế độ AUTO."""
+        params = params or {}
+        side = str(params.get("side", self.bet_config["side"])).strip().upper()
+        stake = _as_float(params.get("stake", self.bet_config["stake"]),
+                          self.bet_config["stake"])
+        suggestion = self._ai_suggestion()
+        reason = "Lệnh UI"
+        if side == "AUTO":
+            side = suggestion["side"]
+            reason = ("Theo AI · %s" % suggestion["verdict"]) if suggestion["verdict"] else "Theo AI"
+        return {"side": side if side in ("P", "B", "T") else None,
+                "stake": min(1000000.0, max(1.0, stake)),
+                "reason": reason, "suggestion": suggestion}
+
     def _plan(self):
-        plan = self.sim.pending or self.sim.plan()
+        """Lệnh cược hiện tại cho tay kế tiếp (do UI hoặc predict chốt)."""
+        order = self._resolve_order()
+        pending = self.sim.pending
         return {
-            "action": plan.get("action"),
-            "side": plan.get("side"),
-            "side_name": E.SIDE_NAME.get(plan.get("side"), ""),
-            "stake": float(plan.get("stake") or 0),
-            "reason": plan.get("reason", ""),
-            "block_pos": plan.get("block_pos", 0),
-            "ladder_step": plan.get("ladder_step", 0),
-            "strong": plan.get("strong"),
-            "armed": self.sim.pending is not None,
+            "action": "bet" if order["side"] else "wait",
+            "side": order["side"],
+            "side_name": E.SIDE_NAME.get(order["side"], ""),
+            "stake": order["stake"],
+            "reason": order["reason"],
+            "armed": pending is not None,
+            "verdict": order["suggestion"]["verdict"],
+            "playable": order["suggestion"]["playable"],
+            "confidence": order["suggestion"]["confidence"],
+            "ai_side": order["suggestion"]["side"],
+            "source": self.bet_config["side"],
         }
 
     def snapshot(self):
@@ -477,18 +502,17 @@ class BaccaratController:
                     "running": sim.running,
                     "entry_waiting": sim.entry_waiting,
                     "note": sim.note,
-                    "profile": sim.profile,
-                    "profile_label": ME.PROFILE_LABEL.get(sim.profile, sim.profile),
-                    "block_mode": sim.block_mode,
-                    "cycle_hands": sim.cycle_hands,
-                    "strong_hands": ME.strong_hands(sim.profile),
-                    "ladder": [float(s) for s in sim.ladder],
-                    "block_hands": sim.block_hands,
                     "place_skips": sim.place_skips,
                     "take_profit_done": bool(sim.take_profit_done),
-                    "filter_exit_done": bool(sim.filter_exit_done),
                 },
                 "plan": plan,
+                "bet": {
+                    "side": self.bet_config["side"],
+                    "stake": _finite(self.bet_config["stake"]),
+                    "pending": dict(sim.pending) if sim.pending else None,
+                    "ai_side": plan["ai_side"],
+                    "verdict": plan["verdict"],
+                },
                 "money": money,
                 "chips": {
                     "live": self.chip_live,
@@ -784,9 +808,8 @@ class BaccaratController:
     def leave_table(self, take_profit=False):
         """Rời bàn hiện tại về sảnh; take_profit=True nghĩa là đã chốt lời."""
         take_profit = bool(take_profit or getattr(self.sim, "take_profit_done", False))
-        filter_exit = bool(getattr(self.sim, "filter_exit_done", False))
-        if not take_profit and not filter_exit and not self.config["auto_cycle"]:
-            return {"ok": False, "error": "Đang tắt chu trình bàn nên không tự rời bàn."}
+        if not take_profit and not self.tool_running:
+            return {"ok": False, "error": "Chưa chốt lời và tool chưa chạy nên không tự rời bàn."}
         self.cycle_waiting = True
         self.cycle_attempts = 0
         self.cycle_table_key = self.sim.table_key
@@ -803,16 +826,17 @@ class BaccaratController:
         self.next_scan = 0.0
         self.session_lost = False
         # Đang đứng ở bàn đã xác nhận bằng nút “Vào bàn hợp lệ”: chuyển sang theo dõi
-        # ngay, vẫn chờ hết tay hiện tại rồi mới đặt cược.
+        # ngay. Lệnh cược chỉ được chốt khi bấm “Tự đặt cược” trên UI.
         if self.valid_check_done and self.sim.table_key:
             row = self.tables.get(self.sim.table_key)
             if row:
                 with self.lock:
-                    self.sim.arm_at_entry(row)
+                    self.sim.start(row)
                 self.valid_check_done = False
                 self.valid_note = "Tool đang chạy · " + self.sim.note
-        self.log("Chạy tool Baccarat: đọc bàn, chốt kế hoạch và %s." %
-                 ("tự đặt chip thật" if self.config["auto_place"] else "chỉ mô phỏng (không bấm chip)"))
+        self.log("Chạy tool Baccarat: đọc bàn + AI; %s." %
+                 ("sẵn sàng bấm chip theo lệnh UI" if self.config["auto_place"]
+                  else "đang tắt tự đặt chip"))
         self._push_state()
         # Bật tool = tự vào bàn hợp lệ nếu chưa đứng ở bàn nào (kể cả mở Chrome).
         if not self.sim.table_key and not self.enter_valid:
@@ -832,11 +856,13 @@ class BaccaratController:
 
     # -------------------------------------------------------------- đọc chip
     def chip_check(self):
-        plan = self.sim.pending or self.sim.plan()
+        pending = self.sim.pending
+        order = self._resolve_order() if pending is None else {
+            "side": pending.get("side"), "stake": pending.get("stake")}
         unit = (self.chip_live or {}).get("unit") or TB.DEFAULT_CHIP_UNIT
         try:
-            return ME.compare_chips(plan.get("side"), plan.get("stake") or 0,
-                                    self.chip_live, unit=unit)
+            return compare_chips(order.get("side"), order.get("stake") or 0,
+                                 self.chip_live, unit=unit)
         except Exception:
             return None
 
@@ -888,7 +914,7 @@ class BaccaratController:
 
     # ------------------------------------------------------- đặt chip tự động
     def _place_armed_bet(self, plan):
-        """Hook ``sim.on_arm``: đặt chip thật theo kế hoạch (chạy ở thread nền)."""
+        """Đặt chip thật theo lệnh đã chốt (chạy ở thread nền)."""
         if not self.config["auto_place"]:
             with self.lock:
                 self.sim.mark_placing(plan)
@@ -901,7 +927,7 @@ class BaccaratController:
             self.sim.mark_placing(plan)
         if not side or stake <= 0:
             with self.lock:
-                self.sim.mark_placed(False, "Chưa đặt: kế hoạch cược không hợp lệ.", plan)
+                self.sim.mark_placed(False, "Chưa đặt: lệnh cược không hợp lệ.", plan)
             return
         if self.place_busy:
             with self.lock:
@@ -963,38 +989,14 @@ class BaccaratController:
         changed = []
         with self.lock:
             config = dict(self.config)
-            if "profile" in params:
-                profile = params["profile"]
-                if profile in ME.PROFILES and profile != config["profile"]:
-                    config["profile"] = profile
-                    config["ladder"] = None      # về thang mặc định của phương pháp mới
-                    changed.append("profile")
-            if "live_exit_streak" in params:
-                config["live_exit_streak"] = params["live_exit_streak"]
-                changed.append("live_exit_streak")
-            if "block_mode" in params:
-                config["block_mode"] = params["block_mode"]
-                changed.append("block_mode")
-            if "ladder_mode" in params:
-                config["ladder_mode"] = params["ladder_mode"]
-                changed.append("ladder_mode")
-            if "ladder_base" in params:
-                config["ladder_base"] = params["ladder_base"]
-                changed.append("ladder_base")
-            if isinstance(params.get("ladder"), list) and params["ladder"]:
-                try:
-                    ME.ladder_stakes(config["profile"], params["ladder"])
-                except ValueError as exc:
-                    return {"ok": False, "error": str(exc)}
-                config["ladder"] = params["ladder"]
-                changed.append("ladder")
-            if (config["ladder_mode"] == "multiply" and "ladder" not in changed
-                    and ("ladder_base" in changed or "ladder_mode" in changed)):
-                config["ladder"] = ME.multiply_ladder(config["ladder_base"], config["profile"])
-            for key in ("favorites_only", "human_mouse", "auto_place", "auto_cycle",
+            for key in ("favorites_only", "human_mouse", "auto_place",
                         "auto_hunt", "auto_recover"):
                 if key in params:
                     config[key] = bool(params[key])
+                    changed.append(key)
+            for key in ("bet_side", "bet_stake"):
+                if key in params:
+                    config[key] = params[key]
                     changed.append(key)
             if "tables_to_play" in params:
                 config["tables_to_play"] = params["tables_to_play"]
@@ -1017,9 +1019,6 @@ class BaccaratController:
             for key in ("capital", "take_profit_pct"):
                 if key in params:
                     value = _as_float(params[key], normalized[key])
-                    if key == "capital" and value < float(normalized["ladder"][0]):
-                        return {"ok": False,
-                                "error": "Vốn phải ≥ bậc 1 (%s VN2)." % M.fmt_money(normalized["ladder"][0])}
                     if self.sim.money.hands_played and abs(value - float(self.config[key])) >= 0.005:
                         return {"ok": False,
                                 "error": "Phiên đã có %d tay; không đổi %s giữa phiên. "
@@ -1030,15 +1029,11 @@ class BaccaratController:
                     changed.append(key)
 
             self.config = normalized
-            # áp vào model
-            self.sim.profile = normalized["profile"]
-            self.sim.ladder = [float(s) for s in normalized["ladder"]]
-            self.sim.set_live_exit_streak(normalized["live_exit_streak"])
-            self.sim.block_mode = normalized["block_mode"]
+            self.bet_config = {"side": normalized["bet_side"], "stake": normalized["bet_stake"]}
             book = self.sim.money
             book.take_profit_pct = normalized["take_profit_pct"]
             if not book.hands_played:
-                book.unit = float(normalized["ladder"][0])
+                book.unit = float(normalized["bet_stake"])
                 book.capital = book.start_capital = book.balance = normalized["capital"]
                 book.peak = normalized["capital"]
                 book.max_drawdown = 0.0
@@ -1053,15 +1048,11 @@ class BaccaratController:
 
     # ---------------------------------------------------------------- phiên
     def session_reset(self):
-        """Reset phiên: xoá lịch sử tay, đưa thang về bậc 1 (giữ cấu hình)."""
+        """Reset phiên: xoá lịch sử tay, giữ cấu hình và lệnh cược hiện tại."""
         with self.lock:
-            stakes = [float(s) for s in self.config["ladder"]]
-            book = M.MoneyBook(capital=self.config["capital"], unit=stakes[0],
+            book = M.MoneyBook(capital=self.config["capital"], unit=self.config["bet_stake"],
                                take_profit_pct=self.config["take_profit_pct"])
-            sim = LiveSimulation(book, profile=self.config["profile"], ladder=stakes,
-                                 live_exit_streak=self.config["live_exit_streak"],
-                                 block_mode=self.config["block_mode"])
-            sim.on_arm = self._place_armed_bet
+            sim = LiveSimulation(book, unit=self.config["bet_stake"])
             self.sim = sim
             self.tables_done = 0
             self.cycle_waiting = False
@@ -1075,21 +1066,14 @@ class BaccaratController:
         return {"ok": True, "note": "Đã reset phiên."}
 
     def session_new(self, params):
-        """Tạo phiên mới từ vốn/chốt lời/thang/phương pháp mới (lưu bản sao state cũ)."""
+        """Tạo phiên mới từ vốn/chốt lời/lệnh cược mới (lưu bản sao state cũ)."""
         params = params or {}
         with self.lock:
             config = dict(self.config)
-            for key in ("capital", "take_profit_pct", "profile", "ladder", "ladder_mode",
-                        "ladder_base", "block_mode", "live_exit_streak"):
+            for key in ("capital", "take_profit_pct", "bet_side", "bet_stake"):
                 if key in params:
                     config[key] = params[key]
-            if config.get("ladder_mode") == "multiply" and ("ladder" not in params):
-                config["ladder"] = ME.multiply_ladder(config.get("ladder_base", 100),
-                                                      config.get("profile", ME.DEFAULT_PROFILE))
             config = self._normalize_config(config)
-            if config["capital"] < float(config["ladder"][0]):
-                return {"ok": False,
-                        "error": "Vốn phải ≥ bậc 1 (%s VN2)." % M.fmt_money(config["ladder"][0])}
             # lưu bản sao phiên cũ trước khi tạo mới
             try:
                 if self.state_path.exists():
@@ -1100,22 +1084,19 @@ class BaccaratController:
             except OSError:
                 pass
             self.config = config
-            stakes = [float(s) for s in config["ladder"]]
-            book = M.MoneyBook(capital=config["capital"], unit=stakes[0],
+            self.bet_config = {"side": config["bet_side"], "stake": config["bet_stake"]}
+            book = M.MoneyBook(capital=config["capital"], unit=config["bet_stake"],
                                take_profit_pct=config["take_profit_pct"])
-            sim = LiveSimulation(book, profile=config["profile"], ladder=stakes,
-                                 live_exit_streak=config["live_exit_streak"],
-                                 block_mode=config["block_mode"])
-            sim.on_arm = self._place_armed_bet
+            sim = LiveSimulation(book, unit=config["bet_stake"])
             self.sim = sim
             self.tables_done = 0
             self.cycle_waiting = False
             self.cycle_retry_at = 0.0
             self.chip_live = None
         self._save_state()
-        self.log("Đã tạo phiên mới: vốn %s VN2 · chốt lời %.0f%% · %s." % (
+        self.log("Đã tạo phiên mới: vốn %s VN2 · chốt lời %.0f%% · cược %s." % (
             M.fmt_money(self.config["capital"]), self.config["take_profit_pct"],
-            self.config["profile"]))
+            self.config["bet_side"]))
         self._push_state()
         return {"ok": True, "note": "Đã tạo phiên mới."}
 
@@ -1423,8 +1404,7 @@ class BaccaratController:
             return False
         if exclude_key:
             self.cycle_table_key = exclude_key
-        hunting = not (getattr(self.sim, "take_profit_done", False)
-                       or getattr(self.sim, "filter_exit_done", False))
+        hunting = not getattr(self.sim, "take_profit_done", False)
         first_attempt = hunting and self.cycle_attempts == 0
         self.cycle_attempts += 1
         wait = 0 if first_attempt else CYCLE_RETRY_SECONDS
@@ -1503,7 +1483,7 @@ class BaccaratController:
             self.lobby_sweep()
             return
         row = candidates[0]
-        info = ME.table_stats(list(row.get("letters") or ""))
+        info = table_stats(list(row.get("letters") or ""))
         self.sweep_note = "Đang mở %s (%d tay, bên mạnh %s)…" % (
             row["label"], info["hands"], E.SIDE_NAME.get(info["strong"], "—"))
         self.open_table(row["key"])
@@ -1520,7 +1500,7 @@ class BaccaratController:
                 self.auto_start_key = None
                 self._cycle_search(key)
             return
-        info = ME.table_stats(list(row.get("letters") or ""))
+        info = table_stats(list(row.get("letters") or ""))
         if self.enter_valid and not self.tool_running:
             # Nút “VÀO BÀN HỢP LỆ”: đã vào bàn → chỉ báo rồi đứng chờ người dùng bật
             # tool; tuyệt đối không arm/đặt chip ở đây.
@@ -1541,7 +1521,7 @@ class BaccaratController:
             self.log(self.valid_note, "win")
             return
         with self.lock:
-            started = self.sim.arm_at_entry(row)
+            started = self.sim.start(row)
             note = self.sim.note
             if started:
                 self.enter_valid = False
@@ -1565,17 +1545,15 @@ class BaccaratController:
 
     def _resume_cycle_hunt(self, now):
         take_profit = bool(getattr(self.sim, "take_profit_done", False))
-        filter_exit = bool(getattr(self.sim, "filter_exit_done", False))
         manual_enter = bool(self.enter_valid)
-        if not (self.cycle_waiting and (self.config["auto_hunt"] or manual_enter
-                                       or take_profit or filter_exit)
+        if not (self.cycle_waiting and (self.config["auto_hunt"] or manual_enter or take_profit)
                 and self.cycle_retry_at and now >= self.cycle_retry_at):
             return
         self.cycle_retry_at = 0.0
         if self.sim.running or self.auto_start_key:
             return
-        if take_profit or filter_exit:
-            self.leave_table(take_profit=take_profit)
+        if take_profit:
+            self.leave_table(take_profit=True)
             return
         if self.session_lost:
             self._try_recover_session()
@@ -1721,6 +1699,7 @@ class BaccaratController:
 
     # ------------------------------------------------------------- AI live
     def _live_cfg(self):
+        """Config an toàn, được trả về snapshot/UI — KHÔNG chứa API key."""
         cfg = self.config
         return {
             "decks": cfg["live_decks"],
@@ -1733,9 +1712,15 @@ class BaccaratController:
             "ai_timeout": cfg["ai_timeout"],
         }
 
+    def _live_cfg_private(self):
+        """Chỉ dùng khi tạo/cấu hình LiveSession; key không bao giờ ra snapshot."""
+        cfg = self._live_cfg()
+        cfg["ai_key"] = self.ai_key_override
+        return cfg
+
     def _apply_live_config(self):
         if self.live_session is not None:
-            self.live_session.configure(**self._live_cfg())
+            self.live_session.configure(**self._live_cfg_private())
 
     def live_snapshot(self):
         if self.live_session is None:
@@ -1763,7 +1748,7 @@ class BaccaratController:
             session = LiveSession(
                 on_prediction=self._emit_live,
                 on_status=lambda text, level="info": self.log("AI live: %s" % text, level),
-                **self._live_cfg())
+                **self._live_cfg_private())
             session.running = True
             reader = LiveReader(on_round=session.on_round, on_state=session.on_state,
                                 on_status=lambda text, level="info":
@@ -1803,6 +1788,64 @@ class BaccaratController:
         self._emit_live(self.live_snapshot())
         return result
 
+    def ai_key_set(self, params):
+        """Nhận API key từ UI: chỉ lưu RAM, không ghi file/log/snapshot."""
+        params = params or {}
+        key = str(params.get("key") or "").strip()[:300]
+        with self.lock:
+            self.ai_key_override = key
+            self._apply_live_config()
+        return {"ok": True, "has_key": bool(key),
+                "note": "Đã lưu API key trong phiên này (chỉ RAM)." if key
+                        else "Đã xoá API key tuỳ biến; dùng BCR_AI_KEY nếu có."}
+
+    def bet_config_set(self, params):
+        """Cấu hình lệnh cho tay kế tiếp: cửa (AUTO/P/B/T) + số chip cố định."""
+        params = params or {}
+        with self.lock:
+            side = str(params.get("side", self.bet_config["side"])).strip().upper()
+            if side not in ("AUTO", "P", "B", "T"):
+                return {"ok": False, "error": "Cửa phải là AUTO, P, B hoặc T."}
+            stake = _as_float(params.get("stake", self.bet_config["stake"]),
+                              self.bet_config["stake"])
+            if not 1.0 <= stake <= 1000000.0:
+                return {"ok": False, "error": "Số chip phải nằm trong 1 – 1.000.000 VN2."}
+            self.bet_config = {"side": side, "stake": stake}
+            self.config["bet_side"] = side
+            self.config["bet_stake"] = stake
+        self._save_state()
+        self._push_state()
+        return {"ok": True, "side": side, "stake": stake,
+                "note": "Lệnh tay kế: %s · %s VN2." % (side, M.fmt_money(stake))}
+
+    def bet_place(self):
+        """Nút “Tự đặt cược”: chốt lệnh rồi bấm chip thật (có gate chờ ván mới)."""
+        with self.lock:
+            if not self.config["auto_place"]:
+                return {"ok": False, "error": "Đang tắt tự đặt chip — bật lại trong Cấu hình."}
+            if self.place_busy:
+                return {"ok": False, "error": "Lượt bấm chip trước chưa xong."}
+            if not self.sim.table_key:
+                return {"ok": False, "error": "Chưa vào bàn — bấm “VÀO BÀN HỢP LỆ” trước."}
+            if not self.tool_running:
+                return {"ok": False, "error": "Chưa chạy tool — bấm “Chạy tool” rồi mới đặt cược."}
+            if self.sim.entry_waiting:
+                return {"ok": False, "error": "Đang chờ tay hiện tại kết thúc; thử lại khi bàn sẵn sàng."}
+            order = self._resolve_order()
+            if self.bet_config["side"] == "AUTO" and not order["suggestion"]["playable"]:
+                return {"ok": False, "error": ("predict chốt BỎ TAY (EV âm/nhiễu). Hãy chọn cửa thủ "
+                                               "công nếu vẫn muốn đặt.")}
+            if not order["side"]:
+                return {"ok": False, "error": "Chưa có cửa để đặt: hãy chọn P/B/T hoặc bật AI live."}
+            pending = self.sim.set_order(order["side"], order["stake"], reason=order["reason"])
+            if pending is None:
+                return {"ok": False, "error": "Lệnh cược không hợp lệ."}
+        self._place_armed_bet(pending)
+        self._push_state()
+        return {"ok": True, "side": order["side"], "stake": order["stake"],
+                "note": "Đã gửi lệnh %s · %s VN2 · đang chờ ván mới để bấm chip." % (
+                    E.SIDE_NAME[order["side"]], M.fmt_money(order["stake"]))}
+
     # ------------------------------------------------------------- dispatch
     def dispatch(self, method, params):
         params = params or {}
@@ -1841,6 +1884,9 @@ class BaccaratController:
             "live.stop": lambda p: self.live_stop(),
             "live.state": lambda p: self.live_state(),
             "live.analyze": lambda p: self.live_analyze(),
+            "ai.key.set": self.ai_key_set,
+            "bet.config": self.bet_config_set,
+            "bet.place": lambda p: self.bet_place(),
         }
         handler = table.get(method)
         if handler is None:

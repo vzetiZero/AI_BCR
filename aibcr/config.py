@@ -20,7 +20,7 @@ ENTER_VALID_TIMEOUT = 240
 # Vòng tự tìm bàn không có trần số lần: nghỉ CYCLE_RETRY_SECONDS giữa hai lượt quét.
 CYCLE_RETRY_SECONDS = 15
 CHIP_REFRESH = 3
-# Gate "chờ ván mới": sau khi chốt kế hoạch, chờ tối đa BET_GATE_TIMEOUT giây để bàn
+# Gate "chờ ván mới": sau khi chốt lệnh cược, chờ tối đa BET_GATE_TIMEOUT giây để bàn
 # dọn hết chip (cả 3 cửa về 0) rồi mới tự bấm — tránh bấm chồng lên ván cũ còn đang
 # hiển thị/gom chip. BET_GATE_POLL là nhịp đọc lại trong lúc chờ.
 BET_GATE_TIMEOUT = 20.0
