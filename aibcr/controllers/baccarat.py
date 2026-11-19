@@ -28,6 +28,8 @@ from aibcr.adapters import browser as BR
 from aibcr.adapters import lobby_stream as LS
 from aibcr.adapters import table_bets as TB
 from aibcr.config import *  # noqa: F401,F403
+from aibcr.live.reader import LiveReader
+from aibcr.live.session import LiveSession
 from aibcr.models import engine as E
 from aibcr.models import method as ME
 from aibcr.models import money as M
@@ -52,6 +54,15 @@ DEFAULT_CONFIG = {
     "tables_to_play": 1,
     "start_url": BR.START_URL,
     "chrome_window": {"width": 1280, "height": 800, "percent": 100, "fullscreen": False},
+    # AI live (site Petalive): off | local | api. Key AI CHỈ đọc từ env BCR_AI_KEY.
+    "ai_mode": "api",
+    "ai_url": "https://api.vilao.ai/v1/chat/completions",
+    "ai_model": "chib/deepseek-v4.1-flash",
+    "ai_every": 5,          # gọi AI mỗi N ván
+    "ai_timeout": 8,        # ngắn hơn cửa cược ~25s
+    "live_decks": 8,
+    "live_trials": 20000,
+    "live_markov_weight": 0.15,
 }
 
 
@@ -102,6 +113,11 @@ class BaccaratController:
         self.tool_running = False
         self._stop = threading.Event()
         self._thread = None
+
+        # Luồng AI live (WebSocket Petalive) — chạy riêng, không chặn _loop().
+        self.live_session = None
+        self.live_reader = None
+        self.live_stop = threading.Event()
 
         # cờ bận cho các thao tác web (giống controller Tk)
         self.chrome_busy = False
@@ -182,6 +198,18 @@ class BaccaratController:
                     "auto_hunt", "auto_recover"):
             config[key] = bool(config.get(key, DEFAULT_CONFIG[key]))
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
+        mode = str(config.get("ai_mode") or "off").strip().lower()
+        config["ai_mode"] = mode if mode in ("off", "local", "api") else "off"
+        ai_url = str(config.get("ai_url") or "").strip()[:300]
+        config["ai_url"] = ai_url if (not ai_url or
+                                      ai_url.startswith(("http://", "https://"))) else ""
+        config["ai_model"] = str(config.get("ai_model") or "").strip()[:80]
+        config["ai_every"] = min(60, max(1, _as_int(config.get("ai_every"), 5)))
+        config["ai_timeout"] = min(30, max(2, _as_int(config.get("ai_timeout"), 8)))
+        config["live_decks"] = min(16, max(1, _as_int(config.get("live_decks"), 8)))
+        config["live_trials"] = min(200000, max(100, _as_int(config.get("live_trials"), 20000)))
+        config["live_markov_weight"] = max(0.0, min(1.0, _as_float(
+            config.get("live_markov_weight"), DEFAULT_CONFIG["live_markov_weight"])))
         url = config.get("start_url")
         config["start_url"] = url if isinstance(url, str) and BR.valid_site_url(url.strip()) \
             else BR.START_URL
@@ -469,6 +497,7 @@ class BaccaratController:
                 },
                 "place": dict(self.place_status),
                 "tables": self.table_rows(),
+                "live": self.live_snapshot(),
                 "config": json.loads(json.dumps(self.config)),
                 "history": history,
                 "log_tail": list(sim.log[-15:]),
@@ -973,6 +1002,15 @@ class BaccaratController:
             if "start_url" in params:
                 config["start_url"] = params["start_url"]
                 changed.append("start_url")
+            for key in ("ai_mode", "ai_url", "ai_model"):
+                if key in params:
+                    config[key] = params[key]
+                    changed.append(key)
+            for key in ("ai_every", "ai_timeout", "live_decks", "live_trials",
+                        "live_markov_weight"):
+                if key in params:
+                    config[key] = params[key]
+                    changed.append(key)
 
             normalized = self._normalize_config(config)
             # đổi vốn / chốt lời chỉ khi chưa có tay nào, tránh làm sai lãi/lỗ
@@ -1006,6 +1044,7 @@ class BaccaratController:
                 book.max_drawdown = 0.0
             book.check_limits()
             self.stream.human_mouse = normalized["human_mouse"]
+            self._apply_live_config()
             self._save_state()
 
         self.log("Đã lưu cấu hình: %s." % (", ".join(sorted(set(changed))) or "không đổi"))
@@ -1680,6 +1719,90 @@ class BaccaratController:
             self.offline_noted = False
             self.next_scan = 0.0
 
+    # ------------------------------------------------------------- AI live
+    def _live_cfg(self):
+        cfg = self.config
+        return {
+            "decks": cfg["live_decks"],
+            "trials": cfg["live_trials"],
+            "markov_weight": cfg["live_markov_weight"],
+            "ai_mode": cfg["ai_mode"],
+            "ai_url": cfg["ai_url"],
+            "ai_model": cfg["ai_model"],
+            "ai_every": cfg["ai_every"],
+            "ai_timeout": cfg["ai_timeout"],
+        }
+
+    def _apply_live_config(self):
+        if self.live_session is not None:
+            self.live_session.configure(**self._live_cfg())
+
+    def live_snapshot(self):
+        if self.live_session is None:
+            return {
+                "ok": False, "running": False, "table": "", "rounds": 0,
+                "prediction": None, "analysis": None,
+                "ai": {"mode": self.config["ai_mode"], "available": False,
+                       "busy": False, "error": ""},
+                "config": self._live_cfg(),
+                "note": "Chưa bật AI live — bấm “Bật AI live” để đọc bàn Petalive.",
+            }
+        return self.live_session.snapshot()
+
+    def _emit_live(self, data=None):
+        try:
+            self.emit.event("live_prediction", data if data is not None else self.live_snapshot())
+        except Exception:
+            pass
+
+    def live_start(self):
+        with self.lock:
+            if self.live_reader is not None:
+                return {"ok": True, "note": "AI live đã chạy."}
+            self.live_stop.clear()
+            session = LiveSession(
+                on_prediction=self._emit_live,
+                on_status=lambda text, level="info": self.log("AI live: %s" % text, level),
+                **self._live_cfg())
+            session.running = True
+            reader = LiveReader(on_round=session.on_round, on_state=session.on_state,
+                                on_status=lambda text, level="info":
+                                self.log("AI live: %s" % text, level),
+                                port=getattr(BR, "CDP_PORT", 9222), stop=self.live_stop)
+            self.live_session = session
+            self.live_reader = reader
+        reader.start()
+        self.log("AI live: đang chờ tab bàn Petalive qua CDP.", "info")
+        self._push_state()
+        return {"ok": True, "note": "Đã bật AI live · chờ tab bàn Petalive."}
+
+    def live_stop(self):
+        with self.lock:
+            reader = self.live_reader
+            session = self.live_session
+            self.live_reader = None
+            self.live_session = None
+        self.live_stop.set()
+        if reader is not None:
+            reader.join(timeout=2)
+        if session is not None:
+            session.running = False
+        self._emit_live(self.live_snapshot())
+        self._push_state()
+        return {"ok": True, "note": "Đã tắt AI live."}
+
+    def live_state(self):
+        return self.live_snapshot()
+
+    def live_analyze(self):
+        with self.lock:
+            session = self.live_session
+        if session is None:
+            return {"ok": False, "error": "Chưa bật AI live."}
+        result = session.analyze_now()
+        self._emit_live(self.live_snapshot())
+        return result
+
     # ------------------------------------------------------------- dispatch
     def dispatch(self, method, params):
         params = params or {}
@@ -1714,6 +1837,10 @@ class BaccaratController:
             "session.recover": lambda p: self.session_recover(),
             "log.clear": lambda p: {"ok": True},
             "export": lambda p: {"log": list(self.sim.log)},
+            "live.start": lambda p: self.live_start(),
+            "live.stop": lambda p: self.live_stop(),
+            "live.state": lambda p: self.live_state(),
+            "live.analyze": lambda p: self.live_analyze(),
         }
         handler = table.get(method)
         if handler is None:
@@ -1725,6 +1852,10 @@ class BaccaratController:
 
     def shutdown(self):
         self.stop()
+        try:
+            self.live_stop()
+        except Exception:
+            pass
         try:
             self._save_state()
         except Exception:

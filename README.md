@@ -143,9 +143,36 @@ python tools/bcr_live.py --ai                    # thêm phần diễn giải AI
 Mỗi ván in lá bài + điểm, cửa thắng, và xác suất/EV cho ván kế. Dự đoán chạy local
 20k ván Monte Carlo ≈ 0,15 giây (100k ≈ 0,8 giây), đủ nhanh cho cửa sổ cược 25 giây.
 
-AI API (OpenAI-compatible) **không** tham gia quyết định: số liệu do `predict.py`
-tính, AI chỉ viết lời giải thích. Đặt `BCR_AI_KEY`/`BCR_AI_MODEL`/`BCR_AI_URL` trong
-biến môi trường; không lưu key vào repo.
+### AI trên giao diện Electron
+
+Tab **AI dự đoán** (cạnh *Bàn chơi*) bật/tắt luồng live mà không cần terminal:
+
+1. Chọn nguồn: `off` · `local` (Ollama/llama.cpp, **không cần key**) · `api`
+   (OpenAI-compatible, cần key). Endpoint/model mặc định trong dự án:
+   `https://api.vilao.ai/v1/chat/completions` và `chib/deepseek-v4.1-flash`.
+2. Bấm **Lưu cấu hình AI**, rồi **Bật AI live**. Engine gắn CDP 9222, đọc WebSocket
+   bàn Petalive, cập nhật shoe và gọi AI mỗi N ván (mặc định 5) trong **thread riêng**
+   — không chặn vòng quét/đặt chip.
+3. Panel hiện: xác suất P/B/T, EV tốt nhất ± sai số, % shoe đã chia, verdict
+   (`BỎ TAY` / `Cân nhắc` / `Đánh`), mức tin cậy, rủi ro và giải thích. Nút
+   **Phân tích ngay** gọi AI ngay cho ván kế.
+
+API được cấu hình sẵn qua config (không nhạy cảm). **Key tuyệt đối không lưu vào
+repo**: đặt biến môi trường `BCR_AI_KEY` trước khi chạy `Start.bat`, ví dụ PowerShell:
+
+```
+$env:BCR_AI_KEY = "<key của bạn>"
+.\Start.bat
+```
+
+Các biến tuỳ chọn khác: `BCR_AI_MODE`, `BCR_AI_MODEL`, `BCR_AI_URL`, `BCR_AI_TIMEOUT`.
+Luồng CLI dùng chung module `aibcr/live/ai.py`, nhưng `Session` của CLI vẫn nằm riêng
+trong `tools/bcr_live.py` (có seed để backtest).
+
+**AI API không tham gia quyết định**: số liệu do `predict.py` tính local, AI chỉ viết
+lời giải thích. `playable = false` (EV âm hoặc nằm trong nhiễu Monte Carlo) thì verdict
+bị ép thành `BỎ TAY` dù AI trả khác. Không hứa thắng; EV Baccarat âm ở mọi cửa khi shoe
+cân bằng nên phần lớn ván nên đứng ngoài.
 
 Lưu ý trung thực: EV của Baccarat luôn âm ở mọi cửa khi shoe cân bằng, nên
 `predict` trả `playable = false` và khuyến nghị bỏ tay; card counting chỉ có ý nghĩa
@@ -165,6 +192,7 @@ chrome.open|attach|close|window|status,
 lobby.enter|sweep|back,
 tables, table.enterValid|cancelEnter|open|select|leave,
 tool.start|stop, scan, chips.read,
+live.start|stop|state|analyze,
 config.get|set, session.new|reset|recover, log.clear, export
 ```
 

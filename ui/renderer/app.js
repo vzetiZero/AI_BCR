@@ -314,6 +314,13 @@ function renderBaConfig(config) {
   setValue('#ba-tables-target', config.tables_to_play);
   setValue('#ba-ladder-base', config.ladder_base);
   setValue('#ba-start-url', config.start_url);
+  setValue('#ba-ai-mode', config.ai_mode);
+  setValue('#ba-ai-url', config.ai_url);
+  setValue('#ba-ai-model', config.ai_model);
+  setValue('#ba-ai-every', config.ai_every);
+  setValue('#ba-ai-timeout', config.ai_timeout);
+  setValue('#ba-live-trials', config.live_trials);
+  setValue('#ba-live-markov', config.live_markov_weight);
 
   $$('input[name="ba-profile"]').forEach((input) => { input.checked = input.value === config.profile; });
   $$('input[name="ba-block-mode"]').forEach((input) => { input.checked = input.value === config.block_mode; });
@@ -340,6 +347,68 @@ function renderBaConfig(config) {
   setValue('#ba-win-scale', window.percent);
 
   renderBaLadder(config);
+}
+
+/* --- AI live: số liệu do engine tính, AI chỉ viết nhận định --- */
+function renderAiPanel(live) {
+  if (!live) return;
+  const badge = $('#ba-ai-live-state');
+  const verdict = $('#ba-ai-verdict');
+  const numbers = $('#ba-ai-numbers');
+  const probsBox = $('#ba-ai-probs');
+  const risk = $('#ba-ai-risk');
+  const explain = $('#ba-ai-explain');
+  const meta = $('#ba-ai-meta');
+
+  if (!live.running) {
+    if (badge) { badge.textContent = 'CHƯA BẬT'; badge.className = 'hero-state'; }
+    if (verdict) verdict.textContent = live.note || 'Bấm “Bật AI live” để đọc bàn Petalive.';
+    if (numbers) numbers.textContent = '—';
+    if (probsBox) probsBox.innerHTML = '';
+    if (risk) risk.textContent = '';
+    if (explain) explain.textContent = '';
+    if (meta) meta.textContent = '';
+    return;
+  }
+
+  const pred = live.prediction || {};
+  const analysis = live.analysis || {};
+  const ai = live.ai || {};
+  if (badge) {
+    badge.textContent = analysis.verdict ? 'CÓ AI' : (ai.busy ? 'ĐANG HỎI AI' : 'ĐANG ĐỌC');
+    badge.className = 'hero-state' + (analysis.verdict ? ' bet' : '');
+  }
+  if (verdict) verdict.textContent = analysis.verdict || pred.recommendation || 'Chờ ván đầu tiên…';
+
+  const probs = pred.probabilities || {};
+  const ev = pred.ev || {};
+  if (numbers) {
+    if (pred.ok) {
+      const bestEv = Math.max(...['P', 'B', 'T'].map((side) => Number(ev[side] || 0)));
+      numbers.textContent = `P ${pct((probs.p_player || 0) * 100)} · B ${pct((probs.p_banker || 0) * 100)}`
+        + ` · T ${pct((probs.p_tie || 0) * 100)} · EV tốt nhất ${bestEv >= 0 ? '+' : ''}${bestEv.toFixed(4)}`;
+    } else {
+      numbers.textContent = pred.error || 'Chưa có dự đoán.';
+    }
+  }
+  if (probsBox) {
+    const keyOf = { P: 'p_player', B: 'p_banker', T: 'p_tie' };
+    probsBox.innerHTML = ['P', 'B', 'T'].map((side) => {
+      const value = Number((probs[keyOf[side]] || 0) * 100);
+      const width = Math.max(0, Math.min(100, value)).toFixed(1);
+      return `<div class="ai-prob-row"><span>${SIDE_NAME[side]}</span>`
+        + `<div class="ai-bar"><span style="width:${width}%"></span></div><b>${width}%</b></div>`;
+    }).join('');
+  }
+  if (risk) risk.textContent = analysis.risk ? `Rủi ro: ${analysis.risk}` : '';
+  if (explain) explain.textContent = analysis.explanation || '';
+  if (meta) {
+    const bits = [live.table || '?', `${live.rounds || 0} ván`, ai.model || ''];
+    if (analysis.round && analysis.round !== live.rounds) bits.push(`AI ở ván ${analysis.round}`);
+    if (analysis.confidence) bits.push(`tin cậy: ${analysis.confidence}`);
+    if (ai.error) bits.push(`lỗi AI: ${ai.error}`);
+    meta.textContent = bits.filter(Boolean).join(' · ');
+  }
 }
 
 function renderBaccarat(snapshot) {
@@ -495,6 +564,7 @@ function renderBaccarat(snapshot) {
 
   renderTables(snapshot.tables || []);
   renderBaConfig(config);
+  renderAiPanel(snapshot.live);
   renderHistory(snapshot.history || [], money);
 }
 
@@ -502,6 +572,10 @@ function renderBaccarat(snapshot) {
 api.onEngineEvent(({ game, event, data }) => {
   if (event === 'state') {
     renderBaccarat(data);
+    return;
+  }
+  if (event === 'live_prediction') {
+    renderAiPanel(data);
     return;
   }
   if (event === 'log') {
@@ -642,6 +716,35 @@ $('#ba-export').addEventListener('click', async () => {
 $('#ba-clear-log').addEventListener('click', () => {
   state.logs.baccarat = [];
   renderLog('baccarat');
+});
+
+/* ------------------------------ AI live actions ------------------------------ */
+$('#ba-live-start').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'live.start');
+  if (reply) toast(reply.note || 'Đã bật AI live.');
+});
+
+$('#ba-live-stop').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'live.stop');
+  if (reply) toast(reply.note || 'Đã tắt AI live.');
+});
+
+$('#ba-live-analyze').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'live.analyze');
+  if (reply && reply.ok) toast('Đã phân tích xong.');
+});
+
+$('#ba-ai-save').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'config.set', {
+    ai_mode: $('#ba-ai-mode').value,
+    ai_url: $('#ba-ai-url').value.trim(),
+    ai_model: $('#ba-ai-model').value.trim(),
+    ai_every: Number($('#ba-ai-every').value),
+    ai_timeout: Number($('#ba-ai-timeout').value),
+    live_trials: Number($('#ba-live-trials').value),
+    live_markov_weight: Number($('#ba-live-markov').value),
+  });
+  if (reply) toast(reply.note || 'Đã lưu cấu hình AI.');
 });
 
 /* ---------------------------------- khởi động ---------------------------------- */

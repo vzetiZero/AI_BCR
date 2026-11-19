@@ -49,6 +49,7 @@
 
         <nav class="subtabs" data-subtabs="baccarat">
           <button class="active" data-sub="play">Bàn chơi</button>
+          <button data-sub="ai">AI dự đoán</button>
           <button data-sub="config">Cấu hình</button>
           <button data-sub="history">Lịch sử</button>
           <button data-sub="log">Nhật ký</button>
@@ -128,6 +129,60 @@
             </div>
             <div class="tbl-list" id="ba-tables">
               <p class="hint">Chưa quét. Bấm “VÀO BÀN HỢP LỆ” (cần Chrome đã mở sảnh Baccarat).</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---------------- AI DỰ ĐOÁN ---------------- -->
+        <div class="subview hidden" data-game="baccarat" data-sub="ai">
+          <div class="grid two">
+            <div class="card hero">
+              <div class="hero-top">
+                <div class="hero-label">AI · TAY KẾ TIẾP</div>
+                <div class="hero-state" id="ba-ai-live-state">CHƯA BẬT</div>
+              </div>
+              <div class="hero-main" id="ba-ai-verdict">Chưa bật luồng AI live.</div>
+              <div class="hero-sub" id="ba-ai-numbers">—</div>
+              <div class="ai-probs" id="ba-ai-probs"></div>
+              <div class="ai-risk" id="ba-ai-risk"></div>
+              <div class="ai-explain" id="ba-ai-explain"></div>
+              <div class="ai-meta" id="ba-ai-meta"></div>
+              <div class="row ai-actions">
+                <button class="btn primary" id="ba-live-start">Bật AI live</button>
+                <button class="btn" id="ba-live-stop">Tắt</button>
+                <button class="btn" id="ba-live-analyze">Phân tích ngay</button>
+              </div>
+            </div>
+
+            <div class="card pad">
+              <h3>Cấu hình AI</h3>
+              <label class="field">Nguồn AI
+                <select id="ba-ai-mode">
+                  <option value="off">Tắt</option>
+                  <option value="local">Local (Ollama / endpoint localhost)</option>
+                  <option value="api">AI API (OpenAI-compatible)</option>
+                </select>
+              </label>
+              <label class="field">Endpoint (trống = mặc định)
+                <input id="ba-ai-url" type="text" placeholder="http://127.0.0.1:11434/v1/chat/completions" />
+              </label>
+              <label class="field">Model (trống = mặc định)
+                <input id="ba-ai-model" type="text" placeholder="qwen2.5:7b-instruct" />
+              </label>
+              <label class="field">Gọi AI mỗi N ván
+                <input id="ba-ai-every" type="number" min="1" max="60" step="1" />
+              </label>
+              <label class="field">Timeout (giây)
+                <input id="ba-ai-timeout" type="number" min="2" max="30" step="1" />
+              </label>
+              <label class="field">Số ván Monte Carlo
+                <input id="ba-live-trials" type="number" min="100" max="200000" step="1000" />
+              </label>
+              <label class="field">Trọng số Markov (0–1)
+                <input id="ba-live-markov" type="number" min="0" max="1" step="0.05" />
+              </label>
+              <p class="hint">Chế độ <b>api</b> cần <code>BCR_AI_KEY</code> trong biến môi trường; chế độ <b>local</b> không cần key. Xác suất/EV do engine tính, AI chỉ giải thích và không được đổi quyết định.</p>
+              <button class="btn primary" id="ba-ai-save">Lưu cấu hình AI</button>
             </div>
           </div>
         </div>
