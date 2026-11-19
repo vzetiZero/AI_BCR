@@ -421,6 +421,7 @@ function renderBaccarat(snapshot) {
     toolButton.classList.toggle('danger-btn', !!snapshot.tool_running);
   }
   if (snapshot.chrome_connected) chromeSeen.baccarat = true;
+  syncOpenChromeButton('#ba-open-chrome', 'baccarat', snapshot);
   const led = $('[data-led="baccarat"]');
   if (led) led.classList.toggle('on', !!snapshot.tool_running || !!snapshot.chrome_connected);
 
@@ -557,6 +558,11 @@ $$('[data-subtabs]').forEach((nav) => {
 });
 
 /* ------------------------------ BACCARAT actions ------------------------------ */
+$('#ba-open-chrome').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'chrome.open');
+  if (reply) toast(reply.note || (reply.error ? reply.error : 'Đang mở Chrome…'));
+});
+
 $('#ba-enter-valid').addEventListener('click', async () => {
   const reply = await call('baccarat', 'table.enterValid');
   if (reply) toast(reply.note || 'Đang tìm bàn hợp lệ…');
