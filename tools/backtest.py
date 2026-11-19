@@ -155,16 +155,6 @@ def main():
     report("Mốc so sánh: cược đều 100k cửa Player mọi tay",
            [play_flat(s, E.PLAYER) for s in dataset])
 
-    # Bao nhiêu ván đủ điều kiện vào theo nguyên tắc 1
-    eligible = 0
-    for s in dataset:
-        for i in range(ME.MIN_HANDS, min(len(s), ME.MAX_HANDS + 1)):
-            if ME.check_table(s[:i])["eligible"]:
-                eligible += 1
-                break
-    print("\nNguyên tắc 1 (lọc bàn): %d/%d ván (%.1f%%) có thời điểm đủ điều kiện để vào."
-          % (eligible, shoes, eligible / shoes * 100))
-
 
 if __name__ == "__main__":
     main()

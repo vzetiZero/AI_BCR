@@ -6,13 +6,13 @@ pipeline thật của controller (dispatch → thread nền → hàng đợi s�
 bấm ô bàn → xác nhận cầu). Chỉ rút ngắn *nhịp chờ* (quét 4 s, săn lại 15 s) để test
 chạy nhanh; không bỏ qua bước nào.
 
-Khoá lại 5 điều:
+Khoá lại các điều:
 
-    1. Chỉ một lệnh ``table.enterValid`` là đủ để đi từ sảnh tới đúng bàn đạt chuẩn.
-    2. Bàn không đạt bị loại, bàn Siêu Tốc Độ bị bỏ, bàn đạt được chọn.
+    1. Chỉ một lệnh ``table.enterValid`` là đủ để đi từ sảnh tới bàn đầu tiên có mã.
+    2. Không còn lọc cầu: bàn bệt / bàn Siêu Tốc Độ vẫn được vào nếu đứng trước.
     3. Vào bàn xong thì ĐỨNG YÊN: không arm kế hoạch, không bấm chip, phiên chưa chạy.
     4. Bật tool sau đó mới chuyển sang theo dõi (và vẫn chờ hết tay hiện tại).
-    5. Không có bàn đạt / quá hạn chờ thì báo rõ, không treo chế độ.
+    5. Không có bàn nào có mã / quá hạn chờ thì báo rõ, không treo chế độ.
 """
 
 import pathlib
@@ -23,10 +23,10 @@ import unittest
 from aibcr.controllers import baccarat as BA
 from aibcr.service import engine
 
-# B 13 · P 9 (lệch 4), bệt tối đa 3, không có cầu 3-3 → đạt cả 5 điều kiện lọc.
+# B 13 · P 9 (lệch 4), bệt tối đa 3, không có cầu 3-3.
 GOOD = "".join(side * count for side, count in (
     ("B", 3), ("P", 2), ("B", 3), ("P", 2), ("B", 2), ("P", 3), ("B", 2), ("P", 2), ("B", 3)))
-# Bệt 6 tay liền ở đầu → vượt max_streak, phải bị loại.
+# Bệt 6 tay liền ở đầu — trước đây bị loại, nay không còn lọc nên vẫn vào được.
 BET = "BBBBBB" + "PPBBPPBBPPBBPPBB" + "PPBB"
 
 
@@ -125,7 +125,7 @@ class EnterValidPipelineTests(unittest.TestCase):
             time.sleep(0.02)
         return until(service) if until is not None else True
 
-    def test_one_button_goes_from_lobby_to_the_eligible_table(self):
+    def test_one_button_enters_the_first_table_with_an_id(self):
         service = self.build([
             tile("bet", "Bàn bệt", BET),
             tile("fast", "Bàn 7 Siêu Tốc Độ", GOOD),
@@ -134,9 +134,9 @@ class EnterValidPipelineTests(unittest.TestCase):
         reply = service.dispatch("table.enterValid", {})[0]
         self.assertTrue(reply["ok"], reply)
 
-        # Đọc sảnh xong phải bấm đúng bàn 12 (bỏ bàn bệt và bàn siêu tốc).
+        # Không còn lọc cầu: mở đúng ô bàn đầu tiên có mã (bàn bệt).
         self.assertTrue(self.drain(service, lambda s: bool(s.stream.opened)))
-        self.assertEqual(service.stream.opened, ["ok"], service.stream.opened)
+        self.assertEqual(service.stream.opened, ["bet"], service.stream.opened)
         self.assertGreaterEqual(service.stream.sweeps, 1)
 
     def test_after_opening_the_tool_stays_idle_and_places_no_bet(self):
@@ -173,14 +173,23 @@ class EnterValidPipelineTests(unittest.TestCase):
         self.assertTrue(self.drain(service, lambda s: bool(s.stream.opened)))
         self.assertEqual(service.stream.opened, ["ok"])
 
-    def test_no_eligible_table_keeps_hunting_instead_of_stopping(self):
-        service = self.build([tile("bet", "Bàn bệt", BET)])
+    def test_no_table_with_an_id_keeps_hunting_instead_of_stopping(self):
+        service = self.build([tile("", "Bàn không mã", BET)])
         service.enter_valid_table()
         self.assertTrue(self.drain(service, lambda s: s.stream.sweeps >= 2))
         self.assertEqual(service.stream.opened, [])
         self.assertFalse(service.valid_check_done)
         self.assertIsNone(service.sim.table_key)
         self.assertTrue(service.enter_valid, "vẫn đang tìm, chưa bỏ cuộc")
+
+    def test_flat_and_fast_tables_are_not_skipped(self):
+        service = self.build([
+            tile("fast", "Bàn 7 Siêu Tốc Độ", GOOD),
+            tile("ok", "Bàn 12", GOOD),
+        ])
+        service.enter_valid_table()
+        self.assertTrue(self.drain(service, lambda s: bool(s.stream.opened)))
+        self.assertEqual(service.stream.opened, ["fast"])
 
     def test_hitting_the_deadline_reports_and_stops(self):
         service = self.build([tile("bet", "Bàn bệt", BET)])

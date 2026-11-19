@@ -34,8 +34,3 @@ PLACE_SKIP_LIMIT = 3
 # vài giây bấm/đọc chip). Quá hạn mà chưa có xác nhận thì coi như không đặt được — nhờ
 # vậy thread chết giữa chừng không khiến việc tính tay bị treo vĩnh viễn.
 PLACE_CONFIRM_TIMEOUT = 60.0
-
-# Bàn Siêu Tốc Độ (Super Speed) có cửa sổ đặt cược quá ngắn: chờ khay chip render, đọc
-# mệnh giá, lượt chuột và xác nhận đã vượt cửa sổ nên tay luôn bị bỏ (not_placed).
-# Không tự vào các bàn này khi săn bàn để khỏi đốt tay; người dùng vẫn tự mở được.
-FAST_TABLE_MARKERS = ("siêu tốc", "super speed", "superspeed")

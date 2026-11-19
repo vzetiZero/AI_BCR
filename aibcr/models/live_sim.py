@@ -9,16 +9,24 @@ thử được bằng dữ liệu thuần.
 import re
 import time
 
-from aibcr.config import *  # noqa: F401,F403  (BET_GATE_*, PLACE_*, LIVE_STALE, FAST_TABLE_MARKERS)
+from aibcr.config import *  # noqa: F401,F403  (BET_GATE_*, PLACE_*, LIVE_STALE)
 from aibcr.models import engine as E
 from aibcr.models import method as ME
 from aibcr.models import money as M
 
 
-def is_fast_table(label):
-    """True với bàn có nhịp cược quá nhanh để bấm chip kịp (Siêu Tốc Độ/Super Speed)."""
-    text = str(label or "").casefold()
-    return any(marker in text for marker in FAST_TABLE_MARKERS)
+def row_problem(row, now=None, check_fresh=True):
+    """Lỗi đọc dữ liệu thật sự (mất kết nối, dữ liệu cũ, xung đột) — không phải điều kiện vào bàn."""
+    now = time.time() if now is None else now
+    if not row:
+        return "Chưa có dữ liệu bàn. Mở Chrome, đăng nhập và chọn một bàn."
+    if check_fresh and now - row["ts"] > LIVE_STALE:
+        return "Dữ liệu quá %d giây chưa cập nhật. Đã dừng để tránh tính sai." % LIVE_STALE
+    if row.get("conflict"):
+        return "Có nhiều cầu khác nhau cùng tên bàn. Cần đối chiếu lại."
+    if row.get("read_error"):
+        return row["read_error"]
+    return ""
 
 def fresh_method():
     return {"started": False, "ladder_step": 0, "hands_in_block": 0, "strong": None}
@@ -66,40 +74,6 @@ def group_money_input(raw, caret):
                 return grouped, index
     return grouped, len(grouped)
 
-def road_is_current(row):
-    """Cầu đủ tin để chọn bàn: sảnh - hai nguồn (cầu đang vẽ + lịch sử WebSocket) cùng cho một chuỗi."""
-    if not row or row.get("conflict") or row.get("read_error") or not row.get("letters"):
-        return False
-    if row.get("source") == "evo-bead":
-        return row.get("screen_stable", 0) >= 2
-    return row.get("ws_confirmed_letters") == row["letters"] and row.get("stable", 0) >= 2
-
-def same_shoe(entry_letters, screen_letters):
-    """Cầu đã lọc ở sảnh và cầu trong bàn là một shoe: phần trùng nhau phải khớp đầu hoặc khớp cuối."""
-    if not entry_letters or not screen_letters:
-        return False
-    shared = min(len(entry_letters), len(screen_letters))
-    return (entry_letters[:shared] == screen_letters[:shared]
-            or entry_letters[-shared:] == screen_letters[-shared:])
-
-def row_problem(row, now=None, check_fresh=True):
-    now = time.time() if now is None else now
-    if not row:
-        return "Chưa có dữ liệu bàn. Mở Chrome, đăng nhập và chọn một bàn."
-    if check_fresh and now - row["ts"] > LIVE_STALE:
-        return "Dữ liệu quá %d giây chưa cập nhật. Đã dừng để tránh tính sai." % LIVE_STALE
-    if row.get("conflict"):
-        return "Có nhiều cầu khác nhau cùng tên bàn. Cần đối chiếu lại."
-    if row.get("read_error"):
-        return row["read_error"]
-    if row.get("game_type") and row["game_type"] != "baccarat":
-        return "Bàn trả thưởng đặc biệt: chưa hỗ trợ tính lãi/lỗ theo bàn chuẩn."
-    if row.get("stable", 0) < 2:
-        return "Chờ hai lần đọc giống nhau để xác nhận dữ liệu."
-    if not row.get("table_id") and (row["label"].lower().startswith("ban ") or not re.search(r"\d", row["label"])):
-        return "Chưa nhận diện rõ mã bàn. Không thể bắt đầu theo dõi."
-    return ""
-
 def table_is_clear(live):
     """True nếu đọc chip cho biết cả 3 cửa (B/P/T) đang trống — suy luận "ván mới".
 
@@ -121,24 +95,12 @@ def table_is_clear(live):
 
 class LiveSimulation:
     def __init__(self, book=None, profile=ME.DEFAULT_PROFILE, ladder=None,
-                 min_hands=ME.MIN_HANDS, max_hands=ME.MAX_HANDS,
-                 max_streak=ME.MAX_STREAK_ALLOWED,
                  live_exit_streak=ME.DEFAULT_LIVE_EXIT_STREAK,
-                 min_lead=ME.DEFAULT_MIN_LEAD,
-                 block_mode=ME.BLOCK_MODE_RECALCULATE,
-                 max_lead=None, tie_side=ME.DEFAULT_TIE_SIDE):
+                 block_mode=ME.BLOCK_MODE_RECALCULATE):
         self.money = book or M.MoneyBook()
         self.profile = profile
         self.ladder = ME.ladder_stakes(profile, ladder)
-        self.min_hands, self.max_hands = ME.normalize_hand_range(min_hands, max_hands)
-        self.max_streak = ME.normalize_streak(max_streak)
         self.live_exit_streak = ME.normalize_streak(live_exit_streak, ME.DEFAULT_LIVE_EXIT_STREAK)
-        self.min_lead = ME.normalize_min_lead(min_lead)
-        # Chặn hai đầu: lệch quá ít thì cầu dễ đổi, lệch quá nhiều thì cầu đã ngả hẳn.
-        self.max_lead = ME.normalize_max_lead(max_lead, None)
-        if self.max_lead is not None:
-            self.max_lead = max(self.min_lead, self.max_lead)
-        self.tie_side = ME.normalize_tie_side(tie_side)
         self.block_mode = (ME.BLOCK_MODE_REPEAT if block_mode == "alternate" else block_mode)
         self.block_mode = (self.block_mode if self.block_mode in
                            (ME.BLOCK_MODE_RECALCULATE, ME.BLOCK_MODE_REPEAT)
@@ -174,33 +136,7 @@ class LiveSimulation:
     def plan(self):
         s = self.method_state
         return ME.plan(self.results, self.ladder, s["ladder_step"], s["hands_in_block"],
-                       s["started"], s["strong"], self.profile,
-                       self.min_hands, self.max_hands, self.max_streak, self.block_mode,
-                       self.min_lead, max_lead=self.max_lead, tie_side=self.tie_side)
-
-    def set_road_filter(self, min_hands, max_hands, max_streak, min_lead=ME.DEFAULT_MIN_LEAD):
-        """Đổi bộ lọc cầu (khoảng tay đã đi + số tay bệt tối đa); kẹp trong biên của method."""
-        self.min_hands, self.max_hands = ME.normalize_hand_range(min_hands, max_hands)
-        self.max_streak = ME.normalize_streak(max_streak)
-        self.min_lead = ME.normalize_min_lead(min_lead)
-        if self.max_lead is not None:
-            self.max_lead = max(self.min_lead, self.max_lead)
-        return self.min_hands, self.max_hands, self.max_streak, self.min_lead
-
-    def set_lead_range(self, min_lead=None, max_lead="__keep__"):
-        """Đổi khoảng chênh lệch B/P: tối thiểu (bỏ trống = giữ) và tối đa (None = không giới hạn)."""
-        if min_lead is not None:
-            self.min_lead = ME.normalize_min_lead(min_lead)
-        if max_lead != "__keep__":
-            self.max_lead = ME.normalize_max_lead(max_lead, None)
-        if self.max_lead is not None:
-            self.max_lead = max(self.min_lead, self.max_lead)
-        return self.min_lead, self.max_lead
-
-    def set_tie_side(self, tie_side):
-        """Khi B = P: 'B' (đỏ, mặc định), 'P' hoặc 'run' (theo vệt hiện tại)."""
-        self.tie_side = ME.normalize_tie_side(tie_side)
-        return self.tie_side
+                       s["started"], s["strong"], self.profile, self.block_mode)
 
     def set_live_exit_streak(self, live_exit_streak):
         self.live_exit_streak = ME.normalize_streak(live_exit_streak, ME.DEFAULT_LIVE_EXIT_STREAK)
@@ -220,21 +156,13 @@ class LiveSimulation:
         self.entry_waiting = False
         self.note = "Đã chọn bàn."
 
-    def start(self, row, verified=False, now=None):
-        problem = row_problem(row, now)
-        if problem:
-            self.note = problem
-            return False
+    def start(self, row, now=None):
+        """Bắt đầu theo dõi bàn đã chọn (không còn điều kiện lọc cầu)."""
         if row["key"] != self.table_key:
             self.note = "Hãy chọn bàn trước."
             return False
         if row["letters"] != self.letters:
             self.bind(row)
-            self.note = "Cầu đã thay đổi trong lúc dừng. Đối chiếu và xác nhận lại."
-            return False
-        if not verified:
-            self.note = "Cần xác nhận cầu và loại bàn Baccarat chuẩn trước khi theo dõi."
-            return False
         if self.money.blocked:
             self.note = self.money.blocked[1]
             return False
@@ -260,10 +188,6 @@ class LiveSimulation:
 
     def arm_at_entry(self, row):
         """Begin an entry wait; arm only after the first new stable table result."""
-        problem = row_problem(row)
-        if problem:
-            self.note = problem
-            return False
         if self.money.blocked:
             self.note = self.money.blocked[1]
             return False
@@ -352,12 +276,8 @@ class LiveSimulation:
     def _exit_if_table_filter_failed(self, letters):
         """Rời bàn đang chơi CHỈ khi bệt hiện tại chạm ngưỡng thoát trong bàn.
 
-        Khoảng 10-50 tay và luật "chưa từng có 3-3" là bộ lọc CHỌN bàn ở sảnh, không
-        phải điều kiện sống trong bàn. Áp lại chúng lên cầu live làm app bỏ một bàn
-        đang chơi bình thường ngay khi vượt quá ``max_hands`` hoặc vừa xuất hiện cầu
-        3-3 — đúng hiện tượng "vào bàn vài giây rồi bị đá" trong aibcr_trace.jsonl.
-        Trong bàn chỉ còn ngưỡng thoát riêng (mặc định 7 tay bệt), khớp dòng cài đặt
-        "Trong bàn: thoát khi bệt đạt N tay".
+        Đây là ngưỡng thoát khi đang chơi (mặc định 7 tay bệt), không phải điều kiện
+        vào bàn: vào bàn không còn lọc cầu, nhưng đang chơi thì vẫn dừng khi bệt quá dài.
         """
         runs = E.run_lengths(letters)
         # Chỉ xét VỆT ĐANG CHẠY ở tay mới nhất (runs[-1]); dùng vệt dài nhất trong cả
@@ -369,8 +289,7 @@ class LiveSimulation:
             return False
         self.filter_exit_done = True
         self.cycle_done = True
-        self.pause("Bàn không còn đạt điều kiện lọc (bệt %s %d tay, ngưỡng thoát %d tay) · "
-                   "rời bàn và quét bàn khác." % (
+        self.pause("Bệt %s %d tay chạm ngưỡng thoát %d tay · rời bàn và quét bàn khác." % (
                        E.SIDE_NAME[streak_side], streak_len, self.live_exit_streak))
         return True
 
@@ -382,7 +301,7 @@ class LiveSimulation:
             return False
         letters = row["letters"]
         problem = row_problem(row, now, check_fresh=False)
-        if row.get("conflict") or row.get("read_error") or row.get("game_type", "baccarat") not in ("", "baccarat"):
+        if row.get("conflict") or row.get("read_error"):
             self.pause(problem)
             return False
         current_time = time.time() if now is None else now

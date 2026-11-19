@@ -15,7 +15,6 @@ const state = {
   logs: { baccarat: [] },
   sub: { baccarat: 'play' },
   tableSearch: '',
-  onlyEligible: false,
   lastLadderSignature: '',
   huntTick: 0,
 };
@@ -188,18 +187,6 @@ function renderBlockStrip(table, plan) {
   box.innerHTML = html;
 }
 
-function renderChecks(plan) {
-  const box = $('#ba-checks');
-  if (!box) return;
-  const checks = plan.checks || [];
-  if (!checks.length) { box.innerHTML = ''; return; }
-  box.innerHTML = checks
-    .map((check) => `<div class="check-line ${check.ok ? 'ok' : 'bad'}">
-      <span class="check-mark">${check.ok ? '✓' : '•'}</span>
-      <span>${escapeHtml(check.ok ? check.name : check.detail)}</span></div>`)
-    .join('');
-}
-
 function renderChips(chips, plan) {
   const statusBox = $('#ba-chip-status');
   const detailBox = $('#ba-chip-detail');
@@ -247,7 +234,6 @@ function renderTables(rows) {
   if (!box) return;
   const search = state.tableSearch.trim().toLowerCase();
   const list = (rows || []).filter((row) => {
-    if (state.onlyEligible && !row.eligible) return false;
     return !search || String(row.label || '').toLowerCase().includes(search);
   });
   if (title) title.textContent = `Bàn đọc được · ${list.length}`;
@@ -257,11 +243,10 @@ function renderTables(rows) {
   }
   box.innerHTML = list
     .map((row) => {
-      const tagClass = row.read_error ? 'bad' : row.ready ? 'ok' : row.eligible ? 'warn' : 'muted';
-      const tieText = row.tie_side === 'B' ? 'đỏ' : row.tie_side === 'P' ? 'xanh' : 'vệt';
+      const tagClass = row.read_error ? 'bad' : row.ready ? 'ok' : 'muted';
       const leadText = row.lead === null || row.lead === undefined
         ? ''
-        : ` · B ${row.banker} / P ${row.player} · lệch ${row.lead}${row.tie_break ? ` (hoà → ${tieText})` : ''}`;
+        : ` · B ${row.banker} / P ${row.player} · lệch ${row.lead}`;
       return `<div class="tbl-row ${row.current ? 'current' : ''}">
         <div class="tbl-main">
           <b>${escapeHtml(row.label || row.key)}</b>
@@ -325,11 +310,6 @@ function renderBaConfig(config) {
   if (!config) return;
   setValue('#ba-capital-input', config.capital);
   setValue('#ba-tp-input', config.take_profit_pct);
-  setValue('#ba-min-hands', config.min_hands);
-  setValue('#ba-max-hands', config.max_hands);
-  setValue('#ba-max-streak', config.max_streak);
-  setValue('#ba-min-lead', config.min_lead);
-  setValue('#ba-max-lead', config.max_lead);
   setValue('#ba-live-exit', config.live_exit_streak);
   setValue('#ba-tables-target', config.tables_to_play);
   setValue('#ba-ladder-base', config.ladder_base);
@@ -338,7 +318,6 @@ function renderBaConfig(config) {
   $$('input[name="ba-profile"]').forEach((input) => { input.checked = input.value === config.profile; });
   $$('input[name="ba-block-mode"]').forEach((input) => { input.checked = input.value === config.block_mode; });
   $$('input[name="ba-ladder-mode"]').forEach((input) => { input.checked = input.value === config.ladder_mode; });
-  $$('input[name="ba-tie-side"]').forEach((input) => { input.checked = input.value === (config.tie_side || 'B'); });
 
   const flags = {
     '#ba-auto-cycle': config.auto_cycle,
@@ -448,7 +427,7 @@ function renderBaccarat(snapshot) {
       const remain = Math.max(0, Math.round(cycle.retry_in || 0));
       setText('#ba-hunt-text', remain > 0
         ? `Đang tự săn bàn… nghỉ ${remain}s rồi quét lại (đã thử ${cycle.attempts || 0} lượt).`
-        : `Đang tự quét tìm bàn đạt chuẩn… (đã thử ${cycle.attempts || 0} lượt)`);
+        : `Đang tự quét sảnh tìm bàn có mã bàn… (đã thử ${cycle.attempts || 0} lượt)`);
       const cancel = $('#ba-hunt-cancel');
       if (cancel) cancel.textContent = 'Dừng tự quét';
     } else {
@@ -464,7 +443,7 @@ function renderBaccarat(snapshot) {
     if (!table.key) {
       planState.textContent = 'CHƯA CÓ BÀN';
       planState.className = 'hero-state';
-      planBox.textContent = 'Bấm “VÀO BÀN HỢP LỆ” để tìm và vào bàn đạt chuẩn.';
+      planBox.textContent = 'Bấm “VÀO BÀN HỢP LỆ” để mở bàn đầu tiên có mã bàn.';
     } else if (money.blocked) {
       planState.textContent = 'ĐÃ CHẶN';
       planState.className = 'hero-state stop';
@@ -490,7 +469,6 @@ function renderBaccarat(snapshot) {
     if (planReason) planReason.textContent = plan.reason || '';
   }
   renderBlockStrip(table, plan);
-  renderChecks(plan);
 
   /* --- bàn đang theo dõi --- */
   setText('#ba-table-name', table.key ? `${table.name || table.key} · ${table.hands || 0} tay` : 'Chưa chọn bàn');
@@ -574,11 +552,6 @@ $('#ba-search').addEventListener('input', (event) => {
   renderTables((state.baccarat && state.baccarat.tables) || []);
 });
 
-$('#ba-only-eligible').addEventListener('change', (event) => {
-  state.onlyEligible = !!event.target.checked;
-  renderTables((state.baccarat && state.baccarat.tables) || []);
-});
-
 $('#ba-save-money').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', {
     capital: Number($('#ba-capital-input').value),
@@ -616,19 +589,6 @@ $('#ba-save-ladder').addEventListener('click', async () => {
   if (reply) toast(reply.note || 'Đã lưu phương pháp & thang.');
 });
 
-$('#ba-save-filter').addEventListener('click', async () => {
-  const reply = await call('baccarat', 'config.set', {
-    min_hands: Number($('#ba-min-hands').value),
-    max_hands: Number($('#ba-max-hands').value),
-    max_streak: Number($('#ba-max-streak').value),
-    min_lead: Number($('#ba-min-lead').value),
-    max_lead: Number($('#ba-max-lead').value),
-    live_exit_streak: Number($('#ba-live-exit').value),
-    tie_side: ($('input[name="ba-tie-side"]:checked') || {}).value || 'B',
-  });
-  if (reply) toast(reply.note || 'Đã lưu bộ lọc cầu.');
-});
-
 $('#ba-save-options').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', {
     auto_cycle: $('#ba-auto-cycle').checked,
@@ -637,6 +597,7 @@ $('#ba-save-options').addEventListener('click', async () => {
     favorites_only: $('#ba-favorites-only').checked,
     human_mouse: $('#ba-human-mouse').checked,
     auto_place: $('#ba-auto-place').checked,
+    live_exit_streak: Number($('#ba-live-exit').value),
     tables_to_play: Number($('#ba-tables-target').value),
   });
   if (reply) toast(reply.note || 'Đã lưu tùy chọn.');

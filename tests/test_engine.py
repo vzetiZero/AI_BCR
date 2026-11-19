@@ -104,15 +104,25 @@ class DispatchTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_config_set_persists_and_applies_the_lead_window(self):
+    def test_config_set_persists_the_live_exit_threshold(self):
         service = make_service()
-        reply = service.config_set({"min_lead": 3, "max_lead": 4, "tie_side": "P"})
+        reply = service.config_set({"live_exit_streak": 9})
         self.assertTrue(reply["ok"], reply)
         saved = json.loads(service.state_path.read_text(encoding="utf-8"))["settings"]
-        self.assertEqual(saved["max_lead"], 4)
-        self.assertEqual(saved["tie_side"], "P")
-        self.assertEqual((service.sim.min_lead, service.sim.max_lead), (3, 4))
-        self.assertEqual(service.sim.tie_side, "P")
+        self.assertEqual(saved["live_exit_streak"], 9)
+        self.assertEqual(service.sim.live_exit_streak, 9)
+        self.assertNotIn("min_hands", saved)
+        self.assertNotIn("max_streak", saved)
+        self.assertNotIn("min_lead", saved)
+
+    def test_removed_filter_keys_are_ignored(self):
+        service = make_service()
+        reply = service.config_set({"min_hands": 20, "max_streak": 2, "min_lead": 5,
+                                    "max_lead": 3, "tie_side": "P"})
+        self.assertTrue(reply["ok"], reply)
+        for key in ("min_hands", "max_hands", "max_streak", "min_lead", "max_lead",
+                    "tie_side"):
+            self.assertNotIn(key, service.config)
 
     def test_invalid_start_url_falls_back_to_the_default(self):
         service = make_service()
@@ -180,12 +190,14 @@ class BaccaratEnterValidTests(unittest.TestCase):
         self.assertFalse(service.place_busy, "không được đặt chip")
         self.assertIn("CHƯA đặt cược", service.valid_note)
 
-    def test_enter_valid_rejects_a_different_shoe(self):
+    def test_enter_valid_accepts_any_road_inside_the_table(self):
+        """Không còn điều kiện cùng shoe: cầu trong bàn khác sảnh vẫn vào bình thường."""
         service = self.service()
         self.prime(service, letters="PPPBBB")
         service._auto_start_verified_table()
-        self.assertFalse(service.valid_check_done)
-        self.assertIsNone(service.auto_start_key, "phải bỏ bàn khác shoe")
+        self.assertTrue(service.valid_check_done)
+        self.assertIsNone(service.auto_start_key)
+        self.assertEqual(service.sim.table_key, "id:t1")
         self.assertFalse(service.sim.running)
 
     def test_tool_start_arms_the_verified_table(self):
@@ -267,65 +279,66 @@ class BaccaratEngineTests(unittest.TestCase):
         self.assertEqual(snapshot["tables"][0]["letters"], "BBBPPP")
 
 
-class BaccaratTableFilterTests(unittest.TestCase):
-    """Lọc bàn Baccarat: hoà điểm ưu tiên bên đỏ, chặn lệch B/P quá lớn (4-5 tay)."""
+class BaccaratNoFilterTests(unittest.TestCase):
+    """Không còn điều kiện vào bàn: mọi cầu đều được nhận và vào bàn đầu tiên có mã."""
 
     @staticmethod
     def road(*runs):
         """Ghép cầu từ các vệt (ký tự, số tay) để dễ kiểm soát số B/P và bệt."""
         return "".join(side * count for side, count in runs)
 
-    # B 13 · P 9 (lệch 4), không bệt quá 3 tay, không có hai vệt 3 liền nhau.
+    # B 13 · P 9, không bệt quá 3 tay, không có hai vệt 3 liền nhau.
     LEAD4 = road(("B", 3), ("P", 2), ("B", 3), ("P", 2), ("B", 2), ("P", 3),
                  ("B", 2), ("P", 2), ("B", 3))
-    # B 20 · P 10 (lệch 10) — vượt mức tối đa mặc định.
+    # B 20 · P 10 (lệch 10) — trước đây bị loại vì vượt mức tối đa.
     LEAD10 = road(("B", 3), ("P", 2), ("B", 2), ("P", 1), ("B", 3), ("P", 2),
                   ("B", 2), ("P", 1), ("B", 3), ("P", 2), ("B", 2), ("P", 1),
                   ("B", 3), ("P", 1), ("B", 2))
-    # Hoà điểm B 8 · P 8, vệt cuối là Player.
+    # Bệt 6 tay liền — trước đây bị loại vì vượt bệt tối đa.
+    STREAK = "BBBBBB" + "PPBBPPBBPPBBPPBB" + "PPBB"
+    # Hoà điểm B 8 · P 8.
     TIE = road(("B", 2), ("P", 3), ("B", 2), ("P", 2), ("B", 2), ("P", 2),
                ("B", 2), ("P", 1))
 
-    def service(self, letters, config=None):
-        return make_service(config=config, letters=letters)
+    def service(self, letters):
+        return make_service(letters=letters)
 
-    def test_default_window_accepts_a_four_hand_gap(self):
-        row = self.service(self.LEAD4).table_rows()[0]
-        self.assertEqual((row["banker"], row["player"], row["lead"]), (13, 9, 4))
-        self.assertTrue(row["eligible"], row["verdict"])
-        self.assertTrue(row["verdict"].startswith("Đạt 5/5"), row["verdict"])
+    def test_any_road_is_accepted(self):
+        for letters in (self.LEAD4, self.LEAD10, self.STREAK):
+            row = self.service(letters).table_rows()[0]
+            self.assertTrue(row["eligible"], row["verdict"])
+            self.assertEqual(row["verdict"], "Sẵn sàng vào bàn")
 
-    def test_gap_bigger_than_max_lead_is_rejected(self):
-        row = self.service(self.LEAD10).table_rows()[0]
-        self.assertEqual((row["banker"], row["player"], row["lead"]), (20, 10, 10))
-        self.assertFalse(row["eligible"])
-        self.assertIn("chỉ nhận ≤ 5", row["verdict"])
-
-    def test_config_can_widen_or_drop_the_upper_bound(self):
-        wide = self.service(self.LEAD10, {"max_lead": 10}).table_rows()[0]
-        self.assertTrue(wide["eligible"], wide["verdict"])
-        unlimited = self.service(self.LEAD10, {"max_lead": None}).table_rows()[0]
-        self.assertTrue(unlimited["eligible"], unlimited["verdict"])
-        self.assertEqual(len(unlimited["checks"]), 4)   # không còn điều kiện trần
-
-    def test_tie_prefers_red_banker_by_default(self):
+    def test_tie_prefers_red_banker(self):
         row = self.service(self.TIE).table_rows()[0]
         self.assertEqual((row["banker"], row["player"], row["lead"]), (8, 8, 0))
         self.assertTrue(row["tie_break"])
         self.assertEqual(row["strong"], "B")
-        self.assertEqual(row["tie_side"], "B")
-        self.assertFalse(row["eligible"])            # lệch 0 vẫn dưới mức tối thiểu
+        self.assertTrue(row["eligible"])
 
-    def test_tie_can_follow_the_running_streak(self):
-        row = self.service(self.TIE, {"tie_side": "run"}).table_rows()[0]
-        self.assertEqual(row["strong"], "P")         # vệt cuối là Player
-        self.assertEqual(row["tie_side"], "run")
+    def test_auto_open_takes_the_first_table_with_an_id(self):
+        service = make_service()
+        service.tool_running = True
+        stamp = time.time()
+        service.tables = {
+            "id:first": {"key": "id:first", "label": "Bàn bệt", "letters": self.STREAK,
+                         "ts": stamp, "table_id": "first", "game_type": "",
+                         "read_error": "", "source": "evo-bead", "conflict": False,
+                         "stable": 1, "screen_stable": 1, "ws_confirmed_letters": ""},
+            "id:second": {"key": "id:second", "label": "Bàn đẹp", "letters": self.LEAD4,
+                          "ts": stamp, "table_id": "second", "game_type": "",
+                          "read_error": "", "source": "evo-bead", "conflict": False,
+                          "stable": 3, "screen_stable": 3, "ws_confirmed_letters": self.LEAD4},
+        }
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service.auto_open_table()
+        self.assertEqual(opened, ["id:first"])
 
-    def test_new_session_keeps_the_lead_window(self):
-        service = self.service(self.LEAD4, {"max_lead": 4, "tie_side": "P"})
-        self.assertTrue(service.session_new({"capital": 2500})["ok"])
-        self.assertEqual((service.sim.min_lead, service.sim.max_lead), (3, 4))
-        self.assertEqual(service.sim.tie_side, "P")
+    def test_new_session_keeps_the_live_exit_threshold(self):
+        service = self.service(self.LEAD4)
+        self.assertTrue(service.session_new({"capital": 2500, "live_exit_streak": 5})["ok"])
+        self.assertEqual(service.sim.live_exit_streak, 5)
 
 
 class ChromeClosedRecoveryTests(unittest.TestCase):

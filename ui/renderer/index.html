@@ -104,7 +104,6 @@
               <div class="hero-sub" id="ba-plan-reason"></div>
               <div class="ps-title">KHỐI HIỆN TẠI</div>
               <div class="plan-strip" id="ba-block-strip"></div>
-              <div class="checks" id="ba-checks"></div>
             </div>
 
             <div class="card pad">
@@ -125,10 +124,6 @@
               <h3 id="ba-table-title">Bàn đọc được · 0</h3>
               <div class="row">
                 <input id="ba-search" class="mini-input" type="text" placeholder="tìm bàn…" />
-                <label class="switch inline-switch">
-                  <input type="checkbox" id="ba-only-eligible" />
-                  <span>Chỉ bàn đạt</span>
-                </label>
               </div>
             </div>
             <div class="tbl-list" id="ba-tables">
@@ -180,38 +175,6 @@
             </div>
 
             <div class="card pad">
-              <h3>Bộ lọc cầu</h3>
-              <div class="grid two tight">
-                <label class="field">Tay đã đi · min
-                  <input id="ba-min-hands" type="number" min="10" max="50" step="1" />
-                </label>
-                <label class="field">Tay đã đi · max
-                  <input id="ba-max-hands" type="number" min="10" max="50" step="1" />
-                </label>
-                <label class="field">Bệt tối đa
-                  <input id="ba-max-streak" type="number" min="1" max="12" step="1" />
-                </label>
-                <label class="field">Chênh lệch B/P min
-                  <input id="ba-min-lead" type="number" min="1" max="20" step="1" />
-                </label>
-                <label class="field">Chênh lệch B/P max
-                  <input id="ba-max-lead" type="number" min="1" max="20" step="1" />
-                </label>
-                <label class="field">Thoát bàn khi bệt
-                  <input id="ba-live-exit" type="number" min="1" max="12" step="1" />
-                </label>
-              </div>
-              <div class="field">Khi B = P (hoà điểm) thì ưu tiên
-                <div class="radios" id="ba-tie-sides">
-                  <label><input type="radio" name="ba-tie-side" value="B" /> Bên đỏ (Banker)</label>
-                  <label><input type="radio" name="ba-tie-side" value="P" /> Bên xanh (Player)</label>
-                  <label><input type="radio" name="ba-tie-side" value="run" /> Theo vệt đang chạy</label>
-                </div>
-              </div>
-              <button class="btn primary" id="ba-save-filter">Lưu bộ lọc</button>
-            </div>
-
-            <div class="card pad">
               <h3>Chu trình &amp; tùy chọn</h3>
               <label class="switch"><input type="checkbox" id="ba-auto-cycle" /><span>Tự rời bàn khi hết khối / chốt lời</span></label>
               <label class="switch"><input type="checkbox" id="ba-auto-hunt" /><span>Tự săn bàn tới khi vào được</span></label>
@@ -219,6 +182,9 @@
               <label class="switch"><input type="checkbox" id="ba-favorites-only" /><span>Chỉ quét bàn Ưa thích</span></label>
               <label class="switch"><input type="checkbox" id="ba-human-mouse" /><span>Chuột người thật khi bấm sảnh/ô bàn</span></label>
               <label class="switch danger"><input type="checkbox" id="ba-auto-place" /><span>TỰ ĐẶT CHIP THẬT theo kế hoạch</span></label>
+              <label class="field">Trong bàn: thoát khi bệt đạt (tay)
+                <input id="ba-live-exit" type="number" min="1" max="12" step="1" />
+              </label>
               <label class="field">Số bàn muốn chơi
                 <input id="ba-tables-target" type="number" min="1" step="1" />
               </label>

@@ -7,7 +7,7 @@ và không biết gì về Electron. Tầng transport (``aibcr.service.engine``)
 
 Trách nhiệm:
     - mở/gắn Chrome (CDP 9222) và MỘT nút duy nhất “VÀO BÀN HỢP LỆ”: tự nhận tab sảnh,
-      quét sảnh, chọn bàn đạt bộ lọc, bấm ô bàn và xác nhận cầu (chưa đặt cược)
+      quét sảnh, mở bàn đầu tiên có mã, đọc cầu trong bàn (chưa đặt cược)
     - đọc cầu bàn, chạy LiveSimulation, chốt kế hoạch cược 3-3 / 3-2
     - tự đặt chip thật theo kế hoạch (gate "chờ ván mới" + xác nhận đã đặt)
     - tự săn bàn (quét lại theo chu kỳ), chốt lời, đủ số bàn thì dừng
@@ -31,8 +31,7 @@ from aibcr.config import *  # noqa: F401,F403
 from aibcr.models import engine as E
 from aibcr.models import method as ME
 from aibcr.models import money as M
-from aibcr.models.live_sim import (LiveSimulation, is_fast_table, road_is_current,
-                                 row_problem, same_shoe, table_is_clear)
+from aibcr.models.live_sim import LiveSimulation, table_is_clear
 
 # Cấu hình mặc định của tab Baccarat (đơn vị VN2 như hiển thị trên sàn).
 DEFAULT_CONFIG = {
@@ -43,12 +42,6 @@ DEFAULT_CONFIG = {
     "ladder_mode": "manual",    # manual | multiply
     "ladder_base": 100.0,       # bậc 1 khi dùng cơ chế tự nhân
     "block_mode": ME.BLOCK_MODE_RECALCULATE,
-    "min_hands": ME.MIN_HANDS,
-    "max_hands": ME.MAX_HANDS,
-    "max_streak": ME.MAX_STREAK_ALLOWED,
-    "min_lead": ME.DEFAULT_MIN_LEAD,   # lệch B/P tối thiểu (bên mạnh phải hơn bên yếu)
-    "max_lead": ME.DEFAULT_MAX_LEAD,   # lệch B/P tối đa còn nhận (4-5 tay)
-    "tie_side": ME.DEFAULT_TIE_SIDE,   # B = P thì ưu tiên bên đỏ (Banker)
     "live_exit_streak": ME.DEFAULT_LIVE_EXIT_STREAK,
     "favorites_only": True,
     "human_mouse": True,
@@ -138,9 +131,8 @@ class BaccaratController:
         self.cycle_table_key = None
         self.tables_done = 0
 
-        # xác nhận bàn vừa mở trước khi tự theo dõi
+        # bàn vừa mở, chờ đọc được cầu rồi theo dõi
         self.auto_start_key = None
-        self.auto_start_letters = ""
         # Nút “Vào bàn hợp lệ”: tìm + mở + kiểm tra cầu nhưng KHÔNG theo dõi/đặt chip.
         self.enter_valid = False
         self.valid_check_done = False
@@ -167,11 +159,6 @@ class BaccaratController:
             for key in config:
                 if key in settings and settings[key] is not None:
                     config[key] = settings[key]
-            # tương thích state của app Tk (khoá khác tên)
-            if "hands_min" in settings:
-                config["min_hands"] = settings["hands_min"]
-            if "hands_max" in settings:
-                config["max_hands"] = settings["hands_max"]
         self._saved_session = saved if isinstance(saved, dict) else {}
         self.config = self._normalize_config(config)
         return self.config
@@ -189,18 +176,6 @@ class BaccaratController:
                                                    DEFAULT_CONFIG["ladder_base"]))
         if config.get("block_mode") not in (ME.BLOCK_MODE_RECALCULATE, ME.BLOCK_MODE_REPEAT):
             config["block_mode"] = ME.BLOCK_MODE_RECALCULATE
-        low, high = ME.normalize_hand_range(config.get("min_hands"), config.get("max_hands"))
-        config["min_hands"], config["max_hands"] = low, high
-        config["max_streak"] = ME.normalize_streak(config.get("max_streak"))
-        config["min_lead"] = ME.normalize_min_lead(config.get("min_lead"))
-        # "" / 0 / None / "none" = không giới hạn chênh lệch tối đa.
-        raw_max = config.get("max_lead", ME.DEFAULT_MAX_LEAD)
-        if raw_max is None or str(raw_max).strip().lower() in ("", "none", "off", "0"):
-            config["max_lead"] = None
-        else:
-            config["max_lead"] = max(config["min_lead"],
-                                     ME.normalize_max_lead(raw_max, ME.DEFAULT_MAX_LEAD))
-        config["tie_side"] = ME.normalize_tie_side(config.get("tie_side"))
         config["live_exit_streak"] = ME.normalize_streak(config.get("live_exit_streak"),
                                                          ME.DEFAULT_LIVE_EXIT_STREAK)
         for key in ("favorites_only", "human_mouse", "auto_place", "auto_cycle",
@@ -236,12 +211,8 @@ class BaccaratController:
         book = M.MoneyBook(capital=config["capital"], unit=stakes[0],
                            take_profit_pct=config["take_profit_pct"])
         sim = LiveSimulation(book, profile=config["profile"], ladder=stakes,
-                             min_hands=config["min_hands"], max_hands=config["max_hands"],
-                             max_streak=config["max_streak"],
                              live_exit_streak=config["live_exit_streak"],
-                             min_lead=config["min_lead"],
-                             block_mode=config["block_mode"],
-                             max_lead=config["max_lead"], tie_side=config["tie_side"])
+                             block_mode=config["block_mode"])
         sim.on_arm = self._place_armed_bet
         # Khôi phục sổ vốn + lịch sử tay của phiên trước (nếu có).
         saved = getattr(self, "_saved_session", {}) or {}
@@ -342,7 +313,7 @@ class BaccaratController:
 
     # ---------------------------------------------------------------- snapshot
     def table_rows(self):
-        """Danh sách bàn đọc được, kèm kết luận bộ lọc cầu cho UI."""
+        """Danh sách bàn đọc được (không còn chấm điều kiện lọc cầu)."""
         now = time.time()
         rows = []
         # Không còn Chrome thì không có dữ liệu sống: đừng hiện bàn cũ trên UI.
@@ -352,20 +323,13 @@ class BaccaratController:
             age = now - row["ts"]
             if age > LIVE_STALE and key != self.sim.table_key:
                 continue
-            info = ME.check_table(list(row["letters"]), self.sim.min_hands, self.sim.max_hands,
-                                  self.sim.max_streak, self.sim.min_lead,
-                                  max_lead=self.sim.max_lead, tie_side=self.sim.tie_side)
-            problem = row_problem(row)
-            ready = info["eligible"] and not problem and road_is_current(row)
-            passed = sum(1 for check in info["checks"] if check["ok"])
-            total = len(info["checks"])
+            info = ME.table_stats(list(row["letters"]))
             if row.get("read_error"):
                 verdict = row["read_error"]
-            elif info["eligible"]:
-                verdict = "Đạt %d/%d · cần đối chiếu" % (passed, total)
+            elif row.get("table_id"):
+                verdict = "Sẵn sàng vào bàn"
             else:
-                verdict = "%d/%d · %s" % (passed, total, next(c["detail"] for c in info["checks"]
-                                                              if not c["ok"]))
+                verdict = "Chưa có mã bàn"
             if row.get("conflict"):
                 status = "Xung đột"
             elif row.get("stable", 0) < 2:
@@ -374,10 +338,6 @@ class BaccaratController:
                 status = "Dữ liệu cũ"
             else:
                 status = "Mới · %ds" % int(age)
-            if row.get("game_type") and row["game_type"] != "baccarat":
-                status = "Bàn đặc biệt"
-            if is_fast_table(row.get("label")):
-                status += " · siêu tốc"
             rows.append({
                 "key": key,
                 "id": row.get("table_id") or key,
@@ -391,18 +351,15 @@ class BaccaratController:
                 "player": info.get("player"),
                 "lead": info.get("lead"),
                 "tie_break": info.get("tie_break"),
-                "tie_side": info.get("tie_side"),
-                "eligible": bool(info["eligible"]),
-                "ready": bool(ready),
+                "tie_side": E.BANKER,
+                "eligible": True,
+                "ready": bool(row.get("table_id")),
                 "verdict": verdict,
                 "status": status,
-                "checks": info["checks"],
-                "problem": problem,
                 "read_error": row.get("read_error", ""),
                 "current": key == self.sim.table_key,
             })
-        rows.sort(key=lambda item: (not item["ready"], not item["eligible"],
-                                    item["label"].casefold()))
+        rows.sort(key=lambda item: (not item["ready"], item["label"].casefold()))
         return rows
 
     def _plan(self):
@@ -416,7 +373,6 @@ class BaccaratController:
             "block_pos": plan.get("block_pos", 0),
             "ladder_step": plan.get("ladder_step", 0),
             "strong": plan.get("strong"),
-            "checks": plan.get("checks", []),
             "armed": self.sim.pending is not None,
         }
 
@@ -705,10 +661,7 @@ class BaccaratController:
             return {"ok": False, "error": "Không tìm thấy bàn trong danh sách đã quét."}
         if not row.get("table_id"):
             return {"ok": False, "error": "Bàn chưa có mã bàn nên không mở được từ sảnh."}
-        if row_problem(row):
-            return {"ok": False, "error": "Bàn chưa đạt: " + row_problem(row)}
         self.open_table_busy = True
-        self.auto_start_letters = row["letters"]
         self.sweep_note = "Đang mở %s…" % row["label"]
 
         def work():
@@ -730,7 +683,7 @@ class BaccaratController:
             return {"ok": False, "error": "Không tìm thấy bàn trong danh sách đã quét."}
         with self.lock:
             self.sim.bind(row)
-            started = self.sim.start(row, verified=True)
+            started = self.sim.start(row)
             note = self.sim.note
         self.chip_live = None
         self.chip_read_at = 0.0
@@ -744,8 +697,8 @@ class BaccaratController:
     def enter_valid_table(self):
         """Nút duy nhất “VÀO BÀN HỢP LỆ”.
 
-        Gắn Chrome → nhận tab sảnh → quét sảnh → chọn bàn đạt bộ lọc → bấm ô bàn →
-        xác nhận cầu (2 lần đọc giống nhau + cùng shoe) rồi **đứng chờ, chưa đặt cược**.
+        Gắn Chrome → nhận tab sảnh → quét sảnh → mở bàn đầu tiên có mã → đọc cầu trong
+        bàn rồi **đứng chờ, chưa đặt cược**.
         Chỉ khi tool đang chạy thì sau bước xác nhận mới arm và cược như cũ.
         """
         if self._busy_chrome() or self.open_table_busy:
@@ -987,14 +940,9 @@ class BaccaratController:
                     config["profile"] = profile
                     config["ladder"] = None      # về thang mặc định của phương pháp mới
                     changed.append("profile")
-            for key in ("min_hands", "max_hands"):
-                if key in params:
-                    config[key] = params[key]
-                    changed.append(key)
-            for key in ("max_streak", "min_lead", "max_lead", "tie_side", "live_exit_streak"):
-                if key in params:
-                    config[key] = params[key]
-                    changed.append(key)
+            if "live_exit_streak" in params:
+                config["live_exit_streak"] = params["live_exit_streak"]
+                changed.append("live_exit_streak")
             if "block_mode" in params:
                 config["block_mode"] = params["block_mode"]
                 changed.append("block_mode")
@@ -1047,10 +995,6 @@ class BaccaratController:
             # áp vào model
             self.sim.profile = normalized["profile"]
             self.sim.ladder = [float(s) for s in normalized["ladder"]]
-            self.sim.set_road_filter(normalized["min_hands"], normalized["max_hands"],
-                                     normalized["max_streak"], normalized["min_lead"])
-            self.sim.set_lead_range(normalized["min_lead"], normalized["max_lead"])
-            self.sim.set_tie_side(normalized["tie_side"])
             self.sim.set_live_exit_streak(normalized["live_exit_streak"])
             self.sim.block_mode = normalized["block_mode"]
             book = self.sim.money
@@ -1076,14 +1020,8 @@ class BaccaratController:
             book = M.MoneyBook(capital=self.config["capital"], unit=stakes[0],
                                take_profit_pct=self.config["take_profit_pct"])
             sim = LiveSimulation(book, profile=self.config["profile"], ladder=stakes,
-                                 min_hands=self.config["min_hands"],
-                                 max_hands=self.config["max_hands"],
-                                 max_streak=self.config["max_streak"],
                                  live_exit_streak=self.config["live_exit_streak"],
-                                 min_lead=self.config["min_lead"],
-                                 block_mode=self.config["block_mode"],
-                                 max_lead=self.config["max_lead"],
-                                 tie_side=self.config["tie_side"])
+                                 block_mode=self.config["block_mode"])
             sim.on_arm = self._place_armed_bet
             self.sim = sim
             self.tables_done = 0
@@ -1103,8 +1041,7 @@ class BaccaratController:
         with self.lock:
             config = dict(self.config)
             for key in ("capital", "take_profit_pct", "profile", "ladder", "ladder_mode",
-                        "ladder_base", "block_mode", "min_hands", "max_hands", "max_streak",
-                        "min_lead", "max_lead", "tie_side", "live_exit_streak"):
+                        "ladder_base", "block_mode", "live_exit_streak"):
                 if key in params:
                     config[key] = params[key]
             if config.get("ladder_mode") == "multiply" and ("ladder" not in params):
@@ -1128,11 +1065,8 @@ class BaccaratController:
             book = M.MoneyBook(capital=config["capital"], unit=stakes[0],
                                take_profit_pct=config["take_profit_pct"])
             sim = LiveSimulation(book, profile=config["profile"], ladder=stakes,
-                                 min_hands=config["min_hands"], max_hands=config["max_hands"],
-                                 max_streak=config["max_streak"],
                                  live_exit_streak=config["live_exit_streak"],
-                                 min_lead=config["min_lead"], block_mode=config["block_mode"],
-                                 max_lead=config["max_lead"], tie_side=config["tie_side"])
+                                 block_mode=config["block_mode"])
             sim.on_arm = self._place_armed_bet
             self.sim = sim
             self.tables_done = 0
@@ -1508,46 +1442,31 @@ class BaccaratController:
 
     # ------------------------------------------------------------ tự săn bàn
     def auto_open_table(self, allow_sweep=False, exclude_key=None):
+        """Mở bàn đầu tiên có mã bàn — không còn điều kiện lọc cầu."""
         if self._busy_chrome() or not (self.tool_running or self.enter_valid):
             return
         if self.sim.running or getattr(self.sim, "take_profit_done", False):
             return
-        candidates = []
-        skipped_fast = 0
-        for row in list(self.tables.values()):
-            if not row.get("table_id") or row["key"] == exclude_key or row_problem(row):
-                continue
-            if not road_is_current(row):
-                continue
-            if is_fast_table(row.get("label")):
-                skipped_fast += 1
-                continue
-            info = ME.check_table(list(row["letters"]), self.sim.min_hands, self.sim.max_hands,
-                                  self.sim.max_streak, self.sim.min_lead,
-                                  max_lead=self.sim.max_lead, tie_side=self.sim.tie_side)
-            if info["eligible"]:
-                candidates.append((info["hands"], row, info))
+        candidates = [row for row in self.tables.values()
+                      if row.get("table_id") and row["key"] != exclude_key]
         if not candidates:
             if not self.cycle_waiting and self.config["auto_hunt"]:
                 self.cycle_waiting = True
                 self.cycle_attempts = 0
                 self.cycle_table_key = exclude_key
-            reason = "Chưa có bàn đạt 4 điều kiện"
-            if skipped_fast:
-                reason += " · bỏ qua %d bàn Siêu Tốc Độ" % skipped_fast
+            reason = "Chưa có bàn nào để vào"
             if self._schedule_cycle_retry(reason, exclude_key=exclude_key):
                 return
             if self.cycle_waiting or not allow_sweep:
-                self.sweep_note = ("Chưa có bàn đạt điều kiện · bấm “VÀO BÀN HỢP LỆ” để quét lại, "
+                self.sweep_note = ("Chưa có bàn nào có mã bàn · bấm “VÀO BÀN HỢP LỆ” để quét lại, "
                                    "hoặc bật “Tự săn bàn” để app tự lặp tới khi vào được.")
                 return
             self.lobby_sweep()
             return
-        ideal = (self.sim.min_hands + self.sim.max_hands) / 2.0
-        candidates.sort(key=lambda item: (abs(item[0] - ideal), item[1]["label"].casefold()))
-        hands, row, info = candidates[0]
+        row = candidates[0]
+        info = ME.table_stats(list(row.get("letters") or ""))
         self.sweep_note = "Đang mở %s (%d tay, bên mạnh %s)…" % (
-            row["label"], hands, E.SIDE_NAME.get(info["strong"], "—"))
+            row["label"], info["hands"], E.SIDE_NAME.get(info["strong"], "—"))
         self.open_table(row["key"])
 
     def _auto_start_verified_table(self):
@@ -1555,27 +1474,17 @@ class BaccaratController:
         if not key:
             return
         row = self.tables.get(key)
-        if not row or row.get("source") != "evo-bead" or row.get("screen_stable", 0) < 2:
+        if not row:
             if time.time() > self.auto_start_deadline:
-                self.sweep_note = ("Vào bàn rồi nhưng %d giây chưa đọc được cầu bàn hai lần giống "
-                                   "nhau. Đang tìm bàn khác…" % ENTRY_WAIT)
+                self.sweep_note = ("Vào bàn rồi nhưng %d giây chưa đọc được cầu bàn. "
+                                   "Đang tìm bàn khác…" % ENTRY_WAIT)
                 self.auto_start_key = None
                 self._cycle_search(key)
             return
-        problem = row_problem(row)
-        if problem or not same_shoe(self.auto_start_letters, row["letters"]):
-            self.sweep_note = ("Chưa tự bắt đầu: " + problem) if problem else (
-                "Cầu trong bàn (%d tay) không cùng shoe với cầu đã lọc ở sảnh (%d tay)." % (
-                    len(row["letters"]), len(self.auto_start_letters)))
-            self.auto_start_key = None
-            self._cycle_search(key)
-            return
-        info = ME.check_table(list(row["letters"]), self.sim.min_hands, self.sim.max_hands,
-                              self.sim.max_streak, self.sim.min_lead,
-                              max_lead=self.sim.max_lead, tie_side=self.sim.tie_side)
+        info = ME.table_stats(list(row.get("letters") or ""))
         if self.enter_valid and not self.tool_running:
-            # Nút “VÀO BÀN HỢP LỆ”: đã vào đúng bàn và cầu khớp → chỉ báo đạt rồi đứng
-            # chờ người dùng bật tool; tuyệt đối không arm/đặt chip ở đây.
+            # Nút “VÀO BÀN HỢP LỆ”: đã vào bàn → chỉ báo rồi đứng chờ người dùng bật
+            # tool; tuyệt đối không arm/đặt chip ở đây.
             with self.lock:
                 self.sim.bind(row)
             self.enter_valid = False
@@ -1585,9 +1494,9 @@ class BaccaratController:
             self.cycle_attempts = 0
             self.cycle_retry_at = 0.0
             self.cycle_table_key = None
-            self.valid_note = ("Đã vào bàn hợp lệ · %s · %d tay · mạnh %s · cùng shoe · "
+            self.valid_note = ("Đã vào bàn · %s · %d tay · mạnh %s · "
                                "CHƯA đặt cược (bật tool để chạy)." % (
-                                   row["label"], len(row["letters"]),
+                                   row["label"], info["hands"],
                                    E.SIDE_NAME.get(info["strong"], "—")))
             self.sweep_note = self.valid_note
             self.log(self.valid_note, "win")
@@ -1637,7 +1546,7 @@ class BaccaratController:
         if self._busy_chrome() or not self._cdp_available():
             self.cycle_retry_at = now + CYCLE_RETRY_SECONDS
             return
-        self.sweep_note = "Đang tự quét tìm bàn đạt chuẩn (lượt %d)…" % (self.cycle_attempts + 1)
+        self.sweep_note = "Đang tự quét sảnh tìm bàn có mã bàn (lượt %d)…" % (self.cycle_attempts + 1)
         self.lobby_sweep()
 
     # --------------------------------------------------------------- nhịp làm việc
@@ -1735,7 +1644,7 @@ class BaccaratController:
             return
         if now <= self.enter_deadline:
             return
-        self._valid_failed("quá %d giây chưa tìm được bàn đạt chuẩn." % ENTER_VALID_TIMEOUT)
+        self._valid_failed("quá %d giây chưa mở được bàn nào." % ENTER_VALID_TIMEOUT)
 
     def _on_chrome_lost(self):
         """Chrome bị đóng (người dùng tắt cửa sổ): dọn danh sách bàn, tạm dừng phiên.
