@@ -97,6 +97,8 @@ main::-webkit-scrollbar { width: 10px; }
 main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 
 .view.hidden, .subview.hidden { display: none; }
+/* Ẩn tab Nhật ký trên UI; log vẫn được giữ nội bộ để debug. */
+.subtabs button[data-sub="log"], .subview[data-sub="log"] { display: none !important; }
 .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .head-txt h1 { margin: 0; font-size: 22px; letter-spacing: 0.4px; }
 .head-txt p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
