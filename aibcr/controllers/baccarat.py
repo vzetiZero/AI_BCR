@@ -28,6 +28,7 @@ import time
 from aibcr.adapters import browser as BR
 from aibcr.adapters import lobby_stream as LS
 from aibcr.adapters import table_bets as TB
+from aibcr.adapters.wm_bet import WMBet
 from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
@@ -842,7 +843,57 @@ class BaccaratController:
         # Bật tool = tự vào bàn hợp lệ nếu chưa đứng ở bàn nào (kể cả mở Chrome).
         if not self.sim.table_key and not self.enter_valid:
             self.enter_valid_table()
+        if getattr(self.browser, "wm_page_id", None):
+            threading.Thread(target=self._wm_prepare_socket, daemon=True,
+                             name="ba-wm-socket").start()
         return {"ok": True, "note": "Tool đang chạy."}
+
+    def _wm_prepare_socket(self):
+        """Chuẩn bị socket WM để đặt cược nhanh; không có thì vẫn bấm chuột được.
+
+        Socket của trang chỉ tạo một lần lúc tải trang, nên nếu app bật sau khi trang đã
+        mở thì phải tải lại một lần để hook bắt được nó. Tải lại xong quay về sảnh nên
+        phải mở lại đúng bàn đang theo dõi.
+        """
+        from aibcr.adapters.wm_ws import get_socket
+
+        table_key = self.sim.table_key or ""
+        socket = get_socket(self.browser, start=False,
+                            reload_on_start=True,
+                            on_status=lambda text, level="info": self.log(text, level))
+        if socket.ready():
+            self.log("WM: socket sẵn sàng · đặt cược gửi thẳng qua WebSocket.", "win")
+            return
+        if not socket.is_alive():
+            socket.start()
+        if not table_key:
+            return
+        # Thread tự tải lại tab khi chưa thấy socket; tải lại xong là về sảnh nên phải
+        # mở lại đúng bàn cũ trước khi socket có dữ liệu bàn.
+        time.sleep(9.0)
+        if socket.ready():
+            self.log("WM: socket sẵn sàng · đặt cược gửi thẳng qua WebSocket.", "win")
+            return
+        deadline = time.monotonic() + 40.0
+        while time.monotonic() < deadline:
+            try:
+                if LS.LobbyStream(session=self.browser).find_lobby_tab()[0]:
+                    break
+            except Exception:
+                pass
+            time.sleep(2.0)
+        try:
+            stream = LS.LobbyStream(session=self.browser)
+            ok, note = stream.open_table(table_key, wait_seconds=45)
+            self.log("WM: mở lại bàn %s sau khi tải lại · %s" % (table_key, note),
+                     "info" if ok else "warn")
+        except Exception as exc:
+            self.log("WM: không mở lại được bàn (%s)." % type(exc).__name__, "warn")
+            return
+        if socket.wait_ready(30.0):
+            self.log("WM: socket sẵn sàng · đặt cược gửi thẳng qua WebSocket.", "win")
+        else:
+            self.log("WM: chưa bắt được socket; sẽ bấm chip bằng chuột.", "warn")
 
     def tool_stop(self):
         self.tool_running = False
@@ -909,8 +960,8 @@ class BaccaratController:
 
     def _read_chip_state(self):
         if getattr(self.browser, "wm_page_id", None):
-            # WM không có khay chip kiểu EVO; chỉ đọc được tổng cược 3 cửa của cả bàn.
-            return self.browser.read_wm_bets()
+            # WM: đọc chip của CHÍNH MÌNH đang treo trên từng cửa (mybet_money).
+            return WMBet(self.browser).read_bets()
         try:
             return TB.read(self.browser, unit=TB.DEFAULT_CHIP_UNIT)
         except Exception as exc:
@@ -919,16 +970,6 @@ class BaccaratController:
     # ------------------------------------------------------- đặt chip tự động
     def _place_armed_bet(self, plan):
         """Đặt chip thật theo lệnh đã chốt (chạy ở thread nền)."""
-        if getattr(self.browser, "wm_page_id", None):
-            # WM: app chỉ đọc lá bài/cầu và gợi ý cửa; bấm chip vẫn do người dùng làm
-            # trên bàn để tránh đặt nhầm tiền thật khi chưa đọc được chip của riêng mình.
-            note = ("Bàn WM: app chưa tự bấm chip (chỉ phân tích). Hãy tự đặt theo gợi ý "
-                    "rồi bấm “Đọc chip” để xác nhận.")
-            with self.lock:
-                self.sim.mark_placed(False, note, plan)
-            self.place_status = {"ok": False, "note": note}
-            self.log(note, "warn")
-            return
         if not self.config["auto_place"]:
             with self.lock:
                 self.sim.mark_placing(plan)
@@ -949,8 +990,11 @@ class BaccaratController:
                                      plan)
             return
         self.place_busy = True
+        # WM in tiền theo nghìn đồng trên khay chip (10 = 10.000đ); EVO in theo VN2.
+        unit_name = ("đv (1 đv = 1.000đ)" if getattr(self.browser, "wm_page_id", None)
+                     else "VN2")
         self.place_status = {"ok": None,
-                            "note": "Đang tự đặt %s VN2 vào %s…" % (M.fmt_money(stake),
+                            "note": "Đang tự đặt %s %s vào %s…" % (M.fmt_money(stake), unit_name,
                                                                    E.SIDE_NAME.get(side, side))}
 
         def work():
@@ -963,6 +1007,16 @@ class BaccaratController:
                 if row_letters and row_letters != plan.get("baseline"):
                     self.events.put(("placed", (False, "Kết quả tay này đã về trước khi bấm chip; "
                                                        "không bấm sang cửa sổ tay sau.", plan)))
+                    return
+
+                if getattr(self.browser, "wm_page_id", None):
+                    # Bàn WM: chip treo lên ô trước, đọc lại số tiền, đủ mới bấm xác nhận
+                    # — cùng nguyên tắc an toàn của bản LONG-LONG (không đặt thiếu/lệch).
+                    result = WMBet(self.browser).place(side, stake, confirm=True,
+                                                       wait_seconds=BET_GATE_TIMEOUT)
+                    plan["placed_at"] = time.time()
+                    note = result.get("note") or result.get("error") or ""
+                    self.events.put(("placed", (bool(result.get("ok")), note, plan)))
                     return
 
                 def record_click():

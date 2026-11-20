@@ -1327,36 +1327,45 @@ class LobbyStream:
         if not parts:
             return False, "Mã bàn WM không hợp lệ."
         prefix = "groupBac_%d_%d_" % parts
-        # Sảnh có thể còn vẽ lại danh sách sau khi thoát bàn: đo/cuộn lặp tới khi ô bàn
-        # nằm trong khung nhìn và không bị lớp khác che, thay vì bỏ cuộc sau một lần đo.
-        deadline = time.monotonic() + max(6.0, float(wait_seconds))
+        # Sảnh vẽ lại danh sách và gắn lớp hiệu ứng lên ô, nên phải đo → cuộn → bấm
+        # theo vòng: bấm xong chưa thấy bàn thì cuộn lại và bấm tiếp, thay vì bỏ cuộc.
+        deadline = time.monotonic() + max(8.0, float(wait_seconds))
         box = None
+        attempts = 0
         while time.monotonic() < deadline:
             box = self._try_value(ws, WM.WM_TILE_BOX_JS % json.dumps(prefix), context_id)
-            if isinstance(box, dict) and box.get("inside"):
-                break
-            if isinstance(box, dict) and not box.get("reason"):
-                self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix),
-                                context_id)
-            elif isinstance(box, dict) and box.get("reason") == "tile_missing":
+            if not isinstance(box, dict) or box.get("reason") == "tile_missing":
                 fresh, _ = self._lobby_context(ws)
                 if fresh is not None:
                     context_id = fresh
-            time.sleep(0.6)
+                time.sleep(0.5)
+                continue
+            if box.get("reason"):
+                time.sleep(0.5)
+                continue
+            if not box.get("inside"):
+                self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix),
+                                context_id)
+                time.sleep(0.5)
+                continue
+            attempts += 1
+            self._click_at(ws, float(box["x"]), float(box["y"]))
+            # Chờ bàn hiện ra trong vài giây; chưa lên thì thử lại (tối đa 4 lần).
+            settle = time.monotonic() + min(5.0, max(2.0, deadline - time.monotonic()))
+            while time.monotonic() < settle:
+                if self._wm_detect(ws).get("kind") == "table":
+                    self.note = "Đã mở bàn WM %s." % table_id
+                    return True, "Đã mở bàn WM %s qua ô bàn của sảnh." % table_id
+                time.sleep(0.6)
+            if attempts >= 4:
+                break
+            self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix), context_id)
+            time.sleep(0.4)
         if not isinstance(box, dict) or box.get("reason"):
             return False, "Không tìm thấy ô bàn WM để mở (%s)." % (
                 (box or {}).get("reason", "tile_missing"))
-        if not box.get("inside"):
-            return False, "Ô bàn WM bị che, chưa bấm được."
-        self._click_at(ws, float(box["x"]), float(box["y"]))
-        deadline = time.monotonic() + max(6.0, float(wait_seconds))
-        while time.monotonic() < deadline:
-            state = self._wm_detect(ws)
-            if state.get("kind") == "table":
-                self.note = "Đã mở bàn WM %s." % table_id
-                return True, "Đã mở bàn WM %s qua ô bàn của sảnh." % table_id
-            time.sleep(1.0)
-        return False, "Đã bấm ô bàn WM nhưng chưa thấy màn hình bàn %s." % table_id
+        return False, "Đã bấm ô bàn WM %d lần nhưng chưa thấy màn hình bàn %s." % (
+            attempts, table_id)
 
     def _click_close_table(self, ws):
         """Bấm nút X đóng bàn bằng chuột thật ở khung đang vẽ màn hình bàn; True nếu đã bấm.

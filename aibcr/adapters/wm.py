@@ -284,8 +284,10 @@ WM_TILES_JS = r"""(() => {
     };
 })()"""
 
-# Toạ độ tâm ô bàn theo tiền tố id (groupBac_<game>_<group>_); kèm cờ "đã nằm trong
-# khung nhìn" để vòng mở bàn biết còn phải cuộn hay bấm được ngay.
+# Toạ độ bấm ô bàn theo tiền tố id (groupBac_<game>_<group>_).
+# Sảnh gắn lớp hiệu ứng (chia bài/hover) đè lên ô nên một điểm duy nhất có thể bị che:
+# JS thử nhiều điểm trong ô và trả điểm đầu tiên mà lớp trên cùng vẫn nằm trong ô, kèm
+# lệch iframe để bấm đúng toạ độ khung gốc.
 WM_TILE_BOX_JS = r"""(() => {
     const prefix = %s;
     let node = null;
@@ -294,8 +296,6 @@ WM_TILE_BOX_JS = r"""(() => {
     }
     if (!node) return {reason: 'tile_missing'};
     const rect = node.getBoundingClientRect();
-    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
-    const hit = document.elementFromPoint(x, y);
     let ox = 0, oy = 0, w = window, depth = 0;
     while (w !== w.top) {
         let el = null;
@@ -309,11 +309,27 @@ WM_TILE_BOX_JS = r"""(() => {
         w = w.parent;
         if (++depth > 8) { ox = oy = 0; break; }
     }
+    // Thử lần lượt: giữa ô, rồi các điểm lệch (tránh lớp phủ hiệu ứng ở giữa).
+    const points = [
+        [0.5, 0.5], [0.5, 0.78], [0.22, 0.5], [0.78, 0.5],
+        [0.5, 0.25], [0.12, 0.82], [0.88, 0.82]
+    ];
+    const seen = [];
+    for (const [px, py] of points) {
+        const x = rect.x + rect.width * px, y = rect.y + rect.height * py;
+        if (x <= 0 || y <= 0 || x >= innerWidth || y >= innerHeight) continue;
+        const hit = document.elementFromPoint(x, y);
+        seen.push((hit && (hit.id || '') + '.' + (hit.className || '').toString().slice(0, 24)) || '');
+        if (hit && node.contains(hit)) {
+            return {x: x + ox, y: y + oy, w: rect.width, h: rect.height,
+                    top: rect.top, bottom: rect.bottom, inside: true,
+                    vh: innerHeight, hit: seen[seen.length - 1]};
+        }
+    }
     return {
-        x: x + ox, y: y + oy, w: rect.width, h: rect.height,
-        top: rect.top, bottom: rect.bottom,
-        inside: !!(hit && node.contains(hit)) && x > 0 && y > 0 && x < innerWidth && y < innerHeight,
-        vh: innerHeight
+        x: rect.x + rect.width / 2 + ox, y: rect.y + rect.height / 2 + oy,
+        w: rect.width, h: rect.height, top: rect.top, bottom: rect.bottom,
+        inside: false, vh: innerHeight, hits: seen
     };
 })()"""
 
@@ -326,10 +342,21 @@ WM_SCROLL_TO_TILE_JS = r"""(() => {
         if ((item.id || '').startsWith(prefix)) { node = item; break; }
     }
     const box = document.getElementById('game_list_box');
-    if (!node || !box) return -1;
-    const br = box.getBoundingClientRect(), sr = node.getBoundingClientRect();
-    box.scrollTop = Math.max(0, box.scrollTop + (sr.top - br.top) - (br.height - sr.height) / 2);
-    return box.scrollTop;
+    if (!node) return -1;
+    // Cuộn mọi khung chứa thật sự cuộn được (sảnh có thể lồng nhiều lớp), rồi để
+    // scrollIntoView căn giữa — cách này đúng cả khi ô nằm trong cột khác.
+    let parent = node.parentElement;
+    while (parent) {
+        const style = getComputedStyle(parent);
+        if (/(auto|scroll)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+            const pr = parent.getBoundingClientRect(), nr = node.getBoundingClientRect();
+            parent.scrollTop = Math.max(0, parent.scrollTop + (nr.top - pr.top)
+                                        - (pr.height - nr.height) / 2);
+        }
+        parent = parent.parentElement;
+    }
+    try { node.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
+    return box ? box.scrollTop : -1;
 })()"""
 
 WM_SCROLL_TO_JS = r"""(() => {

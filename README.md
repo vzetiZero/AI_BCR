@@ -126,6 +126,28 @@ cấp cầu cho tool và tự nghe nền (`start_wm_watch`) để không bỏ l�
 WM **chưa** tự bấm chip: app chỉ đọc lá bài/cầu, gợi ý cửa và hiện tổng cược 3 cửa
 của cả bàn; việc đặt chip vẫn do người dùng bấm trên bàn.
 
+### Đặt cược WM (`wm_bet.py`, `wm_ws.py`)
+
+Port nguyên tắc an toàn từ dự án LONG-LONG cũ (`bcr/adapters/longlong_table.py`) sang bàn
+WM, thêm đường WebSocket:
+
+1. **Chia tiền theo mệnh giá khay** (`models/chips.decompose`, quy hoạch động): khay WM
+   in `10 / 20 / 50 / 100 / 500 / 1k` theo nghìn đồng nên **1 đơn vị sảnh = 1.000đ**
+   (chip `10` = 10.000đ). Không chia khít được thì **không đặt** (không bao giờ đặt thiếu).
+2. **Đường nhanh — WebSocket `protocol 22`** (`wm_ws.py`): gửi
+   `{"betSerialNumber", "gameNo", "gameNoRound", "betArr": [{"betArea", "addBetMoney"}],
+   "commission": 0, "remark": "1,0"}` với `betArea` 1 = Banker, 2 = Player, 3 = Hoà.
+   Không phụ thuộc khay chip/toạ độ nên không bị lớp phủ chia bài che. Server trả
+   `{"protocol": 22, "bOk": true}` là lệnh đã vào.
+   Socket của trang chỉ tạo một lần lúc tải trang, nên app cài hook `WebSocket` và **tải
+   lại tab một lần** khi bật tool (sau đó tự mở lại đúng bàn). Sàn đẩy `protocol 21` cho
+   nhiều bàn trên cùng socket, nên socket được chọn theo `groupID` khớp bàn đang mở.
+3. **Đường dự phòng — bấm chuột thật** (`wm_bet.py`): chờ lớp phủ chia bài tan, chọn
+   mệnh giá, bấm chip → bấm ô → **đọc lại số tiền đang treo sau từng chip**; lệch thì
+   bấm nút huỷ toàn bộ và báo lỗi; đủ tiền mới bấm xác nhận.
+4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng
+   `table_bets.read` nên `compare_chips` / `table_is_clear` dùng lại được.
+
 Không có bàn nào có mã bàn thì tool tự quét lại (lượt đầu ngay, sau đó mỗi 15 giây)
 tới khi hết `ENTER_VALID_TIMEOUT = 240` giây thì báo lỗi. Nút **Dừng tự quét** huỷ
 ngay (`table.cancelEnter`).
