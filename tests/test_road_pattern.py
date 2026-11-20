@@ -510,5 +510,59 @@ class HighestProbabilityBetTests(unittest.TestCase):
         self.assertEqual(len(made), 1)
 
 
+    def test_follow_open_table_when_reader_on_another_table(self):
+        """Chrome ở bàn khác bàn theo dõi: chuyển theo bàn thật, không treo chờ mãi."""
+        controller = self.make_controller()
+        self.ready(controller)
+        state = {"view": self.view()}
+        state["view"].update({"table": "WM 101_1352", "history": "BBPB",
+                              "hand": 4, "result_hand": 4, "state": "SHOW_RESULT"})
+
+        class FakeLive:
+            def snapshot(self):
+                return state["view"]
+
+        controller.live_session = FakeLive()
+        controller.browser.wm_open_key = "101_1352"
+        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        controller._follow_open_table()
+        self.assertEqual(controller.sim.table_key, "id:101_1352")
+        self.assertEqual(controller.sim.letters, "BBPB")
+        self.assertTrue(controller.sim.running)
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+        controller._auto_bet_tick()
+        self.assertTrue(controller.sim.pending, controller.auto_bet_note)
+        self.assertEqual(placed[0]["side"], "B")
+
+
+    def test_auto_tick_does_not_arm_a_backwards_hand(self):
+        """Lịch sử/phát lại về muộn báo tay cũ hơn tay đã chốt: không đặt trùng."""
+        controller = self.make_controller()
+        state = {"view": self.view()}
+        state["view"].update({"state": "BETTING", "hand": 13, "result_hand": 12})
+
+        class FakeLive:
+            def snapshot(self):
+                return state["view"]
+
+        controller.live_session = FakeLive()
+        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        self.ready(controller)
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+        controller._auto_bet_tick()
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(controller.auto_bet_hand, 13)
+
+        # Cầu đổi (ván mới về) nhưng số tay live lùi về 12: phải chặn, không arm lại.
+        controller.sim.pending = None
+        controller.sim.letters = "BBPBBPB"
+        state["view"].update({"state": "SHOW_RESULT", "hand": 12, "result_hand": 11})
+        controller._auto_bet_tick()
+        self.assertEqual(len(placed), 1)
+        self.assertIn("đã được xử lý", controller.auto_bet_note)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
