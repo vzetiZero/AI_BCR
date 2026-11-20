@@ -23,7 +23,9 @@ CHIP_REFRESH = 3
 # Gate "chờ ván mới": sau khi chốt lệnh cược, chờ tối đa BET_GATE_TIMEOUT giây để bàn
 # dọn hết chip (cả 3 cửa về 0) rồi mới tự bấm — tránh bấm chồng lên ván cũ còn đang
 # hiển thị/gom chip. BET_GATE_POLL là nhịp đọc lại trong lúc chờ.
-BET_GATE_TIMEOUT = 20.0
+# WM công bố kết quả xong mới mở cửa cược ván kế (~25–35 giây sau), nên phải chờ đủ
+# lâu; 20 giây trước đây làm mọi lệnh bị huỷ oan ("Bàn chưa mở cược").
+BET_GATE_TIMEOUT = 45.0
 BET_GATE_POLL = 0.3
 # Vào bàn từ sảnh mất vài giây tải trang, khay chip/ô cược chưa kịp hiện nên lượt bấm
 # đầu thường hỏng. Tay chưa đặt được chip thật thì không được tính (xem

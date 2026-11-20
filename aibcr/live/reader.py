@@ -12,7 +12,6 @@ rồi đọc khung WebSocket của tab. Mỗi khung được ``decode`` thành s
 import json
 import threading
 import time
-from urllib.error import URLError
 from urllib.request import urlopen
 
 from aibcr.live import decode
@@ -107,7 +106,7 @@ class LiveReader(threading.Thread):
             page = None
             try:
                 page = find_table_page(self.port, self.pattern)
-            except (URLError, OSError, ValueError) as exc:
+            except Exception as exc:
                 self.last_error = "Chrome CDP %d không phản hồi (%s)." % (
                     self.port, type(exc).__name__)
                 self._status(self.last_error, "error")
@@ -117,11 +116,14 @@ class LiveReader(threading.Thread):
                 self.connected = False
                 time.sleep(RECONNECT_SECONDS)
                 continue
-            self._stream(page)
+            try:
+                self._stream(page)
+            except Exception as exc:
+                self.last_error = "Mất kết nối tab bàn (%s)." % type(exc).__name__
+                self._status(self.last_error, "error")
             if self.stop.is_set():
                 break
             self.connected = False
-            self._status("Mất kết nối tab bàn; thử gắn lại…", "warn")
             time.sleep(RECONNECT_SECONDS)
 
     def _stream(self, page):

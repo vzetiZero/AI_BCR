@@ -133,6 +133,66 @@ class LiveSnapshotTests(unittest.TestCase):
         self.assertEqual(len(notified), 1)
         self.assertIsNotNone(session.snapshot()["prediction"])
 
+    def _seed_batch(self, session, first=1, last=30, game_no=12215520, winners="B"):
+        for index in range(first, last + 1):
+            session.on_round({
+                "issue_id": "seed:%d" % index, "table": "WM 101_505",
+                "winner": winners[(index - first) % len(winners)],
+                "player_cards": [1, 2], "banker_cards": [3, 4],
+                "round": index, "game_no": game_no,
+                "seed": True, "seed_last": index == last})
+
+    def test_history_replay_after_live_round_is_merged_not_duplicated(self):
+        """Protocol 26 về sau protocol 25 không được cộng trùng ván 30."""
+        session = LiveSession(trials=100)
+        session.on_round({
+            "issue_id": "live:30", "table": "WM 101_505", "winner": "P",
+            "player_cards": [1, 2], "banker_cards": [3, 4],
+            "round": 30, "game_no": 12215520})
+        self._seed_batch(session, winners="PB")
+        view = session.snapshot()
+        self.assertEqual(len(view["history"]), 30)
+        self.assertEqual(view["hand"], 30)
+        self.assertEqual(view["history"][-1], "P")
+        self.assertGreaterEqual(view["duplicates"], 1)
+
+    def test_repeated_history_replay_is_idempotent(self):
+        session = LiveSession(trials=100)
+        self._seed_batch(session, winners="PB")
+        once = session.snapshot()["history"]
+        self._seed_batch(session, winners="PB")
+        self.assertEqual(session.snapshot()["history"], once)
+        self.assertEqual(len(once), 30)
+
+    def test_new_shoe_clears_old_road(self):
+        session = LiveSession(trials=100)
+        self._seed_batch(session, first=1, last=3, game_no=111, winners="B")
+        self.assertEqual(session.snapshot()["history"], "BBB")
+        session.on_round({
+            "issue_id": "new-shoe", "table": "WM 101_505", "winner": "P",
+            "player_cards": [5, 6], "banker_cards": [7, 8],
+            "round": 1, "game_no": 222})
+        view = session.snapshot()
+        self.assertEqual(view["history"], "P")
+        self.assertEqual(view["hand"], 1)
+
+    def test_seed_loads_full_shoe_but_advances_only_recent_hands(self):
+        """Lịch sử dài phải khớp số tay bàn; shoe chỉ trừ 40 tay cuối."""
+        session = LiveSession(trials=100)
+        for index in range(1, 61):
+            session.on_round({
+                "issue_id": "seed:%d" % index, "table": "WM 101_505",
+                "winner": "B" if index % 2 else "P",
+                "player_cards": [1 + (index * 4) % 52, 1 + (index * 4 + 1) % 52],
+                "banker_cards": [1 + (index * 4 + 2) % 52, 1 + (index * 4 + 3) % 52],
+                "round": index, "game_no": 777,
+                "seed": True, "seed_last": index == 60})
+        view = session.snapshot()
+        self.assertEqual(len(view["history"]), 60)
+        self.assertEqual(view["hand"], 60)
+        self.assertEqual(view["result_hand"], 60)
+        self.assertEqual(session.shoe.dealt, 40 * 4)
+
 
 class WmReaderHandTests(unittest.TestCase):
     def test_result_and_state_carry_the_round_number(self):
@@ -156,6 +216,74 @@ class WmReaderHandTests(unittest.TestCase):
         self.assertEqual(states[-1]["round"], 27)
         self.assertEqual(states[-1]["state"], "SHOW_RESULT")
 
+    def test_result_round_follows_history_not_replayed_betting_round(self):
+        """Protocol 25 không có số tay: lấy mốc lịch sử + 1, không lấy vòng 21 phát lại."""
+        from aibcr.adapters import wm
+        from aibcr.live.wm_reader import WMReader
+
+        rounds, states = [], []
+        reader = WMReader(on_round=rounds.append, on_state=states.append, port=1)
+        reader.open_key = wm.table_key(101, 508)
+        reader.handle({"protocol": 26, "data": {
+            "gameID": 101, "groupID": 508,
+            "historyData": {"resultObjArr": [
+                {"gameNo": 555, "gameNoRound": index, "result": 1,
+                 "resultContent": "b:3,4,;p:1,2,"} for index in range(1, 27)]}}})
+        # WM phát lại vòng cược 28 trước khi khung kết quả tay 27 tới.
+        reader.handle({"protocol": 21, "data": {
+            "gameID": 101, "groupID": 508, "gameNo": 555, "gameNoRound": 28,
+            "betMilliSecond": 15000}})
+        reader.handle({"protocol": 25, "data": {
+            "gameID": 101, "groupID": 508, "result": 34,
+            "playerScore": 3, "bankerScore": 2,
+            "dtCard": {"1": {"cardID": 53}, "2": {"cardID": 72},
+                       "3": {"cardID": 62}, "4": {"cardID": 11}}}})
+        self.assertEqual(rounds[-1]["round"], 27)
+        self.assertEqual(states[-1]["round"], 27)
+        self.assertEqual(states[-1]["state"], "SHOW_RESULT")
+
+    def test_replayed_finished_round_does_not_move_hand_back(self):
+        from aibcr.adapters import wm
+        from aibcr.live.wm_reader import WMReader
+
+        states = []
+        reader = WMReader(on_round=lambda data: None, on_state=states.append, port=1)
+        reader.open_key = wm.table_key(101, 508)
+        reader._last_result_round = 27
+        reader._last_result_game = "555"
+        reader.handle({"protocol": 21, "data": {
+            "gameID": 101, "groupID": 508, "gameNo": 555, "gameNoRound": 28,
+            "betMilliSecond": 15000}})
+        self.assertEqual(states[-1]["round"], 28)
+        reader.handle({"protocol": 21, "data": {
+            "gameID": 101, "groupID": 508, "gameNo": 555, "gameNoRound": 27,
+            "betMilliSecond": 9000}})
+        self.assertEqual(states[-1]["round"], 28, "không được lùi về tay đã có kết quả")
+
+
+    def test_switch_table_resets_round_markers(self):
+        """Đổi bàn: số tay bàn cũ không được chặn oan vòng đầu của bàn mới."""
+        from aibcr.adapters import wm
+        from aibcr.live.wm_reader import WMReader
+
+        states = []
+        reader = WMReader(on_round=lambda data: None, on_state=states.append, port=1)
+        reader.open_key = wm.table_key(101, 508)
+        reader._last_result_round = 52
+        reader._last_result_game = "111"
+        reader._round_by_cards = {"1,2,3,4": 52}
+        reader.last_state = {"round": 52}
+        reader._bind_open_table(wm.table_key(101, 1356))
+        self.assertEqual(reader.open_key, wm.table_key(101, 1356))
+        self.assertIsNone(reader._last_result_round)
+        self.assertIsNone(reader._last_result_game)
+        self.assertEqual(reader._round_by_cards, {})
+        self.assertIsNone(reader.last_state)
+        reader.handle({"protocol": 21, "data": {
+            "gameID": 101, "groupID": 1356, "gameNo": 999, "gameNoRound": 15,
+            "betMilliSecond": 10000}})
+        self.assertEqual(states[-1]["round"], 15)
+
 
 class HighestProbabilityBetTests(unittest.TestCase):
     def setUp(self):
@@ -174,8 +302,8 @@ class HighestProbabilityBetTests(unittest.TestCase):
 
     def view(self):
         return {
-            "running": True, "hand": 12, "rounds": 6, "table": "WM test",
-            "history": "BBPBBP",
+            "running": True, "table": "WM test", "hand": 12, "rounds": 6,
+            "table_name": "WM test", "history": "BBPBBP",
             "prediction": {"ok": True, "playable": False, "best_side": None,
                            "top_side": "B", "top_probability": 0.46,
                            "probabilities": {"p_player": 0.44, "p_banker": 0.46,
@@ -184,8 +312,8 @@ class HighestProbabilityBetTests(unittest.TestCase):
         }
 
     def ready(self, controller):
-        row = {"key": "id:t1", "label": "WM test", "letters": "BBP",
-               "ts": time.time(), "table_id": "t1", "stable": 3}
+        row = {"key": "id:test", "label": "WM test", "letters": "BBP",
+               "ts": time.time(), "table_id": "test", "stable": 3}
         controller.tables = {row["key"]: row}
         controller.sim.bind(row)
         controller.sim.start(row)
@@ -236,6 +364,150 @@ class HighestProbabilityBetTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertTrue(result["ok"], result)
         self.assertEqual(placed[0]["side"], "B")
+
+    def test_auto_bet_tick_retries_when_prediction_arrives_late(self):
+        """Lúc mới vào bàn chưa có xác suất: không khoá tay, tick sau đặt ngay."""
+        controller = self.make_controller()
+        self_outer = self
+        state = {"view": self.view()}
+        state["view"]["prediction"] = None
+
+        class FakeLive:
+            def snapshot(self):
+                return state["view"]
+
+        controller.live_session = FakeLive()
+        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        self.ready(controller)
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+
+        controller._auto_bet_tick()
+        self.assertIsNone(controller.auto_bet_letters)
+        self.assertIsNone(controller.sim.pending)
+        self.assertEqual(placed, [])
+
+        state["view"] = self_outer.view()
+        controller._auto_bet_tick()
+        self.assertTrue(controller.sim.pending, controller.auto_bet_note)
+        self.assertEqual(placed[0]["side"], "B")
+
+    def test_chip_check_between_rounds_compares_last_placed_order(self):
+        """Ván vừa ngã, chip ván đó còn trên bàn: không được báo SAI CỬA theo lệnh tay kế."""
+        controller = self.make_controller()
+        self_outer = self
+
+        class FakeLive:
+            def snapshot(self):
+                return self_outer.view()
+
+        controller.live_session = FakeLive()
+        controller.dispatch("bet.config", {"side": "AUTO", "stake": 60})
+        self.ready(controller)
+        controller._place_armed_bet = lambda order: None
+        controller.dispatch("bet.place", {})
+        self.assertEqual(controller.last_order["side"], "B")
+
+        # Kết quả về: pending bị xoá; chip Banker của ván vừa đặt vẫn hiện trên bàn.
+        controller.sim.pending = None
+        controller.chip_live = {"ok": True, "unit": 1,
+                                "spots": {"B": {"amount": 60.0, "amount_vnd": 60.0}}}
+        self.assertEqual(controller.chip_check()["status"], "match")
+
+        # Chưa có lệnh nào: vẫn so theo lệnh sắp chốt như trước.
+        controller.last_order = None
+        controller._resolve_order = lambda params=None: {
+            "side": "P", "stake": 60.0, "reason": "", "suggestion": {}}
+        self.assertEqual(controller.chip_check()["status"], "wrong_side")
+
+    def test_next_hand_no_uses_live_hand_not_road_length(self):
+        """Cầu bị cắt (chỉ giữ 40 tay gần nhất) nhưng số tay thật vẫn phải đúng."""
+        controller = self.make_controller()
+        self_outer = self
+        state = {"view": self_outer.view()}
+        state["view"].update({"history": "B" * 40, "hand": 128,
+                              "result_hand": 127, "state": "SHOW_RESULT"})
+
+        class FakeLive:
+            def snapshot(self):
+                return state["view"]
+
+        controller.live_session = FakeLive()
+        self.assertEqual(controller._next_hand_no(41), 128)
+        state["view"].update({"state": "BETTING", "hand": 128})
+        self.assertEqual(controller._next_hand_no(41), 128)
+
+    def test_stale_scan_does_not_roll_back_live_road(self):
+        """Lượt quét bắt đầu trước khi ván mới về không được xoá tay vừa nhận."""
+        controller = self.make_controller()
+        self.ready(controller)
+        controller.live_road = "BBPB"
+        controller._ingest([{"table_id": "test", "label": "WM test",
+                             "letters": "BBP", "source": "wm-ws-26"}])
+        self.assertEqual(controller.tables["id:test"]["letters"], "BBPB")
+
+    def test_auto_tick_waits_when_live_reader_is_still_on_another_table(self):
+        """Vừa mở bàn mới: bộ đọc còn ở bàn cũ → chưa đặt, chờ nạp cầu bàn mới."""
+        controller = self.make_controller()
+        state = {"view": self.view()}
+        state["view"].update({"table": "WM 101_508", "hand": 52,
+                              "result_hand": 51, "state": "BETTING"})
+
+        class FakeLive:
+            def snapshot(self):
+                return state["view"]
+
+        controller.live_session = FakeLive()
+        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        self.ready(controller)
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+
+        controller._auto_bet_tick()
+        self.assertEqual(placed, [])
+        self.assertIsNone(controller.sim.pending)
+        self.assertIsNone(controller.auto_bet_letters)
+        self.assertIn("chờ dữ liệu bàn mới", controller.auto_bet_note)
+
+        # Bộ đọc bám đúng bàn: tick sau đặt ngay theo xác suất của bàn này.
+        state["view"] = self.view()
+        controller._auto_bet_tick()
+        self.assertTrue(controller.sim.pending, controller.auto_bet_note)
+        self.assertEqual(placed[0]["side"], "B")
+
+
+    def test_watchdog_relaunches_dead_live_reader(self):
+        """Bộ đọc live chết (CDP/mạng) phải được gắn lại thay vì bỏ mặc."""
+        controller = self.make_controller()
+
+        class Dead:
+            last_error = "boom"
+
+            def is_alive(self):
+                return False
+
+        class NewReader:
+            def __init__(self):
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+            def is_alive(self):
+                return self.started
+
+        controller.live_session = object()
+        controller.live_reader = Dead()
+        made = []
+        controller._make_live_reader = lambda session: made.append(NewReader()) or made[-1]
+        controller._watch_live_reader()
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0].started)
+        self.assertIs(controller.live_reader, made[0])
+
+        # Còn sống thì không tạo thêm (không gắn trùng hai bộ đọc).
+        controller._watch_live_reader()
+        self.assertEqual(len(made), 1)
 
 
 if __name__ == "__main__":

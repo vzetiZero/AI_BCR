@@ -266,6 +266,55 @@ class BaccaratEnterValidTests(unittest.TestCase):
         service.auto_open_table(allow_sweep=False)
         self.assertEqual(called, [], "không bật tool thì không tự mở bàn")
 
+    def test_enter_valid_binds_a_wm_table_already_open(self):
+        """Mở lại app khi tab vẫn ở trong bàn WM: theo bàn đó, không quét sảnh."""
+        from aibcr.controllers import baccarat as BC
+
+        service = self.service()
+        reports = [{"page": {"title": "WM"}, "tables": [{
+            "table_id": "101_1353", "label": "EIPRIL V", "letters": "BPPB",
+            "game_type": "baccarat", "read_error": "", "source": "wm-ws-26",
+            "ws_hands": 4, "road_match": True}]}]
+
+        class FakeBrowser:
+            connected = True
+            mode = "cdp"
+            cdp_attached = True
+            wm_open_key = "101_1353"
+
+            def scan(self):
+                return reports
+
+            def stop(self):
+                pass
+
+        lobbies = []
+
+        class FakeStream:
+            def find_lobby_tab(self):
+                lobbies.append(True)
+                return True, "sảnh"
+
+        service.browser = FakeBrowser()
+        service.stream = FakeStream()
+        original = BC.find_wm_table
+        BC.find_wm_table = lambda port=9222: ({"id": "p"}, {"kind": "table"})
+        self.addCleanup(setattr, BC, "find_wm_table", original)
+
+        service.tool_running = True
+        reply = service.enter_valid_table()
+        self.assertTrue(reply["ok"], reply)
+        deadline = time.time() + 3
+        while time.time() < deadline and not service.auto_start_key:
+            service._drain()
+            time.sleep(0.02)
+        self.assertEqual(service.auto_start_key, "id:101_1353")
+        self.assertEqual(lobbies, [], "đang trong bàn thì không được quét sảnh")
+
+        service._auto_start_verified_table()
+        self.assertEqual(service.sim.table_key, "id:101_1353")
+        self.assertTrue(service.sim.running)
+
     def test_cancel_enter_valid_stops_the_hunt(self):
         service = self.service()
         service.enter_valid = True

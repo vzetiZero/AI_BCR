@@ -913,6 +913,10 @@ class BrowserSession:
                 break
         if not open_key:
             open_key = self.wm_open_key
+        if open_key:
+            # Ghi lại bàn đang mở để controller biết khi người dùng bấm vào bàn
+            # trong lúc tab đã ở sẵn trong bàn (không đi qua sảnh).
+            self.wm_open_key = open_key
         # Lần đầu vào bàn chưa có lịch sử: chờ lâu hơn một nhịp để kịp protocol 26 của
         # ván đang chạy. Các lượt sau dùng cache nên chỉ cần cửa sổ ngắn.
         cache = getattr(self, "wm_cache", None)
@@ -964,8 +968,7 @@ class BrowserSession:
         # Sảnh chỉ gửi protocol 26 theo nhịp (khoảng vài chục giây/bàn), trong khi vòng
         # quét chạy mỗi 1,5 giây: giữ lịch sử đã nhận để lượt sau không phải chờ lại.
         for key, rounds in histories.items():
-            if rounds and (key not in cache or len(rounds) >= len(cache[key])):
-                cache[key] = rounds
+            self._wm_remember_history(key, rounds)
         key = open_key or next(iter(tables), "") or next(iter(cached), "")
         info = tables.get(key) or {}
         rounds = cache.get(key) or []
@@ -1220,6 +1223,20 @@ class BrowserSession:
                         pass
             self._wm_watch_stop.wait(1.0)
 
+    def _wm_remember_history(self, key, rounds):
+        """Ghi lịch sử (protocol 26) vào cache, đổi shoe thì bỏ hẳn lịch sử cũ."""
+        if not rounds:
+            return
+        cache = getattr(self, "wm_cache", None)
+        if cache is None:
+            cache = self.wm_cache = {}
+        cached = cache.get(key) or []
+        new_game = rounds[-1].get("game_no")
+        old_game = cached[-1].get("game_no") if cached else None
+        if (not cached or len(rounds) >= len(cached)
+                or (new_game is not None and new_game != old_game)):
+            cache[key] = rounds
+
     def _wm_absorb(self, message):
         """Cập nhật cache WM từ một khung protocol (gọi trong thread nghe)."""
         data = message.get("data")
@@ -1231,9 +1248,7 @@ class BrowserSession:
             return
         key = WM.table_key(game, group)
         if protocol == WM.PROTOCOL_HISTORY:
-            rounds = WM.decode_history(data)
-            if rounds and (key not in self.wm_cache or len(rounds) >= len(self.wm_cache[key])):
-                self.wm_cache[key] = rounds
+            self._wm_remember_history(key, WM.decode_history(data))
         elif protocol == WM.PROTOCOL_TABLE:
             self.wm_state[key] = WM.decode_table(data)
         elif protocol == WM.PROTOCOL_CARD:
@@ -1248,10 +1263,18 @@ class BrowserSession:
             round_data = WM.decode_round(data)
             self.wm_state.setdefault(key, {})["last_round"] = round_data
             self.wm_cards.pop(key, None)
+            # Protocol 25 không mang gameNo/gameNoRound: lấy mốc từ ván cuối trong
+            # cache để khoá đúng (shoe, số tay) và không chèn trùng khi 26 phát lại.
+            cached = self.wm_cache.get(key) or []
+            last = cached[-1] if cached else {}
+            round_no = data.get("gameNoRound")
+            if round_no is None and isinstance(last.get("round"), int):
+                round_no = last["round"] + 1
             # Kết quả ván tới ngay qua protocol 25, còn lịch sử (26) chỉ về theo nhịp.
             # Ghép ngay vào cache để cầu trên UI không bị trễ cả tay.
-            merged = WM.merge_result(self.wm_cache.get(key) or [], {
-                "game_no": data.get("gameNo"), "round": data.get("gameNoRound"),
+            merged = WM.merge_result(cached, {
+                "game_no": data.get("gameNo") or last.get("game_no"),
+                "round": round_no,
                 "code": round_data.get("code"), "winner": round_data.get("winner"),
                 "banker_cards": round_data.get("banker_cards"),
                 "player_cards": round_data.get("player_cards"),

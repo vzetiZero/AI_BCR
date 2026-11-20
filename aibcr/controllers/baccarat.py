@@ -32,7 +32,7 @@ from aibcr.adapters.wm_bet import WMBet
 from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
-from aibcr.live.wm_reader import WMReader, find_wm_page
+from aibcr.live.wm_reader import WMReader, find_wm_page, find_wm_table
 from aibcr.models import engine as E
 from aibcr.models import money as M
 from aibcr.models.live_sim import (LiveSimulation, compare_chips, table_is_clear,
@@ -166,9 +166,16 @@ class BaccaratController:
         # Chế độ một nút: “Chạy tool” = tự vào bàn + tự đặt cược từng tay. Biến này giữ
         # cầu của tay đã arm để không arm lặp lại cùng một tay.
         self.auto_bet_letters = None
+        self.auto_bet_key = None
         self.auto_bet_note = ""
+        # Lệnh vừa đặt gần nhất (side/stake). Giữa hai ván chip trên bàn thuộc lệnh này,
+        # không phải lệnh tay kế (chưa bấm) — dùng để không báo "SAI CỬA" oan.
+        self.last_order = None
         # (table_key, số tay) đã chốt lệnh — chặn đặt trùng khi nguồn phát lại một ván.
         self.placed_signatures = set()
+        # Cầu của bộ đọc WebSocket khi AI live đang chạy. Lượt quét CDP có thể trả về
+        # bản cũ (bắt đầu trước khi ván mới về); không được để nó ghi đè/đảo cầu live.
+        self.live_road = ""
         # Chưa có bàn (Chrome vừa mở/chưa đăng nhập) thì thử lại theo nhịp này.
         self.tool_retry_at = 0.0
 
@@ -776,6 +783,7 @@ class BaccaratController:
             note = self.sim.note
         self.chip_live = None
         self.chip_read_at = 0.0
+        self.last_order = None
         self._save_state()
         self.log(("Bắt đầu theo dõi %s · %s" % (row["label"], note)) if started
                  else ("Chưa theo dõi được %s · %s" % (row["label"], note)),
@@ -827,6 +835,21 @@ class BaccaratController:
                         # tự bấm sảnh; báo rõ để họ làm rồi bấm lại nút.
                         self.events.put(("valid_fail", "Đã mở Chrome · hãy đăng nhập và mở "
                                                        "sảnh Baccarat rồi bấm “VÀO BÀN HỢP LỆ” lần nữa."))
+                        return
+                # Đang đứng sẵn trong bàn WM (vd. mở lại app khi tab vẫn ở bàn): theo
+                # bàn đó luôn. Quét sảnh lúc này sẽ hỏng vì iframe sảnh đã bị ẩn.
+                try:
+                    wm_page, _detect = find_wm_table(getattr(BR, "CDP_PORT", 9222))
+                except Exception:
+                    wm_page = None
+                if wm_page is not None:
+                    self.scan()
+                    open_key = getattr(self.browser, "wm_open_key", "") or ""
+                    key = "id:" + open_key if open_key else ""
+                    row = self.tables.get(key) if key else None
+                    if row is not None and row.get("letters"):
+                        self.events.put(("table_opened", (
+                            True, "Đang ở trong bàn %s · theo dõi tiếp." % row["label"], key)))
                         return
                 ok, note = self.stream.find_lobby_tab()
                 if not ok:
@@ -887,6 +910,7 @@ class BaccaratController:
         self.next_scan = 0.0
         self.session_lost = False
         self.auto_bet_letters = None
+        self.auto_bet_key = None
         self.auto_bet_note = ""
         # Đang đứng ở bàn đã xác nhận: theo dõi tiếp ngay, không quét lại sảnh.
         if self.sim.table_key:
@@ -937,7 +961,9 @@ class BaccaratController:
         self.cycle_waiting = False
         self.cycle_retry_at = 0.0
         self.auto_bet_letters = None
+        self.auto_bet_key = None
         self.auto_bet_note = ""
+        self.last_order = None
         self.tool_retry_at = 0.0
         if self.enter_valid:
             self.enter_valid = False
@@ -968,8 +994,14 @@ class BaccaratController:
     # -------------------------------------------------------------- đọc chip
     def chip_check(self):
         pending = self.sim.pending
-        order = self._resolve_order() if pending is None else {
-            "side": pending.get("side"), "stake": pending.get("stake")}
+        if pending is not None:
+            order = {"side": pending.get("side"), "stake": pending.get("stake")}
+        elif self.last_order is not None:
+            # Chưa chốt lệnh tay kế: chip còn trên bàn là của lệnh vừa đặt, so với lệnh
+            # mới sẽ báo "SAI CỬA" dù người dùng vừa đặt đúng.
+            order = self.last_order
+        else:
+            order = self._resolve_order()
         unit = (self.chip_live or {}).get("unit") or TB.DEFAULT_CHIP_UNIT
         try:
             return compare_chips(order.get("side"), order.get("stake") or 0,
@@ -1042,6 +1074,27 @@ class BaccaratController:
         self.tool_retry_at = now + 15.0
         self.enter_valid_table()
 
+    def _live_bound(self, live=None):
+        """Bộ đọc live đang bám đúng bàn theo dõi (không phải bàn vừa rời).
+
+        Sau khi mở bàn mới, ``WMReader`` chuyển bàn trong vài giây; trước đó snapshot
+        vẫn là cầu/số tay của bàn cũ, không được dùng để chốt lệnh cho bàn mới.
+        """
+        if not isinstance(live, dict):
+            if self.live_session is None:
+                return False
+            try:
+                live = self.live_snapshot()
+            except Exception:
+                return False
+        if not live.get("running"):
+            return False
+        key = str(self.sim.table_key or "")
+        table = str(live.get("table") or "").replace("WM ", "").strip()
+        if not key or not table:
+            return False
+        return key == table or key.endswith(table) or table.endswith(key)
+
     def _auto_bet_tick(self):
         """Tự chốt lệnh cho tay kế khi tool đang chạy (chế độ một nút).
 
@@ -1055,37 +1108,85 @@ class BaccaratController:
             return
         if not self.sim.table_key:
             return
-        letters = self.sim.letters
-        if letters == self.auto_bet_letters:
+        # Chưa bám đúng bàn (vừa mở bàn khác): chờ WebSocket nạp cầu bàn mới thay vì
+        # đặt theo số tay/xác suất của bàn vừa rời.
+        live = {}
+        if self.live_session is not None:
+            try:
+                live = self.live_snapshot()
+            except Exception:
+                live = {}
+        if not self._live_bound(live):
+            note = "Đang chờ dữ liệu bàn mới từ WebSocket · chưa đặt tay nào."
+            if note != self.auto_bet_note:
+                self.auto_bet_note = note
+                self.log(note, "info")
             return
+        letters = self.sim.letters
+        if letters == self.auto_bet_letters and self.sim.table_key == self.auto_bet_key:
+            return
+        # Số tay thật của lệnh sắp đặt (không dùng len(cầu): cầu đã bị cắt bớt khi
+        # shoe dài hơn giới hạn lưu lịch sử).
+        hand_no = self._next_hand_no(len(letters) + 1, live)
         # Chốt an toàn chống đặt trùng: nếu sổ đã có tay này cho cùng bàn thì không đặt lại
         # (bảo vệ khi nguồn dữ liệu phát lại cùng một ván).
-        signature = (self.sim.table_key, len(letters))
+        signature = (self.sim.table_key, hand_no)
         if signature in self.placed_signatures:
             self.auto_bet_letters = letters
+            self.auto_bet_key = self.sim.table_key
             self.auto_bet_note = "Tay này đã được xử lý · chờ tay kế."
             return
         order = self._resolve_order()
         side = order.get("side")
         if not side:
-            self.auto_bet_letters = letters
-            self.auto_bet_note = ("Chưa có cửa để đặt (chưa đọc được xác suất) · chờ tay kế."
-                                  if self.bet_config["side"] == "AUTO"
-                                  else "Chưa chọn được cửa · chờ tay kế.")
-            self.log(self.auto_bet_note, "info")
+            # Chưa có xác suất (dự đoán đang chạy/nạp lịch sử): KHÔNG khoá tay này,
+            # tick sau thử lại ngay khi predict xong — nhờ vậy tay đầu tiên sau khi
+            # nạp cầu cũ vẫn được đặt trong cửa sổ cược hiện tại.
+            note = ("Chưa có cửa để đặt (đang chờ xác suất) · sẽ thử lại."
+                    if self.bet_config["side"] == "AUTO"
+                    else "Chưa chọn được cửa · sẽ thử lại.")
+            if note != self.auto_bet_note:
+                self.auto_bet_note = note
+                self.log(note, "info")
             return
         pending = self.sim.set_order(side, order["stake"], reason=order["reason"])
         if pending is None:
             return
+        self.last_order = {"side": side, "stake": order["stake"]}
         self.placed_signatures.add(signature)
         if len(self.placed_signatures) > 500:
             self.placed_signatures = set(list(self.placed_signatures)[-200:])
         self.auto_bet_letters = letters
+        self.auto_bet_key = self.sim.table_key
         self.auto_bet_note = "Tự đặt tay %d · %s %s đv · %s" % (
-            len(letters) + 1, E.SIDE_NAME.get(side, side),
+            hand_no, E.SIDE_NAME.get(side, side),
             M.fmt_money(order["stake"]), order["reason"])
         self.log(self.auto_bet_note, "info")
         self._place_armed_bet(pending)
+
+    def _next_hand_no(self, fallback, live=None):
+        """Số tay của lệnh sắp đặt, lấy từ bộ đọc live (số tay thật của bàn).
+
+        Kết quả ván vừa rồi có ``result_hand``; nếu 21/38 đã báo vòng đang mở cược
+        (BETTING) thì chính vòng đó mới là tay sẽ nhận kết quả.
+        """
+        if not isinstance(live, dict):
+            live = {}
+            if self.live_session is not None:
+                try:
+                    live = self.live_snapshot()
+                except Exception:
+                    live = {}
+        result_hand = int(live.get("result_hand") or 0)
+        state = str(live.get("state") or "")
+        betting = int(live.get("hand") or 0)
+        if state == "BETTING" and betting > result_hand:
+            return betting
+        if result_hand:
+            return result_hand + 1
+        if betting:
+            return betting + 1
+        return fallback
 
     def _place_armed_bet(self, plan):
         """Đặt chip thật theo lệnh đã chốt (chạy ở thread nền)."""
@@ -1280,6 +1381,7 @@ class BaccaratController:
             self.cycle_waiting = False
             self.cycle_retry_at = 0.0
             self.chip_live = None
+            self.last_order = None
         self._save_state()
         self.log("Đã tạo phiên mới: vốn %s VN2 · chốt lời %.0f%% · cược %s." % (
             M.fmt_money(self.config["capital"]), self.config["take_profit_pct"],
@@ -1413,6 +1515,7 @@ class BaccaratController:
                 self.next_scan = 0.0
                 self.chip_live = None
                 self.chip_read_at = 0.0
+                self.last_order = None
                 self.log("Đã mở bàn %s." % self.tables[key]["label"])
             elif not ok:
                 if self._auth_blame():
@@ -1616,6 +1719,12 @@ class BaccaratController:
             if not isinstance(table_id, str) or not table_id or len(table_id) > 80:
                 table_id = ""
             key = "id:" + table_id if table_id else "".join(label.split()).casefold()
+            if (self.live_road and key == self.sim.table_key
+                    and not letters.startswith(self.live_road)):
+                # Lượt quét CDP bắt đầu trước khi ván mới về sẽ trả cầu ngắn hơn cầu
+                # WebSocket. Nhận nó là "Cầu đổi nguồn" oan → huỷ lệnh đang chờ chip;
+                # nên khi live đang chạy, cầu live là chuẩn cho bàn đang theo dõi.
+                letters = self.live_road
             previous = incoming.get(key)
             old = self.tables.get(key)
             conflict = bool(previous and previous["letters"] != letters)
@@ -1867,8 +1976,23 @@ class BaccaratController:
         self.wallet_text += " · vốn phiên đã đồng bộ"
         self._save_state()
 
+    def _watch_live_reader(self):
+        """Bộ đọc live chết vì lỗi CDP/mạng: gắn lại bộ đọc mới, giữ nguyên cầu."""
+        reader = self.live_reader
+        session = self.live_session
+        if reader is None or session is None or reader.is_alive() \
+                or self.live_stop_event.is_set():
+            return
+        self.log("AI live: bộ đọc đã dừng (%s) · tự gắn lại."
+                 % (getattr(reader, "last_error", "") or "thread"), "warn")
+        with self.lock:
+            self.live_reader = self._make_live_reader(session)
+            reader = self.live_reader
+        reader.start()
+
     def _tick(self):
         self._drain()
+        self._watch_live_reader()
         if not self.browser.connected:
             # Nút “VÀO BÀN HỢP LỆ” gắn Chrome ở thread riêng: lần đầu chưa có kết nối là
             # bình thường, không được coi là "Chrome đã đóng" rồi huỷ chế độ vừa bật.
@@ -1916,6 +2040,7 @@ class BaccaratController:
         self.chip_live = None
         self.chip_read_at = 0.0
         self.auto_start_key = None
+        self.live_road = ""
         if self.enter_valid:
             self.enter_valid = False
             self.valid_note = "Chrome đã đóng · huỷ tìm bàn hợp lệ."
@@ -1981,13 +2106,23 @@ class BaccaratController:
         """
         if not isinstance(live, dict):
             return False
-        if live.get("running"):
+        letters = str(live.get("history") or "")
+        key = self.sim.table_key
+        if not key:
+            if live.get("running"):
+                self.live_hand = int(live.get("hand") or 0)
+            self.live_road = ""
+            return False
+        # Chỉ nhận cầu live làm chuẩn khi bộ đọc đang chạy và đã có cầu của đúng bàn.
+        live_table = str(live.get("table") or "").replace("WM ", "").strip()
+        same_table = bool(live.get("running")) and (
+            not live_table or key.endswith(live_table) or live_table.endswith(key))
+        if same_table:
             # Live là nguồn số tay thật của bàn đang mở; gán (không lấy max) để khi
             # đổi bàn số tay không dính bàn cũ.
             self.live_hand = int(live.get("hand") or 0)
-        letters = str(live.get("history") or "")
-        key = self.sim.table_key
-        if not key or not letters:
+        self.live_road = letters if same_table else ""
+        if not letters:
             return False
         with self.lock:
             row = self.tables.get(key)
@@ -2022,6 +2157,23 @@ class BaccaratController:
         if changed:
             self._push_state()
 
+    def _make_live_reader(self, session):
+        """Chọn bộ đọc theo tab đang mở: WM đọc khung nhị phân, Petalive đọc text."""
+        port = getattr(BR, "CDP_PORT", 9222)
+        try:
+            wm_page, _detect = find_wm_page(port)
+        except Exception:
+            wm_page = None
+        if wm_page is not None:
+            return WMReader(on_round=session.on_round, on_state=session.on_state,
+                            on_status=lambda text, level="info":
+                            self.log("AI live: %s" % text, level),
+                            port=port, stop=self.live_stop_event)
+        return LiveReader(on_round=session.on_round, on_state=session.on_state,
+                          on_status=lambda text, level="info":
+                          self.log("AI live: %s" % text, level),
+                          port=port, stop=self.live_stop_event)
+
     def live_start(self):
         with self.lock:
             if self.live_reader is not None:
@@ -2032,25 +2184,10 @@ class BaccaratController:
                 on_status=lambda text, level="info": self.log("AI live: %s" % text, level),
                 **self._live_cfg_private())
             session.running = True
-            port = getattr(BR, "CDP_PORT", 9222)
-            # WM (M88) đọc lá bài từ WebSocket nhị phân của tab bàn; Petalive đọc khung
-            # text. Dò tab bàn WM trước để chọn đúng bộ đọc, không cần người dùng chọn.
-            try:
-                wm_page, _detect = find_wm_page(port)
-            except Exception:
-                wm_page = None
-            if wm_page is not None:
-                reader = WMReader(on_round=session.on_round, on_state=session.on_state,
-                                  on_status=lambda text, level="info":
-                                  self.log("AI live: %s" % text, level),
-                                  port=port, stop=self.live_stop_event)
-                boot_note = "Đã bật AI live · đọc bàn WM qua WebSocket."
-            else:
-                reader = LiveReader(on_round=session.on_round, on_state=session.on_state,
-                                    on_status=lambda text, level="info":
-                                    self.log("AI live: %s" % text, level),
-                                    port=port, stop=self.live_stop_event)
-                boot_note = "Đã bật AI live · chờ tab bàn Petalive."
+            reader = self._make_live_reader(session)
+            boot_note = ("Đã bật AI live · đọc bàn WM qua WebSocket."
+                         if isinstance(reader, WMReader)
+                         else "Đã bật AI live · chờ tab bàn Petalive.")
             self.live_session = session
             self.live_reader = reader
         reader.start()
@@ -2136,6 +2273,7 @@ class BaccaratController:
             pending = self.sim.set_order(order["side"], order["stake"], reason=order["reason"])
             if pending is None:
                 return {"ok": False, "error": "Lệnh cược không hợp lệ."}
+            self.last_order = {"side": order["side"], "stake": order["stake"]}
         self._place_armed_bet(pending)
         self._push_state()
         return {"ok": True, "side": order["side"], "stake": order["stake"],

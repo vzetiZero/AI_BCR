@@ -120,8 +120,24 @@ Một lần bấm chạy đúng chuỗi:
 Bàn đang mở được nhận ra qua class `game101 group<id>` của `#container` trong
 `iframe_101`, nên app chỉ đọc đúng bàn đang xem dù sảnh gửi kết quả của mọi bàn trên
 cùng một socket. `aibcr/live/wm_reader.py` cấp lá bài cho AI live; `browser.scan()`
-cấp cầu cho tool và tự nghe nền (`start_wm_watch`) để không bỏ lỡ `protocol 26`
-(mỗi ván chỉ gửi một lần).
+cấp cầu cho tool và tự nghe nền (`start_wm_watch`).
+
+Vào bàn là nạp ngay lịch sử `protocol 26` (tối đa 400 ván của shoe) nên AI có xác
+suất từ tay đầu thay vì phải chờ vài ván; shoe dự phòng chỉ trừ **40 ván cuối** vì
+shoe thật đã chia hết từ lâu. WM phát lại `protocol 26` sau **mỗi** ván, thường
+tới **muộn hơn** `protocol 25`; `LiveSession` bỏ ván trùng theo `(gameNo, gameNoRound)`
+(nếu thiếu thì theo bộ lá) và ghép lịch sử theo đúng số tay, nên cầu không bị cộng
+đôi và “Tay N” luôn bằng tay thật của bàn.
+
+`protocol 25` **không** mang số tay. Bộ đọc gán số tay cho kết quả theo **lịch sử
+`protocol 26`** (khớp bộ lá, không thì = ván cuối + 1), không lấy số tay của
+`protocol 21`, vì WM phát lại vòng cược vừa xong sau khi ván đã ngã — nhận bản phát
+lại đó sẽ làm “Tay N” lùi và lệnh cược bị arm lại cho tay cũ. Đổi shoe (`gameNo`
+khác) thì xoá cầu cũ, số tay đếm lại từ đầu.
+
+Khi AI live đang chạy, cầu WebSocket là nguồn chuẩn cho bàn đang theo dõi: lượt CDP
+bắt đầu trước khi ván mới về (cầu ngắn hơn) bị bỏ qua thay vì ghi đè, tránh báo
+“Cầu đổi nguồn” oan và huỷ lệnh đang chờ chip.
 
 WM đặt chip theo cấu hình (mục “Đặt cược WM” bên dưới); app không tự bấm khi chưa bật
 tool.
@@ -159,7 +175,9 @@ Người dùng chỉ cần mở Chrome đứng ở sảnh, rồi bấm **Chạy 
 
 1. tool tự gắn Chrome/ mở tab, nhận sảnh, quét và mở bàn đầu tiên có mã bàn;
 2. tự theo dõi cầu và **tự đặt cược từng tay** theo cấu hình (cửa `AUTO/P/B/T` + số đơn
-   vị); mỗi tay chỉ arm một lần (khoá theo chuỗi cầu), chờ bàn dọn chip rồi mới bấm;
+   vị); mỗi tay chỉ arm một lần (khoá theo chuỗi cầu), chờ bàn dọn chip rồi mới bấm.
+   WM công bố kết quả xong mới mở cửa cược ván kế (~25–35 giây sau) nên gate chờ
+   tối đa `BET_GATE_TIMEOUT = 45` giây trước khi bấm;
 3. nếu chưa vào được bàn (Chrome vừa mở, chưa đăng nhập) tool tự thử lại mỗi 15 giây;
 4. bấm **Dừng tool** → dừng phiên và tự rời bàn về sảnh.
 
@@ -213,7 +231,8 @@ Tab **AI dự đoán** bật/tắt luồng live mà không cần terminal:
 Card **Bàn đang theo dõi** cập nhật theo từng ván WebSocket (không chờ lượt quét):
 
 - **Tay hiện tại**: số tay lấy từ `gameNoRound` của bàn WM (Petalive đếm theo lịch
-  sử) nên không còn đứng ở tay cũ;
+  sử) nên không còn đứng ở tay cũ; lịch sử cũ được nạp khi vào bàn nên xác suất có
+  ngay từ tay đầu, và ván phát lại không bị cộng đôi;
 - **Big Road**: sơ đồ cột 6 hàng đúng quy ước (lặp cửa xuống dòng, đổi cửa mở cột,
   đủ 6 hàng thì đi sang phải), dựng từ `road.big_road()`;
 - **Dạng cầu**: dãy chuỗi gần nhất + câu `pattern_note` (số tay mỗi cửa, chuỗi tương
