@@ -165,32 +165,22 @@ class WMBet:
         return command
 
     def read(self):
-        """Đọc trạng thái bàn (khay chip, ô cược, số tiền đang treo, nút bấm)."""
-        import websocket
+        """Đọc trạng thái bàn (khay chip, ô cược, số tiền đang treo, nút bấm).
 
-        page = self.session._cdp_page()
-        if page is None:
-            self.last_error = "Không có tab WM trong Chrome."
-            return {"ok": False, "error": self.last_error}
-        ws = None
-        try:
-            ws = websocket.create_connection(
-                BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
-                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
-            command = self._command_factory(ws)
-            command("Runtime.enable")
-            value = command("Runtime.evaluate", {
-                "expression": READ_JS, "returnByValue": True, "silent": True,
-            }).get("result", {}).get("value")
-        except Exception as exc:
-            self.last_error = "Không đọc được bàn WM (%s)." % type(exc).__name__
-            return {"ok": False, "error": self.last_error}
-        finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+        Ưu tiên kết nối CDP dùng chung của ``WMSocket``: ``wait_phase`` gọi hàm này vài
+        lần mỗi giây, mở/đóng kết nối mới liên tục sẽ làm tab chậm và timeout.
+        """
+        value = None
+        socket = getattr(self.session, "wm_socket", None)
+        if socket is not None and getattr(socket, "_command", None) is not None:
+            try:
+                value = socket.evaluate(READ_JS)
+            except Exception:
+                value = None
+        if value is None:
+            value = self._read_once()
+            if value is None:
+                return {"ok": False, "error": self.last_error}
         if not isinstance(value, dict) or value.get("reason"):
             self.last_error = "Bàn WM chưa sẵn sàng (%s)." % (
                 (value or {}).get("reason", "no_value"))
@@ -202,6 +192,34 @@ class WMBet:
         self.last_state = value
         self.last_error = ""
         return value
+
+    def _read_once(self):
+        """Đọc trạng thái qua một kết nối CDP riêng (dự phòng khi chưa có WMSocket)."""
+        import websocket
+
+        page = self.session._cdp_page()
+        if page is None:
+            self.last_error = "Không có tab WM trong Chrome."
+            return None
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            command = self._command_factory(ws)
+            command("Runtime.enable")
+            return command("Runtime.evaluate", {
+                "expression": READ_JS, "returnByValue": True, "silent": True,
+            }).get("result", {}).get("value")
+        except Exception as exc:
+            self.last_error = "Không đọc được bàn WM (%s)." % type(exc).__name__
+            return None
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ bấm chuột
     def _click(self, command, box, pause=0.14):
@@ -225,6 +243,24 @@ class WMBet:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------ pha cược
+    def wait_phase(self, deadline_seconds=40.0, poll=0.25):
+        """Chờ bàn mở cửa cược: khay chip bấm được (không bị lớp kết quả che).
+
+        Đây là điều kiện thật của WM — chính client cũng chỉ bấm được khi lớp phủ kết quả
+        đã tan. Dùng chung cho cả WebSocket: gửi lệnh sớm sẽ bị server trả ``bOk: false``.
+        Không dựa vào class ``#opencard-wrapper`` vì nó có thể "on" suốt ván.
+        """
+        deadline = time.monotonic() + max(1.0, float(deadline_seconds))
+        while time.monotonic() < deadline:
+            state = self.read()
+            if state.get("ok"):
+                chips = [chip for chip in state.get("chips") or [] if box_clickable(chip)]
+                if chips and any(hovered(chip) for chip in chips):
+                    return state
+            time.sleep(poll)
+        return {}
+
     # ------------------------------------------------------------------ đặt cược
     def place(self, side, units, confirm=True, max_chips=20, wait_seconds=40.0,
               settle_seconds=1.2):
@@ -242,6 +278,11 @@ class WMBet:
             return {"ok": False, "error": "Số tiền không hợp lệ: %r" % (units,)}
         if target <= 0:
             return {"ok": False, "error": "Số tiền phải lớn hơn 0."}
+
+        # Chờ đúng cửa sổ cược trước khi làm bất cứ điều gì (áp dụng cho cả WS và chuột).
+        phase = self.wait_phase(wait_seconds)
+        if not phase:
+            return {"ok": False, "error": "Bàn chưa mở cược trong %d giây." % int(wait_seconds)}
 
         # Đường nhanh: gửi lệnh cược thẳng qua WebSocket (protocol 22). Không phụ thuộc
         # khay chip/toạ độ nên không bị lớp phủ chia bài che. Chỉ dùng khi bàn đang sạch
@@ -272,14 +313,10 @@ class WMBet:
                 return value if isinstance(value, dict) and not value.get("reason") else {}
 
             self._park_mouse(command)
-            # Hiệu ứng chia bài phủ lên khay chip: chờ tới khi khay thật sự bấm được.
-            deadline = time.monotonic() + max(1.0, float(wait_seconds))
+            # Bàn đã mở cược (wait_phase ở trên); đọc lại một lần cho toạ độ mới nhất.
             state = read()
+            deadline = time.monotonic() + max(1.0, float(wait_seconds))
             while time.monotonic() < deadline:
-                if state.get("open_result"):
-                    time.sleep(0.4)
-                    state = read()
-                    continue
                 chips = [chip for chip in state.get("chips") or []
                          if box_clickable(chip)]
                 if chips and any(hovered(chip) for chip in chips) and state.get("spots"):
@@ -381,12 +418,9 @@ class WMBet:
             return None
         result = socket.place(side, target)
         if not result.get("ok"):
-            # Lỗi gửi/chưa có phản hồi: rơi về đường bấm chuột (an toàn hơn là bỏ tay).
-            if result.get("error") in ("no_reply", "send_failed", "socket_not_open",
-                                       "not_connected", "no_socket"):
-                return None
-            return {"ok": False, "error": "WS: %s" % result.get("error"),
-                    "denominations": current.get("denominations") or []}
+            # Server từ chối/lỗi gửi: KHÔNG bỏ tay — rơi về bấm chuột (đường đã kiểm chứng
+            # với chính client của sàn, có đọc lại số tiền sau từng chip).
+            return None
         # Xác minh bằng số chip thật đang treo trên bàn.
         deadline = time.monotonic() + 2.5
         placed = 0.0

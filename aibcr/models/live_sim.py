@@ -228,6 +228,16 @@ class LiveSimulation:
         self.pending = None
         self.note = reason
 
+    def detach(self, reason="Đã rời bàn."):
+        """Rời bàn: dừng theo dõi và bỏ liên kết bàn (dùng khi tool dừng về sảnh)."""
+        self.pause(reason)
+        self.table_key = None
+        self.table_name = "Chưa chọn bàn"
+        self.letters = ""
+        self.results = []
+        self.place_skips = 0
+        self.cycle_done = False
+
     def set_order(self, side, stake, reason="", baseline=None):
         """Chốt lệnh cược cho tay kế tiếp (do UI bấm nút “Tự đặt cược”)."""
         if side not in (E.BANKER, E.PLAYER, E.TIE) or float(stake or 0) <= 0:
@@ -237,7 +247,7 @@ class LiveSimulation:
             "baseline": self.letters if baseline is None else baseline,
             "armed_at": time.time(), "placed": None,
         }
-        self.note = "Đã chốt %s · %s VN2 · chờ ván mới để bấm chip." % (
+        self.note = "Đã chốt %s · %s đv · chờ ván mới để bấm chip." % (
             E.SIDE_NAME[side], M.fmt_money(stake))
         return self.pending
 

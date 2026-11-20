@@ -67,9 +67,11 @@ class BetFrameTests(unittest.TestCase):
 class CurrentTableTests(unittest.TestCase):
     """Chọn đúng socket của bàn đang mở, không gửi lệnh sang bàn khác."""
 
-    def _state(self, frames, group=1352, states=None):
+    def _state(self, frames, group=1352, states=None, scopes=None):
         return {"recent21": frames, "open_group": group,
-                "states": states if states is not None else [1, 1, 1]}
+                "states": states if states is not None else [1, 1, 1],
+                "scopes": scopes if scopes is not None else {0: "iframe", 1: "top",
+                                                            2: "iframe"}}
 
     def test_picks_matching_group(self):
         frames = [
@@ -84,8 +86,8 @@ class CurrentTableTests(unittest.TestCase):
 
     def test_newest_frame_of_the_table_wins(self):
         frames = [
-            {"socket": 1, "at": 1000, "data": {"groupID": 1352, "gameNo": 7}},
-            {"socket": 1, "at": 5000, "data": {"groupID": 1352, "gameNo": 8}},
+            {"socket": 2, "at": 1000, "data": {"groupID": 1352, "gameNo": 7}},
+            {"socket": 2, "at": 5000, "data": {"groupID": 1352, "gameNo": 8}},
         ]
         self.assertEqual(wm_ws.current_table(self._state(frames))[1]["gameNo"], 8)
 
@@ -96,6 +98,20 @@ class CurrentTableTests(unittest.TestCase):
     def test_closed_socket_is_ignored(self):
         frames = [{"socket": 2, "at": 9000, "data": {"groupID": 1352}}]
         self.assertIsNone(wm_ws.current_table(self._state(frames, states=[1, 1, 3])))
+
+    def test_prefers_table_iframe_socket(self):
+        """Socket sảnh nhận được dữ liệu bàn nhưng server từ chối lệnh cược từ đó."""
+        frames = [
+            {"socket": 1, "at": 9000, "data": {"groupID": 1352, "gameNo": 11}},  # top
+            {"socket": 2, "at": 5000, "data": {"groupID": 1352, "gameNo": 11}},  # iframe
+        ]
+        index, _data, _at = wm_ws.current_table(self._state(frames))
+        self.assertEqual(index, 2)
+
+    def test_falls_back_to_any_socket_when_group_unknown(self):
+        frames = [{"socket": 1, "at": 9000, "data": {"groupID": 613}}]
+        state = self._state(frames, group=None)
+        self.assertEqual(wm_ws.current_table(state)[0], 1)
 
 
 class ClickableTests(unittest.TestCase):

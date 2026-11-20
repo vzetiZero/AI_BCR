@@ -34,60 +34,101 @@ PROTOCOL_BET = 22
 # Ghi chú cố định của client WM khi xác nhận cược (chép từ khung thật).
 BET_REMARK = "1,0"
 # Tên biến toàn cục của hook; đổi tên khi đổi cấu trúc để không đụng hook cũ còn sót.
-HOOK_NAME = "__wmHook2"
+HOOK_NAME = "__wmHook3"
 
 HOOK_JS = r"""(() => {
-    if (window.__wmHook2) return 'already';
-    const Native = window.WebSocket;
+    const isTop = (window === window.top);
+    const label = isTop ? 'top' : 'iframe';
+    if (window.__wmHook3) return 'already';
     const decoder = new TextDecoder('utf-8');
     const hook = {sockets: [], urls: [], protocols: {}, recent21: [], last22: null,
-                  sent: [], errors: []};
-    window.__wmHook2 = hook;
-    const indexOf = (ws) => hook.sockets.indexOf(ws);
-    function Wrapped(url, protocols) {
-        const ws = protocols === undefined ? new Native(url) : new Native(url, protocols);
-        try {
-            hook.sockets.push(ws);
-            hook.urls.push(String(url));
-            const send = ws.send.bind(ws);
-            ws.send = function (data) {
-                try {
-                    let text = data;
-                    if (data instanceof ArrayBuffer) text = decoder.decode(new Uint8Array(data));
-                    hook.sent.push(String(text).slice(0, 240));
-                    if (hook.sent.length > 60) hook.sent.shift();
-                } catch (e) {}
-                return send(data);
-            };
-            ws.addEventListener('message', function (event) {
-                try {
-                    let text = event.data;
-                    if (text instanceof ArrayBuffer) text = decoder.decode(new Uint8Array(text));
-                    if (typeof text !== 'string') return;
-                    const msg = JSON.parse(text);
-                    const proto = msg && msg.protocol;
-                    if (typeof proto !== 'number') return;
-                    const idx = indexOf(ws);
-                    hook.protocols[idx] = proto;
-                    if (proto === 21) {
-                        // Một socket đẩy protocol 21 cho NHIỀU bàn (sảnh + bàn đang mở),
-                        // nên giữ danh sách gần đây rồi lọc theo groupID bàn đang mở.
-                        hook.recent21.push({socket: idx, at: Date.now(), data: msg.data});
-                        if (hook.recent21.length > 60) hook.recent21.shift();
-                    } else if (proto === 22) {
-                        hook.last22 = {socket: idx, at: Date.now(), data: msg.data};
+                  sent: [], errors: [], scope: {}, top: isTop};
+    window.__wmHook3 = hook;
+    // Chạy trong CẢ khung gốc lẫn iframe (Page.addScriptToEvaluateOnNewDocument áp cho
+    // mọi frame). Socket đặt cược của WM nằm trong iframe bàn, nên phải hook riêng nó —
+    // hook khung gốc không thấy socket đó.
+    const make = (win, store, tag) => {
+        if (!win) return;
+        const Native = win.WebSocket;
+        if (!Native) return;
+        const indexOf = (ws) => store.sockets.indexOf(ws);
+        function Wrapped(url, protocols) {
+            const ws = protocols === undefined ? new Native(url) : new Native(url, protocols);
+            try {
+                store.scope[store.sockets.length] = tag;
+                store.sockets.push(ws);
+                store.urls.push(String(url));
+                const send = ws.send.bind(ws);
+                ws.send = function (data) {
+                    try {
+                        let text = data;
+                        if (data instanceof ArrayBuffer) text = decoder.decode(new Uint8Array(data));
+                        store.sent.push(String(text).slice(0, 240));
+                        if (store.sent.length > 60) store.sent.shift();
+                    } catch (e) {}
+                    return send(data);
+                };
+                ws.addEventListener('message', function (event) {
+                    try {
+                        let text = event.data;
+                        if (text instanceof ArrayBuffer) text = decoder.decode(new Uint8Array(text));
+                        if (typeof text !== 'string') return;
+                        const msg = JSON.parse(text);
+                        const proto = msg && msg.protocol;
+                        if (typeof proto !== 'number') return;
+                        const idx = indexOf(ws);
+                        store.protocols[idx] = proto;
+                        if (proto === 21) {
+                            store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
+                            if (store.recent21.length > 60) store.recent21.shift();
+                        } else if (proto === 22) {
+                            store.last22 = {socket: idx, at: Date.now(), data: msg.data};
+                        }
+                    } catch (e) {
+                        if (store.errors.length < 20) store.errors.push(String(e).slice(0, 80));
                     }
-                } catch (e) {
-                    if (hook.errors.length < 20) hook.errors.push(String(e).slice(0, 80));
-                }
-            });
-        } catch (e) {}
-        return ws;
+                });
+            } catch (e) {}
+            return ws;
+        }
+        Wrapped.prototype = Native.prototype;
+        ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach((k) => { Wrapped[k] = Native[k]; });
+        win.WebSocket = Wrapped;
+    };
+    window.__wmMakeHook = make;
+    make(window, hook, label);
+    return 'installed:' + label;
+})()"""
+
+# Cài hook vào iframe bàn hiện tại (iframe có thể đã tồn tại trước khi cài hook).
+INSTALL_TABLE_JS = r"""(() => {
+    const frame = document.getElementById('iframe_101');
+    if (!frame || !frame.contentWindow) return 'no_frame';
+    try {
+        const child = frame.contentWindow;
+        const factory = window.__wmMakeHook;
+        if (typeof factory !== 'function') return 'no_factory';
+        if (!child.__wmHook3) {
+            child.__wmHook3 = {sockets: [], urls: [], protocols: {}, recent21: [],
+                               last22: null, sent: [], errors: [], scope: {}, top: false};
+        }
+        factory(child, child.__wmHook3, 'iframe');
+        return 'ok';
+    } catch (e) { return 'err:' + String(e).slice(0, 60); }
+})()"""
+
+# Nạp lại iframe bàn để nó tạo socket MỚI (socket cũ tạo trước khi cài hook nên không
+# bắt được). Chỉ nạp lại iframe — không đụng khung ngoài, bàn vẫn y nguyên.
+RELOAD_TABLE_JS = r"""(() => {
+    const frame = document.getElementById('iframe_101');
+    if (!frame || !frame.contentWindow) return 'no_frame';
+    try {
+        frame.contentWindow.location.reload();
+        return 'reload';
+    } catch (e) {
+        try { frame.src = frame.getAttribute('src') || frame.src; return 'reload_src'; }
+        catch (err) { return 'err:' + String(err).slice(0, 60); }
     }
-    Wrapped.prototype = Native.prototype;
-    ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach((k) => { Wrapped[k] = Native[k]; });
-    window.WebSocket = Wrapped;
-    return 'installed';
 })()"""
 
 READ_JS = r"""(() => {
@@ -96,48 +137,82 @@ READ_JS = r"""(() => {
     const box = doc.getElementById('container');
     const m = box ? /(?:^|\s)group(\d+)/.exec((box.className || '').toString()) : null;
     const openGroup = m ? parseInt(m[1], 10) : null;
-    // Socket có thể do khung gốc hoặc do iframe bàn tạo: lấy realm nào thật sự có socket.
-    const candidates = [window];
-    try { if (frame && frame.contentWindow) candidates.push(frame.contentWindow); } catch (e) {}
-    let h = null, scope = '';
-    for (let i = 0; i < candidates.length; i++) {
-        const hook = candidates[i].__wmHook2;
-        if (hook && hook.sockets && hook.sockets.length) {
-            h = hook;
-            scope = i === 0 ? 'top' : 'iframe';
-            break;
+    // Hook chạy riêng trong mỗi frame: gộp socket của khung gốc (sảnh) và iframe (bàn).
+    const stores = [];
+    const push = (hook, label) => {
+        if (hook && hook.sockets) stores.push({hook: hook, label: label});
+    };
+    push(window.__wmHook3, 'top');
+    try {
+        const child = frame && frame.contentWindow;
+        if (child && child.__wmHook3 && child.__wmHook3 !== window.__wmHook3) {
+            push(child.__wmHook3, 'iframe');
         }
-        if (hook && !h) { h = hook; scope = i === 0 ? 'top' : 'iframe'; }
+    } catch (e) {}
+    if (!stores.length) return {installed: false, open_group: openGroup};
+    const merged = {urls: [], states: [], scopes: {}, protocols: {}, recent21: [],
+                    last22: null, sent: [], errors: [], offsets: {}};
+    for (const entry of stores) {
+        const hook = entry.hook;
+        const base = merged.states.length;
+        merged.offsets[entry.label] = base;
+        for (let i = 0; i < hook.sockets.length; i++) {
+            merged.states.push(hook.sockets[i].readyState);
+            merged.scopes[base + i] = entry.label;
+            merged.urls.push(hook.urls[i] || '');
+        }
+        for (const key of Object.keys(hook.protocols || {})) {
+            merged.protocols[base + parseInt(key, 10)] = hook.protocols[key];
+        }
+        for (const item of (hook.recent21 || [])) {
+            merged.recent21.push({socket: base + item.socket, at: item.at, data: item.data});
+        }
+        if (hook.last22) {
+            const at = hook.last22.at || 0;
+            if (!merged.last22 || at > (merged.last22.at || 0)) {
+                merged.last22 = {socket: base + hook.last22.socket, at: at,
+                                 data: hook.last22.data, scope: entry.label,
+                                 offset: base};
+            }
+        }
+        for (const line of (hook.sent || []).slice(-6)) merged.sent.push(line);
     }
-    if (!h) return {installed: false, open_group: openGroup, scope: ''};
-    return {installed: true, urls: h.urls,
-            states: h.sockets.map((s) => s.readyState),
-            protocols: h.protocols, recent21: h.recent21, last22: h.last22,
-            open_group: openGroup, scope: scope,
-            sent: h.sent.slice(-6), errors: h.errors};
+    return {installed: true, urls: merged.urls, states: merged.states,
+            scopes: merged.scopes, protocols: merged.protocols,
+            recent21: merged.recent21, last22: merged.last22,
+            open_group: openGroup, sent: merged.sent.slice(-6),
+            errors: merged.errors, offsets: merged.offsets};
 })()"""
 
 SEND_JS = r"""(() => {
     const frame = document.getElementById('iframe_101');
-    const candidates = [window];
-    try { if (frame && frame.contentWindow) candidates.push(frame.contentWindow); } catch (e) {}
-    let h = null;
-    for (let i = 0; i < candidates.length; i++) {
-        const hook = candidates[i].__wmHook2;
-        if (hook && hook.sockets && hook.sockets.length) { h = hook; break; }
-        if (hook && !h) h = hook;
-    }
-    if (!h) return {ok: false, error: 'no_hook'};
-    const socket = h.sockets[%d];
-    if (!socket) return {ok: false, error: 'no_socket'};
-    if (socket.readyState !== 1) return {ok: false, error: 'socket_not_open'};
+    const want = %d;
+    const stores = [];
+    if (window.__wmHook3) stores.push({hook: window.__wmHook3, label: 'top'});
     try {
-        const bytes = new TextEncoder().encode(%s);
-        socket.send(bytes.buffer);
-        return {ok: true, bytes: bytes.length};
-    } catch (e) {
-        return {ok: false, error: String(e).slice(0, 120)};
+        const child = frame && frame.contentWindow;
+        if (child && child.__wmHook3 && child.__wmHook3 !== window.__wmHook3) {
+            stores.push({hook: child.__wmHook3, label: 'iframe'});
+        }
+    } catch (e) {}
+    let offset = 0;
+    for (const entry of stores) {
+        const count = entry.hook.sockets.length;
+        if (want < offset + count) {
+            const socket = entry.hook.sockets[want - offset];
+            if (!socket) return {ok: false, error: 'no_socket'};
+            if (socket.readyState !== 1) return {ok: false, error: 'socket_not_open'};
+            try {
+                const bytes = new TextEncoder().encode(%s);
+                socket.send(bytes.buffer);
+                return {ok: true, bytes: bytes.length, scope: entry.label};
+            } catch (e) {
+                return {ok: false, error: String(e).slice(0, 120)};
+            }
+        }
+        offset += count;
     }
+    return {ok: false, error: 'no_socket'};
 })()"""
 
 
@@ -153,37 +228,45 @@ def bet_frame(side, amount, game_no, round_no, serial=1):
 def current_table(state):
     """Socket + khung 21 của ĐÚNG bàn đang mở: ``(index, data, seen_at_ms)`` hoặc ``None``.
 
-    Một socket của WM đẩy ``protocol 21`` cho nhiều bàn (sảnh + bàn đang mở), nên phải
-    lọc theo ``groupID`` khớp class ``#container`` của iframe bàn rồi lấy khung mới nhất.
+    Hai điều kiện:
+      * ``groupID`` khớp bàn đang mở (sàn đẩy 21 cho nhiều bàn trên cùng socket);
+      * socket phải thuộc **iframe bàn** khi có — socket khung gốc (sảnh) nhận được dữ
+        liệu bàn nhưng server từ chối lệnh cược gửi từ đó (``bOk: false``).
     """
     frames = (state or {}).get("recent21") or []
     states = (state or {}).get("states") or []
+    scopes = (state or {}).get("scopes") or {}
     group = (state or {}).get("open_group")
 
     def open_socket(index):
         return 0 <= index < len(states) and states[index] == 1
 
-    best = None
-    for entry in frames:
-        try:
-            index = int((entry or {}).get("socket"))
-        except (TypeError, ValueError):
-            continue
-        if not open_socket(index):
-            continue
-        data = (entry or {}).get("data") or {}
-        if group is not None and data.get("groupID") != group:
-            continue
-        at = float((entry or {}).get("at") or 0)
-        if best is None or at > best[2]:
-            best = (index, data, at)
-    return best
+    def pick(only_iframe):
+        best = None
+        for entry in frames:
+            try:
+                index = int((entry or {}).get("socket"))
+            except (TypeError, ValueError):
+                continue
+            if not open_socket(index):
+                continue
+            if only_iframe and scopes.get(str(index), scopes.get(index)) != "iframe":
+                continue
+            data = (entry or {}).get("data") or {}
+            if group is not None and data.get("groupID") != group:
+                continue
+            at = float((entry or {}).get("at") or 0)
+            if best is None or at > best[2]:
+                best = (index, data, at)
+        return best
+
+    return pick(True) or (None if group is not None else pick(False))
 
 
 class WMSocket(threading.Thread):
     """Thread giữ kết nối CDP + hook WebSocket của tab WM, gửi lệnh cược."""
 
-    def __init__(self, session=None, on_status=None, reload_on_start=True):
+    def __init__(self, session=None, on_status=None, reload_on_start=False):
         super().__init__(daemon=True, name="wm-socket")
         self.session = session or BR.BrowserSession()
         self.on_status = on_status
@@ -219,6 +302,24 @@ class WMSocket(threading.Thread):
                 "expression": expression, "returnByValue": True, "silent": True,
             }, timeout)
         return (result or {}).get("result", {}).get("value")
+
+    def click_at(self, x, y, pause=0.0):
+        """Bấm chuột thật tại toạ độ khung gốc bằng kết nối CDP dùng chung.
+
+        Dùng chung kết nối với hook thay vì mở kết nối mới mỗi lần bấm: mở/đóng CDP liên
+        tục làm tab chậm và dễ timeout.
+        """
+        with self.lock:
+            self._command_locked("Input.dispatchMouseEvent",
+                                 {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
+            self._command_locked("Input.dispatchMouseEvent",
+                                 {"type": "mousePressed", "x": x, "y": y, "button": "left",
+                                  "buttons": 1, "clickCount": 1})
+            self._command_locked("Input.dispatchMouseEvent",
+                                 {"type": "mouseReleased", "x": x, "y": y, "button": "left",
+                                  "buttons": 0, "clickCount": 1})
+        if pause:
+            time.sleep(pause)
 
     def state(self, fresh=False):
         """Ảnh chụp hook (đọc trực tiếp nếu ``fresh`` hoặc cache đã cũ)."""
@@ -295,12 +396,33 @@ class WMSocket(threading.Thread):
         return False
 
     def prepare(self, timeout=25.0):
-        """Kết nối, cài hook; chưa có socket thì tải lại tab một lần (nếu được phép)."""
-        if self._connect() and self.wait_ready(4.0):
+        """Kết nối + cài hook. Chỉ nạp lại khung khi ``reload_on_start`` cho phép.
+
+        Nạp lại khung bàn sẽ làm bàn nháy và có thể mất trạng thái cược, nên khi đang đứng
+        trong bàn (``reload_on_start=False``) ta chỉ cài hook sẵn và để đường bấm chip
+        xử lý — không đụng vào bàn đang theo dõi.
+        """
+        if not self._connect():
+            return False
+        if self.wait_ready(3.0):
             return True
+        try:
+            self.evaluate(INSTALL_TABLE_JS)
+            if self.ready():
+                return True
+        except Exception:
+            pass
         if not self.reload_on_start or self._reloaded:
-            return self.wait_ready(timeout)
+            return self.wait_ready(min(5.0, timeout))
         self._reloaded = True
+        try:
+            # Ưu tiên nạp lại riêng khung bàn (khung ngoài và sảnh giữ nguyên).
+            self.evaluate(RELOAD_TABLE_JS)
+            self._status("Đang nạp lại khung bàn để bắt socket đặt cược…", "info")
+            if self.wait_ready(timeout):
+                return True
+        except Exception:
+            pass
         try:
             with self.lock:
                 self._command_locked("Page.reload", {"ignoreCache": False}, timeout=15)
@@ -311,17 +433,34 @@ class WMSocket(threading.Thread):
 
     # ------------------------------------------------------------------ vòng nền
     def run(self):
+        """Vòng nền: giữ hook sống và bắt socket khi bàn được mở lại.
+
+        Không tải lại tab (sẽ mất bàn). Chỉ báo trạng thái một lần để log không spam khi
+        socket chưa sẵn sàng và cược đang đi bằng đường bấm chip.
+        """
+        warned = False
         while not self.stop_event.is_set():
             try:
                 if self._command is None:
-                    if not self.prepare(25.0):
-                        self._status("Chưa bắt được socket WM; sẽ bấm chip bằng chuột.", "warn")
-                        self._close()
-                        self.stop_event.wait(20.0)
-                        continue
-                    self._status("Socket WM sẵn sàng · đặt cược gửi thẳng qua WebSocket.",
-                                 "win")
+                    self._connect()
+                    try:
+                        self.evaluate(INSTALL_TABLE_JS)
+                    except Exception:
+                        pass
                 self.state(fresh=True)
+                if not self.ready():
+                    try:
+                        self.evaluate(INSTALL_TABLE_JS)
+                    except Exception:
+                        pass
+                if self.ready():
+                    if warned:
+                        self._status("Socket WM sẵn sàng · đặt cược gửi thẳng qua WebSocket.",
+                                     "win")
+                        warned = False
+                elif not warned:
+                    self._status("Cược bằng bấm chip (chưa bắt được socket WM).", "info")
+                    warned = True
                 self.stop_event.wait(0.5)
             except Exception as exc:
                 self.last_error = "Mất kết nối socket WM (%s)." % type(exc).__name__
@@ -402,6 +541,51 @@ class WMSocket(threading.Thread):
 
 
 # ------------------------------------------------------------------ dùng chung
+def install_hook(session):
+    """Cài hook WebSocket cho các document MỚI của tab (không tải lại trang).
+
+    Dùng khi người dùng đang đứng trong bàn: tải lại tab sẽ đẩy Chrome về sảnh và mất
+    bàn, nên chỉ cài hook sẵn — lần tải trang sau (hoặc lần vào bàn từ sảnh) socket sẽ
+    được bắt và lệnh cược đi qua WebSocket.
+    """
+    import websocket
+
+    page = session._cdp_page()
+    if page is None:
+        return False
+    ws = None
+    try:
+        ws = websocket.create_connection(
+            BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
+            redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+        state = {"seq": 0}
+
+        def command(method, params=None):
+            state["seq"] += 1
+            seq = state["seq"]
+            ws.settimeout(BR.SCRIPT_TIMEOUT)
+            ws.send(json.dumps({"id": seq, "method": method, "params": params or {}}))
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") == seq:
+                    if message.get("error"):
+                        raise RuntimeError(str(message["error"])[:120])
+                    return message.get("result", {})
+
+        command("Page.enable")
+        command("Page.addScriptToEvaluateOnNewDocument",
+                {"source": HOOK_JS, "runImmediately": True})
+        return True
+    except Exception:
+        return False
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+
 def get_socket(session, start=True, reload_on_start=False, on_status=None):
     """Lấy (và khởi động) một ``WMSocket`` dùng chung cho cả app."""
     socket = getattr(session, "wm_socket", None)

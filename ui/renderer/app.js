@@ -224,7 +224,7 @@ function renderTables(rows) {
   });
   if (title) title.textContent = `Bàn đọc được · ${list.length}`;
   if (!list.length) {
-    box.innerHTML = '<p class="hint">Không có bàn nào khớp. Bấm “VÀO BÀN HỢP LỆ” để quét lại sảnh.</p>';
+    box.innerHTML = '<p class="hint">Không có bàn nào khớp. Bấm “Chạy tool” để quét lại sảnh.</p>';
     return;
   }
   box.innerHTML = list
@@ -286,6 +286,10 @@ function renderBaConfig(config) {
   setValue('#ba-tables-target', config.tables_to_play);
   setValue('#ba-bet-side', config.bet_side);
   setValue('#ba-bet-stake', config.bet_stake);
+  const stakeValue = Number(config.bet_stake);
+  document.querySelectorAll('#ba-stake-presets .preset').forEach((item) => {
+    item.classList.toggle('on', Number(item.dataset.stake) === stakeValue);
+  });
   setValue('#ba-start-url', config.start_url);
   setValue('#ba-ai-mode', config.ai_mode);
   setValue('#ba-ai-url', config.ai_url);
@@ -435,7 +439,7 @@ function renderBaccarat(snapshot) {
   const enterButton = $('#ba-enter-valid');
   if (enterButton) {
     enterButton.disabled = !!enter.active;
-    enterButton.textContent = enter.active ? 'ĐANG TÌM BÀN HỢP LỆ…' : 'VÀO BÀN HỢP LỆ';
+    enterButton.textContent = enter.active ? 'Đang vào bàn…' : 'Vào bàn thủ công';
   }
 
   setText('#ba-conn-note', snapshot.chrome_note || '');
@@ -480,7 +484,7 @@ function renderBaccarat(snapshot) {
     if (!table.key) {
       planState.textContent = 'CHƯA CÓ BÀN';
       planState.className = 'hero-state';
-      planBox.textContent = 'Bấm “VÀO BÀN HỢP LỆ” để mở bàn đầu tiên có mã bàn.';
+      planBox.textContent = 'Bấm “Chạy tool” để tự vào bàn và đặt cược.';
       reasonText = '';
     } else if (money.blocked) {
       planState.textContent = 'ĐÃ CHẶN';
@@ -500,7 +504,7 @@ function renderBaccarat(snapshot) {
       planState.textContent = 'CHỜ';
       planState.className = 'hero-state';
       planBox.textContent = table.running
-        ? 'Chọn cửa + chip rồi bấm “Tự đặt cược”.' : 'Chưa theo dõi bàn.';
+        ? 'Tool tự đặt theo cửa + chip đã lưu.' : 'Chưa theo dõi bàn.';
     }
   }
   if (planReason) planReason.textContent = reasonText;
@@ -514,7 +518,7 @@ function renderBaccarat(snapshot) {
     if (table.entry_waiting) noteBits.push('chờ kết quả tay hiện tại');
     if (table.place_skips) noteBits.push(`bỏ ${table.place_skips} tay`);
   } else {
-    noteBits.push('Chưa vào bàn — bấm “VÀO BÀN HỢP LỆ”.');
+    noteBits.push('Chưa vào bàn — bấm “Chạy tool”.');
   }
   setText('#ba-table-note', [table.note, noteBits.join(' · ')].filter(Boolean).join(' — '));
 
@@ -626,6 +630,19 @@ function betFormParams() {
 $('#ba-bet-save').addEventListener('click', async () => {
   const reply = await call('baccarat', 'bet.config', betFormParams());
   if (reply) toast(reply.note || 'Đã lưu lệnh cược.');
+});
+
+/* Chip nhanh: 10 = 10k, 50 = 50k … (1 đơn vị = 1.000đ trên bàn WM) */
+document.querySelectorAll('#ba-stake-presets .preset').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const value = Number(button.dataset.stake);
+    if (!value) return;
+    $('#ba-bet-stake').value = String(value);
+    document.querySelectorAll('#ba-stake-presets .preset')
+      .forEach((item) => item.classList.toggle('on', item === button));
+    const reply = await call('baccarat', 'bet.config', betFormParams());
+    if (reply) toast(`Chip ${value} = ${(value * 1000).toLocaleString('vi-VN')}đ mỗi tay.`);
+  });
 });
 
 $('#ba-bet-place').addEventListener('click', async () => {

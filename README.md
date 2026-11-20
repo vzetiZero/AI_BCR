@@ -123,28 +123,29 @@ cùng một socket. `aibcr/live/wm_reader.py` cấp lá bài cho AI live; `brows
 cấp cầu cho tool và tự nghe nền (`start_wm_watch`) để không bỏ lỡ `protocol 26`
 (mỗi ván chỉ gửi một lần).
 
-WM **chưa** tự bấm chip: app chỉ đọc lá bài/cầu, gợi ý cửa và hiện tổng cược 3 cửa
-của cả bàn; việc đặt chip vẫn do người dùng bấm trên bàn.
+WM đặt chip theo cấu hình (mục “Đặt cược WM” bên dưới); app không tự bấm khi chưa bật
+tool.
 
 ### Đặt cược WM (`wm_bet.py`, `wm_ws.py`)
 
 Port nguyên tắc an toàn từ dự án LONG-LONG cũ (`bcr/adapters/longlong_table.py`) sang bàn
-WM, thêm đường WebSocket:
+WM:
 
 1. **Chia tiền theo mệnh giá khay** (`models/chips.decompose`, quy hoạch động): khay WM
    in `10 / 20 / 50 / 100 / 500 / 1k` theo nghìn đồng nên **1 đơn vị sảnh = 1.000đ**
    (chip `10` = 10.000đ). Không chia khít được thì **không đặt** (không bao giờ đặt thiếu).
-2. **Đường nhanh — WebSocket `protocol 22`** (`wm_ws.py`): gửi
-   `{"betSerialNumber", "gameNo", "gameNoRound", "betArr": [{"betArea", "addBetMoney"}],
-   "commission": 0, "remark": "1,0"}` với `betArea` 1 = Banker, 2 = Player, 3 = Hoà.
-   Không phụ thuộc khay chip/toạ độ nên không bị lớp phủ chia bài che. Server trả
-   `{"protocol": 22, "bOk": true}` là lệnh đã vào.
-   Socket của trang chỉ tạo một lần lúc tải trang, nên app cài hook `WebSocket` và **tải
-   lại tab một lần** khi bật tool (sau đó tự mở lại đúng bàn). Sàn đẩy `protocol 21` cho
-   nhiều bàn trên cùng socket, nên socket được chọn theo `groupID` khớp bàn đang mở.
-3. **Đường dự phòng — bấm chuột thật** (`wm_bet.py`): chờ lớp phủ chia bài tan, chọn
-   mệnh giá, bấm chip → bấm ô → **đọc lại số tiền đang treo sau từng chip**; lệch thì
+2. **Đường chính — bấm chuột thật** (`wm_bet.py`): chờ khay chip hết bị lớp kết quả che,
+   chọn mệnh giá, bấm chip → bấm ô → **đọc lại số tiền đang treo sau từng chip**; lệch thì
    bấm nút huỷ toàn bộ và báo lỗi; đủ tiền mới bấm xác nhận.
+3. **Đường phụ — WebSocket `protocol 22`** (`wm_ws.py`), dùng khi hook đã bắt được socket
+   của **iframe bàn**: `{"betSerialNumber", "gameNo", "gameNoRound",
+   "betArr": [{"betArea", "addBetMoney"}], "commission": 0, "remark": "1,0"}` với
+   `betArea` 1 = Banker, 2 = Player, 3 = Hoà. Server trả `{"protocol": 22, "bOk": true}` là
+   lệnh đã vào; `bOk: false` thì tự rơi về bấm chuột.
+   Hook được cài bằng `Page.addScriptToEvaluateOnNewDocument`, **không bao giờ tải lại
+   tab** (tải lại sẽ đẩy Chrome về sảnh và mất bàn đang đứng). Socket chọn theo `groupID`
+   khớp bàn đang mở **và** phải thuộc iframe bàn — socket khung gốc nhận được dữ liệu bàn
+   nhưng server từ chối lệnh cược gửi từ đó.
 4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng
    `table_bets.read` nên `compare_chips` / `table_is_clear` dùng lại được.
 
@@ -152,9 +153,19 @@ Không có bàn nào có mã bàn thì tool tự quét lại (lượt đầu nga
 tới khi hết `ENTER_VALID_TIMEOUT = 240` giây thì báo lỗi. Nút **Dừng tự quét** huỷ
 ngay (`table.cancelEnter`).
 
-Bật **Chạy tool** khi đang đứng ở bàn đã xác nhận thì chuyển thẳng sang theo dõi,
-vẫn chờ hết tay hiện tại rồi mới nhận lệnh từ UI. Bật tool khi chưa có bàn thì tool
-tự chạy chuỗi "vào bàn" rồi theo dõi.
+### Quy tắc một nút (chuẩn hiện tại)
+
+Người dùng chỉ cần mở Chrome đứng ở sảnh, rồi bấm **Chạy tool**:
+
+1. tool tự gắn Chrome/ mở tab, nhận sảnh, quét và mở bàn đầu tiên có mã bàn;
+2. tự theo dõi cầu và **tự đặt cược từng tay** theo cấu hình (cửa `AUTO/P/B/T` + số đơn
+   vị); mỗi tay chỉ arm một lần (khoá theo chuỗi cầu), chờ bàn dọn chip rồi mới bấm;
+3. nếu chưa vào được bàn (Chrome vừa mở, chưa đăng nhập) tool tự thử lại mỗi 15 giây;
+4. bấm **Dừng tool** → dừng phiên và tự rời bàn về sảnh.
+
+Cửa **AUTO** lấy từ `predict` và chỉ vào tiền khi `playable`; muốn đánh mọi tay thì chọn
+cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in khay chip theo nghìn đồng), mặc định
+`10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
 
 ## Đọc bàn live + dự đoán (site Petalive BCR)
 

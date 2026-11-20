@@ -273,6 +273,32 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 .conn-note { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 8px; }
 .conn-note[data-state="on"] { color: var(--green); }
 .conn-note[data-state="err"] { color: var(--red); }
+.connect-row { align-items: center; gap: 10px; }
+.conn-hint { font-size: 12px; color: var(--muted); line-height: 1.55; }
+.conn-hint b { color: var(--text); }
+.adv { margin-top: 10px; }
+.adv > summary {
+  cursor: pointer; font-size: 11px; color: var(--muted); letter-spacing: 0.03em;
+  padding: 4px 0; list-style: none;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: '▸ '; color: var(--gold); }
+.adv[open] > summary::before { content: '▾ '; }
+.adv .row { margin-top: 6px; }
+.btn.hidden { display: none; }
+
+/* chip nhanh: 10 = 10k, 50 = 50k … */
+.chip-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip-presets .preset {
+  font: inherit; font-size: 11px; padding: 5px 10px; cursor: pointer;
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--line); border-radius: 999px;
+}
+.chip-presets .preset:hover { color: var(--text); border-color: rgba(245, 196, 81, 0.55); }
+.chip-presets .preset.on {
+  color: #1b1408; font-weight: 700;
+  background: var(--gold); border-color: var(--gold);
+}
 .divider { height: 1px; background: var(--line); margin: 12px 0; }
 
 /* banner tự săn bàn */
