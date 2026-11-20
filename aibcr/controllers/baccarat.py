@@ -169,6 +169,9 @@ class BaccaratController:
         self.auto_bet_key = None
         self.auto_bet_hand = 0
         self.auto_bet_note = ""
+        # Mốc Chrome rời bàn (về sảnh/đăng nhập) trong khi sim vẫn bám bàn cũ: quá
+        # ngưỡng thì rời bàn để tool tự vào lại, thay vì treo ở "chờ dữ liệu WS".
+        self.lobby_since = None
         # Lệnh vừa đặt gần nhất (side/stake). Giữa hai ván chip trên bàn thuộc lệnh này,
         # không phải lệnh tay kế (chưa bấm) — dùng để không báo "SAI CỬA" oan.
         self.last_order = None
@@ -319,7 +322,11 @@ class BaccaratController:
         if getattr(self.stream, "session_lost", False):
             return True
         diag = getattr(self.browser, "last_diag", None)
-        return isinstance(diag, dict) and diag.get("reason") == "authentication_required"
+        if not isinstance(diag, dict):
+            return False
+        # root_left_site: tab bị đẩy sang trang đăng nhập/domain khác → mất phiên,
+        # không phải lỗi quét tạm thời; phải dừng đặt và báo đăng nhập lại.
+        return diag.get("reason") in ("authentication_required", "root_left_site")
 
     def _window(self):
         return self.config["chrome_window"]
@@ -1686,6 +1693,10 @@ class BaccaratController:
         with self.lock:
             self.sim.pause("Sảnh báo phiên Evolution không còn hợp lệ. Đăng nhập lại trang gốc, "
                            "bấm thẻ Evolution một lần rồi bấm “VÀO BÀN HỢP LỆ”.")
+        self.auto_bet_letters = None
+        self.auto_bet_key = None
+        self.auto_bet_hand = 0
+        self.auto_bet_note = "Mất phiên đăng nhập · đã dừng đặt. Đăng nhập lại rồi chạy tool."
         self.sweep_note = note
         self.log("Mất phiên: " + note, "error")
         self._try_recover_session()
@@ -2045,6 +2056,7 @@ class BaccaratController:
                     self.chips_read()      # đọc chip ở thread riêng, không chặn vòng chính
                 self._auto_start_verified_table()
                 self._follow_open_table()
+                self._recover_from_lobby()
                 self._auto_bet_tick()
                 self._tool_retry_enter(now)
                 self._resume_cycle_hunt(now)
@@ -2079,8 +2091,13 @@ class BaccaratController:
             self.cycle_waiting = False
             self.cycle_retry_at = 0.0
         with self.lock:
-            if self.sim.running:
-                self.sim.pause("Chrome đã đóng · phiên tạm dừng. Bấm “Mở Chrome” để mở lại.")
+            if self.sim.running or self.sim.table_key:
+                self.sim.detach("Chrome đã đóng · phiên tạm dừng. Bấm “Mở Chrome” để mở lại.")
+        self.auto_bet_letters = None
+        self.auto_bet_key = None
+        self.auto_bet_hand = 0
+        self.auto_bet_note = "Chrome đã đóng/mất kết nối · đã dừng đặt. Mở Chrome rồi chạy tool."
+        self.lobby_since = None
         self.sweep_note = getattr(self.browser, "note", "") or \
             "Chrome đã đóng · bấm “Mở Chrome” để mở lại."
         self.connection_text = self.sweep_note
@@ -2173,6 +2190,36 @@ class BaccaratController:
         self.chip_live = None
         self.chip_read_at = 0.0
         self.log("Đã chuyển theo bàn đang mở %s." % row["label"], "info")
+        self._push_state()
+
+    def _recover_from_lobby(self):
+        """Chrome rời bàn (về sảnh/đăng nhập) quá lâu: rời bàn để tool tự vào lại.
+
+        Không có bước này thì sim vẫn bám bàn cũ trong khi bộ đọc không còn dữ liệu
+        bàn đó, khiến ghi chú treo mãi ở "chờ dữ liệu bàn mới từ WebSocket".
+        """
+        if not self.sim.table_key or not self.sim.running:
+            self.lobby_since = None
+            return
+        if not self.browser.connected or getattr(self.browser, "wm_open_key", ""):
+            self.lobby_since = None
+            return
+        now = time.monotonic()
+        if self.lobby_since is None:
+            self.lobby_since = now
+            return
+        if now - self.lobby_since < 20.0:
+            return
+        self.lobby_since = None
+        self.sim.detach("Chrome không còn trong bàn WM (về sảnh/đăng nhập) · tìm bàn lại.")
+        self.auto_bet_letters = None
+        self.auto_bet_key = None
+        self.auto_bet_hand = 0
+        self.auto_bet_note = self.sim.note
+        self.last_order = None
+        self.chip_live = None
+        self.chip_read_at = 0.0
+        self.log(self.sim.note, "warn")
         self._push_state()
 
     def _sync_live_to_sim(self, live):

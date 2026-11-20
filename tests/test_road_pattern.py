@@ -535,6 +535,51 @@ class HighestProbabilityBetTests(unittest.TestCase):
         self.assertTrue(controller.sim.pending, controller.auto_bet_note)
         self.assertEqual(placed[0]["side"], "B")
 
+    def test_lobby_recovery_detaches_stale_table(self):
+        """Chrome về sảnh/đăng nhập quá lâu: rời bàn cũ để tool tự vào lại, không treo."""
+        controller = self.make_controller()
+        self.ready(controller)
+        controller.browser.cdp_attached = True
+        controller.browser._alive_checked_at = time.monotonic()
+        controller.browser._alive_ok = True
+        controller.browser.wm_open_key = ""
+        controller.auto_bet_note = "Đang chờ dữ liệu bàn mới từ WebSocket · chưa đặt tay nào."
+        controller._recover_from_lobby()
+        self.assertTrue(controller.sim.running)  # chưa quá ngưỡng
+        self.assertIsNotNone(controller.lobby_since)
+        controller.lobby_since = time.monotonic() - 30
+        controller._recover_from_lobby()
+        self.assertIsNone(controller.sim.table_key)
+        self.assertFalse(controller.sim.running)
+        self.assertIsNone(controller.lobby_since)
+        self.assertIn("tìm bàn lại", controller.auto_bet_note)
+
+    def test_lobby_recovery_keeps_table_while_chrome_in_table(self):
+        controller = self.make_controller()
+        self.ready(controller)
+        controller.browser.cdp_attached = True
+        controller.browser._alive_checked_at = time.monotonic()
+        controller.browser._alive_ok = True
+        controller.browser.wm_open_key = "test"
+        controller.lobby_since = time.monotonic() - 30
+        controller._recover_from_lobby()
+        self.assertTrue(controller.sim.running)
+        self.assertIsNone(controller.lobby_since)
+
+    def test_root_left_site_is_session_loss_and_clears_wait_note(self):
+        """Tab bị đẩy sang trang đăng nhập: dừng đặt + xoá ghi chú 'chờ WS' gây hiểu lầm."""
+        controller = self.make_controller()
+        self.ready(controller)
+        controller.browser.last_diag = {"reason": "root_left_site"}
+        self.assertTrue(controller._auth_blame())
+        controller.auto_bet_note = "Đang chờ dữ liệu bàn mới từ WebSocket · chưa đặt tay nào."
+        controller._try_recover_session = lambda: None
+        controller._session_lost("Tab bị đẩy sang trang đăng nhập.")
+        self.assertTrue(controller.session_lost)
+        self.assertFalse(controller.sim.running)
+        self.assertIsNone(controller.auto_bet_letters)
+        self.assertIn("Mất phiên đăng nhập", controller.auto_bet_note)
+
 
     def test_auto_tick_does_not_arm_a_backwards_hand(self):
         """Lịch sử/phát lại về muộn báo tay cũ hơn tay đã chốt: không đặt trùng."""
