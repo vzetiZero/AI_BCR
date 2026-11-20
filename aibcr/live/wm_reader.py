@@ -39,6 +39,11 @@ def find_wm_page(port=DEFAULT_PORT):
     """
     import websocket
 
+    # Keep the first lobby as a fallback, but inspect every candidate page for an
+    # open table. Chrome can have a lobby tab before the table tab; returning the
+    # lobby immediately made find_wm_table report that no table was open.
+    lobby_page = None
+    lobby_detect = None
     for page in list_pages(port):
         endpoint = page.get("webSocketDebuggerUrl") or ""
         url = str(page.get("url") or "")
@@ -61,7 +66,10 @@ def find_wm_page(port=DEFAULT_PORT):
                     continue
                 value = (message.get("result") or {}).get("result", {}).get("value")
                 if isinstance(value, dict) and value.get("is_wm"):
-                    return page, value
+                    if value.get("kind") == "table":
+                        return page, value
+                    if lobby_page is None:
+                        lobby_page, lobby_detect = page, value
                 break
         except Exception:
             continue
@@ -70,7 +78,7 @@ def find_wm_page(port=DEFAULT_PORT):
                 ws.close()
             except Exception:
                 pass
-    return None, {}
+    return (lobby_page, lobby_detect) if lobby_page is not None else (None, {})
 
 
 def find_wm_table(port=DEFAULT_PORT):

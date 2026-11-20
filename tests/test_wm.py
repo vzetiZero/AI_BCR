@@ -208,5 +208,38 @@ class LobbyAbsorbTests(unittest.TestCase):
         self.assertEqual(stream.histories, {})
 
 
+class WMPageDetectionTests(unittest.TestCase):
+    def test_table_tab_is_found_after_lobby_tab(self):
+        from unittest.mock import patch
+        from aibcr.live import wm_reader
+
+        class FakeSocket:
+            def __init__(self, kind):
+                self.kind = kind
+
+            def send(self, _message):
+                pass
+
+            def recv(self):
+                return json.dumps({"id": 2, "result": {"result": {
+                    "value": {"is_wm": True, "kind": self.kind}}}})
+
+            def close(self):
+                pass
+
+        pages = [
+            {"url": "https://wm.example/lobby", "webSocketDebuggerUrl": "ws://lobby"},
+            {"url": "https://wm.example/table", "webSocketDebuggerUrl": "ws://table"},
+        ]
+        sockets = {"ws://lobby": FakeSocket("lobby"),
+                   "ws://table": FakeSocket("table")}
+        with patch.object(wm_reader, "list_pages", return_value=pages), \
+                patch("websocket.create_connection", side_effect=lambda endpoint, **_kw: sockets[endpoint]):
+            page, detect = wm_reader.find_wm_page(9222)
+
+        self.assertEqual(page["url"], "https://wm.example/table")
+        self.assertEqual(detect["kind"], "table")
+
+
 if __name__ == "__main__":
     unittest.main()
