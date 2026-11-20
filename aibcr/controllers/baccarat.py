@@ -31,6 +31,7 @@ from aibcr.adapters import table_bets as TB
 from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
+from aibcr.live.wm_reader import WMReader, find_wm_table
 from aibcr.models import engine as E
 from aibcr.models import money as M
 from aibcr.models.live_sim import (LiveSimulation, compare_chips, table_is_clear,
@@ -907,6 +908,9 @@ class BaccaratController:
         return {"ok": True, "note": "Đang đọc chip…"}
 
     def _read_chip_state(self):
+        if getattr(self.browser, "wm_page_id", None):
+            # WM không có khay chip kiểu EVO; chỉ đọc được tổng cược 3 cửa của cả bàn.
+            return self.browser.read_wm_bets()
         try:
             return TB.read(self.browser, unit=TB.DEFAULT_CHIP_UNIT)
         except Exception as exc:
@@ -915,6 +919,16 @@ class BaccaratController:
     # ------------------------------------------------------- đặt chip tự động
     def _place_armed_bet(self, plan):
         """Đặt chip thật theo lệnh đã chốt (chạy ở thread nền)."""
+        if getattr(self.browser, "wm_page_id", None):
+            # WM: app chỉ đọc lá bài/cầu và gợi ý cửa; bấm chip vẫn do người dùng làm
+            # trên bàn để tránh đặt nhầm tiền thật khi chưa đọc được chip của riêng mình.
+            note = ("Bàn WM: app chưa tự bấm chip (chỉ phân tích). Hãy tự đặt theo gợi ý "
+                    "rồi bấm “Đọc chip” để xác nhận.")
+            with self.lock:
+                self.sim.mark_placed(False, note, plan)
+            self.place_status = {"ok": False, "note": note}
+            self.log(note, "warn")
+            return
         if not self.config["auto_place"]:
             with self.lock:
                 self.sim.mark_placing(plan)
@@ -1601,8 +1615,13 @@ class BaccaratController:
         if rows:
             self._ingest(rows, observed_at)
         count = len(rows)
-        self.connection_text = ("Đang đọc %d bàn." % count if count
-                                else "Chưa thấy bàn Baccarat.")
+        if count:
+            self.connection_text = "Đang đọc %d bàn." % count
+        elif (self.browser.last_diag or {}).get("kind") == "wm":
+            # WM chỉ gửi kết quả mỗi ván một lần; giữa hai ván không có gì để đọc.
+            self.connection_text = "Đang đọc bàn WM · chờ ván kế tiếp."
+        else:
+            self.connection_text = "Chưa thấy bàn Baccarat."
         with self.lock:
             changed = self.sim.process(self.tables.get(self.sim.table_key))
         if changed:
@@ -1730,7 +1749,7 @@ class BaccaratController:
                 "ai": {"mode": self.config["ai_mode"], "available": False,
                        "busy": False, "error": ""},
                 "config": self._live_cfg(),
-                "note": "Chưa bật AI live — bấm “Bật AI live” để đọc bàn Petalive.",
+                "note": "Chưa bật AI live — bấm “Bật AI live” để đọc bàn đang mở (WM/Petalive).",
             }
         return self.live_session.snapshot()
 
@@ -1750,16 +1769,31 @@ class BaccaratController:
                 on_status=lambda text, level="info": self.log("AI live: %s" % text, level),
                 **self._live_cfg_private())
             session.running = True
-            reader = LiveReader(on_round=session.on_round, on_state=session.on_state,
-                                on_status=lambda text, level="info":
-                                self.log("AI live: %s" % text, level),
-                                port=getattr(BR, "CDP_PORT", 9222), stop=self.live_stop)
+            port = getattr(BR, "CDP_PORT", 9222)
+            # WM (M88) đọc lá bài từ WebSocket nhị phân của tab bàn; Petalive đọc khung
+            # text. Dò tab bàn WM trước để chọn đúng bộ đọc, không cần người dùng chọn.
+            try:
+                wm_page, _detect = find_wm_table(port)
+            except Exception:
+                wm_page = None
+            if wm_page is not None:
+                reader = WMReader(on_round=session.on_round, on_state=session.on_state,
+                                  on_status=lambda text, level="info":
+                                  self.log("AI live: %s" % text, level),
+                                  port=port, stop=self.live_stop)
+                boot_note = "Đã bật AI live · đọc bàn WM qua WebSocket."
+            else:
+                reader = LiveReader(on_round=session.on_round, on_state=session.on_state,
+                                    on_status=lambda text, level="info":
+                                    self.log("AI live: %s" % text, level),
+                                    port=port, stop=self.live_stop)
+                boot_note = "Đã bật AI live · chờ tab bàn Petalive."
             self.live_session = session
             self.live_reader = reader
         reader.start()
-        self.log("AI live: đang chờ tab bàn Petalive qua CDP.", "info")
+        self.log("AI live: đang đọc lá bài từ tab bàn qua CDP.", "info")
         self._push_state()
-        return {"ok": True, "note": "Đã bật AI live · chờ tab bàn Petalive."}
+        return {"ok": True, "note": boot_note}
 
     def live_stop(self):
         with self.lock:

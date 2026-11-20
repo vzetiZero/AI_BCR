@@ -126,8 +126,8 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 }
 .btn.primary:hover { filter: brightness(1.05); }
 .btn.big-cta {
-  width: 100%; padding: 16px 20px; font-size: 15px; letter-spacing: 0.06em;
-  border-radius: 12px; font-weight: 800;
+  width: auto; padding: 9px 18px; font-size: 12.5px; letter-spacing: 0.04em;
+  border-radius: 10px; font-weight: 800;
 }
 .btn.big-cta:disabled {
   background: #24304a; color: var(--muted); box-shadow: none; border-color: var(--line-strong);

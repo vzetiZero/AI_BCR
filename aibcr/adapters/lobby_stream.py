@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 from aibcr.adapters import browser as BR
 from aibcr.adapters import human_mouse as HM
 from aibcr.adapters import table_bets as TB
+from aibcr.adapters import wm as WM
 
 HISTORY_TYPES = ("lobby.histories", "lobby.historyUpdated")
 SIDE_BY_COLOR = {"R": "B", "B": "P"}
@@ -539,6 +540,10 @@ class LobbyStream:
         self.contexts = []
         self.context_frames = {}
         self.histories = {}
+        # WM (M88) gửi lịch sử bằng WebSocket nhị phân: tách riêng khỏi histories EVO
+        # để hai định dạng không lẫn nhau khi cùng mở nhiều tab.
+        self.wm_histories = {}
+        self.wm_tables = {}
         self._seq = 0
         self.human_mouse = bool(human_mouse)
         self._cursor = None
@@ -555,6 +560,7 @@ class LobbyStream:
 
     def _reset(self):
         self.contexts, self.histories, self._seq = [], {}, 0
+        self.wm_histories, self.wm_tables = {}, {}
         self.context_frames = {}
         self.frames = 0
         self.diag = {}
@@ -598,7 +604,12 @@ class LobbyStream:
                 return message.get("result", {})
 
     def _absorb(self, frame):
-        if not isinstance(frame, dict) or frame.get("opcode") != 1:
+        if not isinstance(frame, dict):
+            return
+        if frame.get("opcode") == 2:
+            self._absorb_wm(frame)
+            return
+        if frame.get("opcode") != 1:
             return
         try:
             message = json.loads(frame.get("payloadData", ""))
@@ -624,6 +635,41 @@ class LobbyStream:
             elif self.histories[table_id]["results"] == results:
                 self.histories[table_id]["samples"] += 1
             self.histories[table_id]["messages"] = self.histories[table_id].get("messages", 0) + 1
+
+    def _absorb_wm(self, frame):
+        """Gom lịch sử WM từ khung nhị phân (protocol 26) và thông tin bàn (21)."""
+        message = WM.decode_frame(frame.get("payloadData"), 2)
+        if not message:
+            return
+        protocol = message.get("protocol")
+        data = message.get("data")
+        if not isinstance(data, dict):
+            return
+        self.frames += 1
+        if protocol == WM.PROTOCOL_HISTORY:
+            game, group = data.get("gameID"), data.get("groupID")
+            rounds = WM.decode_history(data)
+            if game is None or group is None or not rounds:
+                return
+            key = WM.table_key(game, group)
+            current = self.wm_histories.get(key)
+            if current is None or len(rounds) >= len(current["rounds"]):
+                self.wm_histories[key] = {"rounds": rounds, "ts": time.time(),
+                                          "group_type": data.get("groupType"),
+                                          "messages": (current or {}).get("messages", 0) + 1}
+            else:
+                current["messages"] = current.get("messages", 0) + 1
+        elif protocol == WM.PROTOCOL_TABLE:
+            game, group = data.get("gameID"), data.get("groupID")
+            if game is None or group is None:
+                return
+            self.wm_tables[WM.table_key(game, group)] = WM.decode_table(data)
+        elif protocol == WM.PROTOCOL_RESULT:
+            game, group = data.get("gameID"), data.get("groupID")
+            if game is None or group is None:
+                return
+            self.wm_tables.setdefault(WM.table_key(game, group), {}).update(
+                {"last_round": WM.decode_round(data)})
 
     def _value(self, ws, expression, context_id):
         return self._evaluate(ws, expression, context_id).get("result", {}).get("value")
@@ -779,7 +825,7 @@ class LobbyStream:
             "bật" if active else "tắt", wait_seconds))
 
     def _lobby_context(self, ws):
-        """Tìm khung đang render danh sách bàn — EVO hoặc Petalive."""
+        """Tìm khung đang render danh sách bàn — EVO, Petalive hoặc WM."""
         for context_id in list(self.contexts):
             value = self._try_value(ws, TILES_JS, context_id)
             if isinstance(value, dict) and value.get("tiles"):
@@ -791,6 +837,11 @@ class LobbyStream:
                 self.frames += 1
                 self.lobby_kind = "petalive"
                 return context_id, value
+            value = self._try_value(ws, WM.WM_TILES_JS, context_id)
+            if isinstance(value, dict) and value.get("tiles"):
+                self.frames += 1
+                self.lobby_kind = "wm"
+                return context_id, value
         return None, None
 
     def _wait_lobby_context(self, ws, seconds=25.0):
@@ -800,6 +851,14 @@ class LobbyStream:
             context_id, snapshot = self._lobby_context(ws)
             if context_id is not None or time.monotonic() >= deadline:
                 return context_id, snapshot
+            if not self.contexts:
+                # Chưa có context nào: gửi một lệnh rẻ để đọc tiếp sự kiện context mới
+                # (iframe sảnh vừa render lại sau khi thoát bàn).
+                try:
+                    self._command(ws, "Runtime.evaluate", {
+                        "expression": "1", "returnByValue": True, "silent": True})
+                except Exception:
+                    pass
             time.sleep(1.5)
 
     def _sweep_petalive(self, ws, context_id, snapshot, max_seconds, favorites_only):
@@ -864,6 +923,98 @@ class LobbyStream:
         self.note = "Quét %d bước cuộn · %d bàn Petalive · cầu đọc từ ô bàn." % (steps, len(rows))
         return rows
 
+    def _sweep_wm(self, ws, context_id, snapshot, max_seconds, favorites_only):
+        """Quét sảnh WM: ô bàn đọc từ DOM, cầu/lá bài đọc từ protocol 26.
+
+        Sảnh WM đẩy ``protocol 26`` (lịch sử + danh sách lá) cho mọi bàn đang hiển thị
+        qua WebSocket nhị phân. Không có khái niệm bàn Ưa thích nên cờ đó bị bỏ qua và
+        ghi rõ trong ``diag`` để UI không báo nhầm là đã lọc.
+        """
+        if favorites_only:
+            self.favorite_mode = "unsupported"
+        tiles = {tile["section"]: tile for tile in snapshot.get("tiles", []) if tile.get("section")}
+        if not tiles:
+            self.last_error = ("Sảnh WM chưa hiển thị ô bàn nào; hãy đợi trang tải xong rồi "
+                               "quét lại.")
+            return []
+        keys = {WM.table_key(tile["game"], tile["group"]) for tile in tiles.values()}
+        scroll = snapshot.get("scroll") or {}
+        start_top = int(scroll.get("top") or 0)
+        bottom = max(int(scroll.get("max") or 0) - int(scroll.get("client") or 0), 0)
+        # Sảnh đẩy lịch sử theo nhịp riêng (vài giây/lượt) nên phải chờ; đồng thời lăn
+        # danh sách để các ô ngoài khung nhìn cũng được cập nhật. Sảnh có thể render lại
+        # danh sách giữa chừng (context chết) — lấy lại context thay vì bỏ cả lượt quét.
+        position, steps, passes = 0, 0, 0
+        deadline = time.monotonic() + max(10.0, min(float(max_seconds), 25.0))
+        while time.monotonic() < deadline:
+            self._try_value(ws, WM.WM_SCROLL_TO_JS % position, context_id)
+            time.sleep(1.2)
+            try:
+                self._evaluate(ws, "1", context_id)
+            except Exception:
+                fresh, _ = self._lobby_context(ws)
+                if fresh is None:
+                    break
+                context_id = fresh
+            if keys and keys <= set(self.wm_histories):
+                break
+            if position >= bottom:
+                passes += 1
+                position = 0
+                if passes >= 4:
+                    break
+            else:
+                position = min(position + 400, bottom)
+                steps += 1
+        self._try_value(ws, WM.WM_SCROLL_TO_JS % start_top, context_id)
+        rows = []
+        missing = 0
+        for tile in tiles.values():
+            key = WM.table_key(tile["game"], tile["group"])
+            entry = self.wm_histories.get(key) or {}
+            rounds = entry.get("rounds") or []
+            letters = WM.letters(rounds)
+            if not letters:
+                # Bàn chưa kịp gửi lịch sử: bỏ khỏi danh sách để không bị chọn nhầm
+                # (mở bàn không có cầu thì AI không có gì để phân tích).
+                missing += 1
+                continue
+            label = tile.get("title") or key
+            if tile.get("dealer"):
+                label = "%s · %s" % (label, tile["dealer"])
+            # Chia sẻ lịch sử vừa đọc cho vòng quét bàn (browser.scan) dùng lại: sảnh chỉ
+            # gửi protocol 26 mỗi ván một lần nên không thể chờ lại từ đầu trong bàn.
+            cache = getattr(self.session, "wm_cache", None)
+            if cache is None:
+                cache = self.session.wm_cache = {}
+            cache[key] = rounds
+            rows.append({
+                "table_id": key,
+                "label": label[:80],
+                "letters": letters,
+                "game_type": "baccarat",
+                "read_error": "",
+                "source": "wm-ws-26",
+                "ws_hands": len(rounds),
+                "road_match": True,
+                "observed_at": entry.get("ts") or time.time(),
+                "messages": entry.get("messages", 0),
+                "favorite": False,
+            })
+        rows.sort(key=lambda row: row["label"].casefold())
+        self.diag = {"tiles_in_dom": len(tiles), "ws_tables": len(rows),
+                     "matched_road": len(rows),
+                     "favorites_only": bool(favorites_only), "favorite_mode": self.favorite_mode,
+                     "lobby": "wm", "scroll_steps": steps}
+        if not rows:
+            self.last_error = ("Sảnh WM chưa gửi lịch sử bàn nào trong %d giây; hãy đợi "
+                               "trang tải xong rồi quét lại." % int(max_seconds))
+            return []
+        self.note = "Quét sảnh WM · %d bàn có cầu (lá bài đọc từ WebSocket)." % len(rows)
+        if missing:
+            self.note += " %d bàn chưa kịp gửi lịch sử." % missing
+        return rows
+
     def sweep(self, max_seconds=75, favorites_only=False):
         """Cuộn hết danh sách để sảnh gửi lịch sử mọi bàn, rồi trả về danh sách bàn.
 
@@ -876,6 +1027,7 @@ class LobbyStream:
         self.note = ""
         ws = None
         try:
+            self._ensure_wm_page()
             page = self.session._cdp_page()
             if page is None:
                 self.last_error = "Không có tab sảnh Baccarat trong Chrome CDP 9222."
@@ -886,6 +1038,15 @@ class LobbyStream:
                                              http_no_proxy=["127.0.0.1", "localhost", "::1"])
             self._command(ws, "Network.enable")
             self._command(ws, "Runtime.enable")
+            # WM: đang trong bàn thì iframe sảnh bị che, phải thoát về sảnh trước khi quét.
+            wm_state = self._wm_detect(ws)
+            if wm_state.get("is_wm") and wm_state.get("kind") == "table":
+                ok, note = self._back_to_lobby_wm(ws, wm_state, 20)
+                if not ok:
+                    self.last_error = note
+                    return []
+                self.contexts, self.context_frames = [], {}
+                self._command(ws, "Runtime.enable")
             context_id, snapshot = self._wait_lobby_context(ws)
             if context_id is None:
                 if self._lost_session(ws):
@@ -895,6 +1056,8 @@ class LobbyStream:
                 return []
             if self.lobby_kind == "petalive":
                 return self._sweep_petalive(ws, context_id, snapshot, max_seconds, favorites_only)
+            if self.lobby_kind == "wm":
+                return self._sweep_wm(ws, context_id, snapshot, max_seconds, favorites_only)
             star_ids = self._star_favorites(snapshot) if favorites_only else None
             if favorites_only and star_ids is not None:
                 self.favorite_mode = "stars"
@@ -1065,6 +1228,7 @@ class LobbyStream:
         ws = None
         self._reset()
         try:
+            self._ensure_wm_page()
             page = self.session._cdp_page()
             if page is None:
                 return False, "Không có tab sảnh Baccarat trong Chrome CDP 9222."
@@ -1073,11 +1237,21 @@ class LobbyStream:
                                              timeout=BR.SCRIPT_TIMEOUT, redirect_limit=0,
                                              http_no_proxy=["127.0.0.1", "localhost", "::1"])
             self._command(ws, "Runtime.enable")
+            # WM: đang ở bàn khác thì phải thoát về sảnh trước, nếu không ô bàn bị che.
+            wm_state = self._wm_detect(ws)
+            if wm_state.get("is_wm") and wm_state.get("kind") == "table":
+                ok, note = self._back_to_lobby_wm(ws, wm_state, 20)
+                if not ok:
+                    return False, note
+                self.contexts, self.context_frames = [], {}
+                self._command(ws, "Runtime.enable")
             context_id, _ = self._lobby_context(ws)
             if context_id is None:
                 if self._lost_session(ws):
                     return False, self.last_error
                 return False, "Sảnh chưa hiển thị danh sách bàn; hãy mở lại trang Baccarat."
+            if self.lobby_kind == "wm":
+                return self._open_table_wm(ws, context_id, table_id, wait_seconds)
             # Ô bàn ngoài khung nhìn chưa chắc đã render: dành riêng một cửa sổ để lăn
             # danh sách tìm ô, rồi vẫn giữ trọn thời gian chờ điều hướng sau cú bấm.
             find_timeout = min(15.0, max(3.0, float(wait_seconds) - 8.0))
@@ -1110,6 +1284,79 @@ class LobbyStream:
                     ws.close()
                 except Exception:
                     pass
+
+    def _wm_detect(self, ws):
+        """Đọc cấu trúc iframe của tab WM ở khung gốc (không cần context của iframe)."""
+        return self._wm_eval(ws, WM.WM_DETECT_JS)
+
+    def _wm_eval(self, ws, expression):
+        """Chạy JS trong khung gốc của tab (nơi WM đặt nút thoát bàn và hai iframe)."""
+        try:
+            value = self._command(ws, "Runtime.evaluate", {
+                "expression": expression, "returnByValue": True, "silent": True,
+                "timeout": BR.SCRIPT_TIMEOUT * 1000}).get("result", {}).get("value")
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _back_to_lobby_wm(self, ws, state, wait_seconds):
+        """Rời bàn WM bằng nút thoát ở khung gốc, chờ sảnh hiện lại danh sách bàn."""
+        if state.get("kind") != "table":
+            self.note = "Đã ở sảnh WM."
+            return True, "Đã ở sảnh WM · không cần rời bàn."
+        box = self._wm_eval(ws, WM.WM_EXIT_JS)
+        if not box or "x" not in box:
+            return False, "Không thấy nút thoát bàn của WM (%s)." % (
+                (box or {}).get("reason", "exit_missing"))
+        self._click_at(ws, float(box["x"]), float(box["y"]))
+        deadline = time.monotonic() + max(5.0, float(wait_seconds))
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            if self._wm_detect(ws).get("kind") == "lobby":
+                self.note = "Đã về sảnh WM."
+                return True, "Đã rời bàn · sảnh WM hiển thị lại danh sách bàn."
+        return False, "Đã bấm thoát bàn WM nhưng %d giây chưa thấy lại sảnh." % int(wait_seconds)
+
+    def _open_table_wm(self, ws, context_id, table_id, wait_seconds):
+        """Mở bàn WM bằng chuột thật trên ô bàn của sảnh rồi chờ iframe bàn hiện ra.
+
+        Ô bàn WM nằm trong iframe_109; iframe này phủ đúng khung nhìn nên toạ độ đo
+        trong khung được cộng thêm lệch iframe (JS trả kèm ``x``/``y`` đã cộng lệch).
+        """
+        parts = WM.parse_table_key(table_id)
+        if not parts:
+            return False, "Mã bàn WM không hợp lệ."
+        prefix = "groupBac_%d_%d_" % parts
+        # Sảnh có thể còn vẽ lại danh sách sau khi thoát bàn: đo/cuộn lặp tới khi ô bàn
+        # nằm trong khung nhìn và không bị lớp khác che, thay vì bỏ cuộc sau một lần đo.
+        deadline = time.monotonic() + max(6.0, float(wait_seconds))
+        box = None
+        while time.monotonic() < deadline:
+            box = self._try_value(ws, WM.WM_TILE_BOX_JS % json.dumps(prefix), context_id)
+            if isinstance(box, dict) and box.get("inside"):
+                break
+            if isinstance(box, dict) and not box.get("reason"):
+                self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix),
+                                context_id)
+            elif isinstance(box, dict) and box.get("reason") == "tile_missing":
+                fresh, _ = self._lobby_context(ws)
+                if fresh is not None:
+                    context_id = fresh
+            time.sleep(0.6)
+        if not isinstance(box, dict) or box.get("reason"):
+            return False, "Không tìm thấy ô bàn WM để mở (%s)." % (
+                (box or {}).get("reason", "tile_missing"))
+        if not box.get("inside"):
+            return False, "Ô bàn WM bị che, chưa bấm được."
+        self._click_at(ws, float(box["x"]), float(box["y"]))
+        deadline = time.monotonic() + max(6.0, float(wait_seconds))
+        while time.monotonic() < deadline:
+            state = self._wm_detect(ws)
+            if state.get("kind") == "table":
+                self.note = "Đã mở bàn WM %s." % table_id
+                return True, "Đã mở bàn WM %s qua ô bàn của sảnh." % table_id
+            time.sleep(1.0)
+        return False, "Đã bấm ô bàn WM nhưng chưa thấy màn hình bàn %s." % table_id
 
     def _click_close_table(self, ws):
         """Bấm nút X đóng bàn bằng chuột thật ở khung đang vẽ màn hình bàn; True nếu đã bấm.
@@ -1197,8 +1444,6 @@ class LobbyStream:
             page = self.session._cdp_page()
             url = (page or {}).get("url", "")
             petalive_table = BR.is_petalive_table_url(url)
-            if not BR.is_lobby_url(url) and not petalive_table:
-                return False, "Không có tab sảnh Baccarat trong Chrome CDP 9222."
             ws = websocket.create_connection(BR.validated_endpoint(page), suppress_origin=True,
                                              timeout=BR.SCRIPT_TIMEOUT, redirect_limit=0,
                                              http_no_proxy=["127.0.0.1", "localhost", "::1"])
@@ -1206,6 +1451,13 @@ class LobbyStream:
             # tổ bấm nhầm vào id chết. Runtime.enable gửi lại đủ context thật.
             self.contexts, self.context_frames = [], {}
             self._command(ws, "Runtime.enable")
+            # Sảnh WM không có đường dẫn cố định (mirror đổi liên tục): nhận diện bằng
+            # hai iframe iframe_109/iframe_101 trước khi áp luật URL của EVO.
+            wm_state = self._wm_detect(ws)
+            if wm_state.get("is_wm"):
+                return self._back_to_lobby_wm(ws, wm_state, wait_seconds)
+            if not BR.is_lobby_url(url) and not petalive_table:
+                return False, "Không có tab sảnh Baccarat trong Chrome CDP 9222."
             if not self._wait_context(ws):
                 return False, "Không lấy được ngữ cảnh trang sảnh để trở về danh sách bàn."
             if petalive_table:
@@ -1370,6 +1622,52 @@ class LobbyStream:
         self.last_error = self._health_note(state)
         return True
 
+    def _ensure_wm_page(self):
+        """Nhận diện tab WM khi người dùng quét/mở bàn mà chưa bấm “Nhận tab sảnh”."""
+        if self.session.wm_page_id:
+            return True
+        # Kết quả âm được nhớ ngắn: mỗi vòng quét không phải mở CDP dò lại tab cổng.
+        if time.time() - getattr(self, "_wm_probe_at", 0.0) < 30.0:
+            return False
+        self._wm_probe_at = time.time()
+        try:
+            pages = self.session._cdp_pages()
+        except Exception:
+            return False
+        for page in reversed(pages):
+            if BR.is_lobby_url(page.get("url")):
+                continue
+            state = self._probe_wm(page)
+            if not state.get("is_wm"):
+                continue
+            self.session.wm_page_id = page.get("id")
+            self.session.start_wm_watch()
+            self.contexts, self.context_frames = [], {}
+            return True
+        self.contexts, self.context_frames = [], {}
+        return False
+
+    def _probe_wm(self, page):
+        """Dò nhanh một tab xem có phải sảnh/bàn WM không (mở CDP, đọc iframe, đóng)."""
+        import websocket
+
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            self.contexts, self.context_frames = [], {}
+            self._command(ws, "Runtime.enable")
+            return self._wm_detect(ws)
+        except Exception:
+            return {}
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
     def find_lobby_tab(self):
         """Nhận tab sảnh do người dùng tự mở; app không bấm vào sảnh hộ, không sửa URL.
 
@@ -1385,6 +1683,22 @@ class LobbyStream:
             return False, "Không đọc được danh sách tab Chrome CDP 9222 (%s)." % type(exc).__name__
         lobbies = [page for page in pages if (BR.is_lobby_url(page.get("url"))
                                               or BR.is_petalive_table_url(page.get("url")))]
+        # Sảnh WM (M88) chạy trong iframe của một tab có URL bất kỳ: dò cấu trúc
+        # iframe_109/iframe_101 trước, vì đây là sảnh người dùng đang dùng.
+        for page in reversed(pages):
+            if BR.is_lobby_url(page.get("url")):
+                continue
+            state = self._probe_wm(page)
+            if not state.get("is_wm"):
+                continue
+            self.session.wm_page_id = page.get("id")
+            self.session.start_wm_watch()
+            self.lobby_kind = "wm"
+            self.note = "Đã nhận tab sảnh WM."
+            if state.get("kind") == "table":
+                return True, ("Đã nhận tab sảnh WM · đang ở màn hình bàn; bấm “Quay lại "
+                              "sảnh” nếu muốn quét toàn sảnh.")
+            return True, "Đã nhận tab sảnh WM · %s" % BR._safe_url(page.get("url"))
         if not lobbies:
             if any(isinstance(page, dict) and page.get("type") == "page"
                    and BR.is_evo_entry_url(page.get("url"))

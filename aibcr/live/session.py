@@ -94,9 +94,23 @@ class LiveSession:
             pass
 
     # ------------------------------------------------------------------ ván mới
+    def reset_table(self, table):
+        """Đổi sang bàn khác: xoá shoe/lịch sử cũ để không trộn hai bàn vào một cầu."""
+        with self.lock:
+            self.shoe = cards.Shoe(self.decks)
+            self.history = ""
+            self.rounds = []
+            self.prediction = None
+            self.analysis = None
+            self.issue_seen = None
+            self.duplicates = 0
+            self.table = str(table or "")
+            self.state = None
+
     def on_round(self, data):
-        if self.table and data.get("table") != self.table:
-            return
+        incoming = data.get("table") or ""
+        if self.table and incoming and incoming != self.table:
+            self.reset_table(incoming)
         with self.lock:
             # issueId phát lại khi reconnect không được cộng lá vào shoe lần thứ hai.
             if data.get("issue_id") and data["issue_id"] == self.issue_seen:

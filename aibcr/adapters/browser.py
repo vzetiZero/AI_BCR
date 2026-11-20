@@ -15,6 +15,8 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
 
+from aibcr.adapters import wm as WM
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(HERE, "chrome_profile")
 READER_JS = os.path.join(HERE, "reader.js")
@@ -382,6 +384,17 @@ class BrowserSession:
         self.last_error = ""
         self.connection_state = "closed"
         self._last_cdp_targets = []
+        # Tab sảnh WM không có đường dẫn cố định nên không nhận ra bằng URL; lưu id
+        # tab sau lần dò DOM đầu tiên để các lệnh sau quay lại đúng tab đó.
+        self.wm_page_id = None
+        # WM chỉ gửi lịch sử mỗi ván một lần qua WebSocket, nên phải nghe liên tục;
+        # đọc theo từng lượt quét sẽ bỏ lỡ phần lớn khung.
+        self.wm_cache = {}
+        self.wm_state = {}
+        self.wm_cards = {}
+        self.wm_open_key = ""
+        self._wm_watch = None
+        self._wm_watch_stop = threading.Event()
         # Kiểm tra "Chrome còn sống" có cache: tránh gọi HTTP mỗi lần UI hỏi state
         # nhưng vẫn phát hiện được người dùng tự đóng cửa sổ Chrome.
         self._alive_checked_at = 0.0
@@ -439,6 +452,9 @@ class BrowserSession:
     def mark_closed(self, note=None):
         """Xoá trạng thái kết nối sau khi Chrome bị đóng (bởi người dùng hoặc lỗi)."""
         with self.lock:
+            self.stop_wm_watch()
+            self.wm_cache, self.wm_state, self.wm_cards = {}, {}, {}
+            self.wm_open_key = ""
             self.driver = None
             self.cdp_attached = False
             self.mode = ""
@@ -447,6 +463,7 @@ class BrowserSession:
             self.last_frames = 0
             self.last_diag = {}
             self.connection_state = "closed"
+            self.wm_page_id = None
             self._driver_info = "Chrome đã đóng."
             self._alive_checked_at = time.monotonic()
             self._alive_ok = False
@@ -472,6 +489,12 @@ class BrowserSession:
 
     def _cdp_page(self):
         pages = self._cdp_pages()
+        # Tab WM đã nhận diện được ưu tiên trước: URL của nó không có dấu hiệu nhận
+        # biết nên nếu để sau, app sẽ bám nhầm tab cổng đang mở cùng Chrome.
+        if self.wm_page_id:
+            for page in pages:
+                if page.get("id") == self.wm_page_id:
+                    return page
         # Ưu tiên tab sảnh (EVO hoặc Petalive); nếu đã vào bàn Petalive thì giữ đúng tab
         # đó, không rơi sang tab cổng khác trong cùng Chrome.
         for page in pages:
@@ -834,6 +857,137 @@ class BrowserSession:
             frames = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
             driver.switch_to.frame(frames[idx])
 
+    def _scan_wm_page(self, command, detect, page_url, frames, contexts=None):
+        """Đọc bàn WM đang mở từ WebSocket nhị phân của tab.
+
+        ``protocol 21`` cho biết bàn đang mở (mã bàn, pha cược), ``protocol 26`` là
+        lịch sử đầy đủ kèm danh sách lá của từng ván — cùng nguồn với sảnh nên cầu
+        đọc được ở đây khớp tuyệt đối với những gì người chơi thấy trên màn hình.
+        Trả report cùng định dạng ``reader.js`` để vòng quét của controller không
+        phải biết đang đọc EVO hay WM.
+        """
+        safe_url = _safe_url(page_url)
+        report = {
+            "page": {"url": safe_url, "table_id": "", "title": "WM", "wallet_balance": ""},
+            "tables": [],
+            "diag": {"kind": "wm", "scanned": 1, "roads": 0, "frame": safe_url,
+                     "auth_required": False},
+        }
+        try:
+            command("Network.enable")
+        except Exception:
+            pass
+        # Bàn đang mở tự khai mã bàn trong class #container của iframe bàn; WebSocket
+        # còn mang dữ liệu của nhiều bàn khác nên phải lọc theo đúng mã này.
+        open_key, open_title, open_dealer = "", "", ""
+        value = command("Runtime.evaluate", {
+            "expression": WM.WM_OPEN_TABLE_JS, "returnByValue": True, "silent": True,
+        }).get("result", {}).get("value")
+        if isinstance(value, dict) and value.get("group") is not None and value.get("game") is not None:
+            open_key = WM.table_key(value["game"], value["group"])
+            open_title = value.get("title") or ""
+            open_dealer = value.get("dealer") or ""
+        if not open_key:
+            # Dự phòng khi iframe khác origin: dò href từng context như trước.
+            for context_id in list(contexts or []):
+                try:
+                    href = command("Runtime.evaluate", {
+                        "expression": "location.href", "contextId": context_id,
+                        "returnByValue": True, "silent": True,
+                    }).get("result", {}).get("value") or ""
+                except Exception:
+                    continue
+                if "iframe_101" not in href:
+                    continue
+                value = command("Runtime.evaluate", {
+                    "expression": WM.WM_TABLE_KEY_JS, "contextId": context_id,
+                    "returnByValue": True, "silent": True,
+                }).get("result", {}).get("value")
+                if not isinstance(value, dict) or value.get("group") is None:
+                    continue
+                if value.get("game") is None:
+                    continue
+                open_key = WM.table_key(value["game"], value["group"])
+                open_title = value.get("title") or ""
+                open_dealer = value.get("dealer") or ""
+                break
+        if not open_key:
+            open_key = self.wm_open_key
+        # Lần đầu vào bàn chưa có lịch sử: chờ lâu hơn một nhịp để kịp protocol 26 của
+        # ván đang chạy. Các lượt sau dùng cache nên chỉ cần cửa sổ ngắn.
+        cache = getattr(self, "wm_cache", None)
+        if cache is None:
+            cache = self.wm_cache = {}
+        wait = 0.5 if (open_key and open_key in cache) else 6.0
+        deadline = time.monotonic() + wait
+        histories, tables = {}, {}
+        while time.monotonic() < deadline:
+            try:
+                command("Runtime.evaluate", {"expression": "1", "returnByValue": True,
+                                             "silent": True})
+            except Exception:
+                break
+            for frame in frames:
+                message = WM.decode_frame(frame.get("payloadData"), frame.get("opcode", 2))
+                if not message:
+                    continue
+                data = message.get("data")
+                if not isinstance(data, dict):
+                    continue
+                protocol = message.get("protocol")
+                game, group = data.get("gameID"), data.get("groupID")
+                if protocol == WM.PROTOCOL_HISTORY and game is not None and group is not None:
+                    rounds = WM.decode_history(data)
+                    if rounds:
+                        histories[WM.table_key(game, group)] = rounds
+                elif protocol == WM.PROTOCOL_TABLE and game is not None and group is not None:
+                    tables[WM.table_key(game, group)] = WM.decode_table(data)
+            frames.clear()
+            # Đủ dữ liệu của bàn đang mở thì dừng sớm.
+            if open_key and open_key in tables and open_key in histories:
+                break
+            if not open_key and tables and histories:
+                break
+            time.sleep(0.15)
+        if detect.get("kind") != "table":
+            report["diag"]["reason"] = "wm_lobby"
+            return report
+        if not tables and not open_key:
+            report["diag"]["reason"] = "wm_no_data"
+            return report
+        # Sảnh chỉ gửi protocol 26 theo nhịp (khoảng vài chục giây/bàn), trong khi vòng
+        # quét chạy mỗi 1,5 giây: giữ lịch sử đã nhận để lượt sau không phải chờ lại.
+        for key, rounds in histories.items():
+            if rounds and (key not in cache or len(rounds) >= len(cache[key])):
+                cache[key] = rounds
+        key = open_key or next(iter(tables), "")
+        info = tables.get(key) or {}
+        rounds = cache.get(key) or []
+        letters = WM.letters(rounds)
+        label = open_title or info.get("table_name") or ""
+        if not label or label in ("百家樂", "Baccarat", "baccarat"):
+            label = "WM %s" % key
+        if open_dealer:
+            label = "%s · %s" % (label, open_dealer)
+        report["page"]["table_id"] = key
+        report["page"]["title"] = label
+        report["tables"].append({
+            "table_id": key,
+            "label": label,
+            "letters": letters,
+            "game_type": "baccarat",
+            "read_error": "" if letters else "Chưa nhận lịch sử bàn WM.",
+            "source": "wm-ws-26",
+            "ws_hands": len(rounds),
+            "road_match": bool(letters),
+            "observed_at": time.time(),
+            "messages": 1,
+        })
+        report["diag"].update({"roads": 1 if letters else 0, "round": info.get("round"),
+                               "game_no": info.get("game_no"),
+                               "bet_ms": info.get("bet_milliseconds")})
+        return report
+
     def _scan_cdp(self):
         """Chỉ đọc các default context của tab được phép; không chuyển frame."""
         with self.lock:
@@ -857,6 +1011,9 @@ class BrowserSession:
                 contexts = []
                 limited = False
                 sequence = 0
+                # Khung WebSocket nhị phân của WM: gom trong lúc chờ RPC để đọc bàn
+                # đang mở (protocol 21/25/26) mà không cần thêm kết nối.
+                wm_frames = []
 
                 def command(method, params=None):
                     nonlocal sequence, limited
@@ -870,6 +1027,8 @@ class BrowserSession:
                         ws.settimeout(remaining)
                         message = json.loads(ws.recv())
                         event = message.get("method")
+                        if event == "Network.webSocketFrameReceived":
+                            wm_frames.append((message.get("params") or {}).get("response") or {})
                         if event == "Runtime.executionContextCreated":
                             context = message.get("params", {}).get("context", {})
                             if (context.get("auxData") or {}).get("isDefault") is True:
@@ -898,6 +1057,19 @@ class BrowserSession:
                     self.last_diag = {"reason": "root_left_site"}
                     return []
                 root_url = root["url"]
+                # Tab WM (M88) không dùng DOM để vẽ cầu mà đẩy lịch sử/lá bài qua
+                # WebSocket nhị phân: nhận diện rồi đọc bằng đường riêng.
+                detect = command("Runtime.evaluate", {
+                    "expression": WM.WM_DETECT_JS, "returnByValue": True, "silent": True,
+                }).get("result", {}).get("value")
+                if isinstance(detect, dict) and detect.get("is_wm"):
+                    self.wm_page_id = page["id"]
+                    self.start_wm_watch()
+                    report = self._scan_wm_page(command, detect, root_url, wm_frames, contexts)
+                    self.last_frames = 1
+                    self.last_diag = dict(report["diag"])
+                    self.connection_state = "reading" if report["tables"] else "waiting"
+                    return [report] if report["tables"] else []
                 if not contexts:
                     self.connection_state = "waiting"
                     self.last_diag = {"reason": "no_default_context"}
@@ -956,8 +1128,214 @@ class BrowserSession:
                     except Exception:
                         pass
 
+    def start_wm_watch(self):
+        """Bật thread nghe WebSocket của tab WM (idempotent).
+
+        Sảnh chỉ gửi ``protocol 26`` (lịch sử) và ``protocol 25`` (kết quả) một lần mỗi
+        ván; đọc theo từng lượt quét sẽ bỏ lỡ. Thread này giữ một kết nối CDP riêng,
+        cập nhật ``wm_cache``/``wm_cards``/``wm_open_key`` để vòng quét chỉ việc đọc lại.
+        """
+        if self._wm_watch is not None and self._wm_watch.is_alive():
+            return
+        self._wm_watch_stop = threading.Event()
+        thread = threading.Thread(target=self._wm_watch_loop, daemon=True,
+                                  name="ba-wm-watch")
+        self._wm_watch = thread
+        thread.start()
+
+    def stop_wm_watch(self):
+        if self._wm_watch is not None:
+            self._wm_watch_stop.set()
+            self._wm_watch = None
+
+    def _wm_watch_loop(self):
+        import websocket
+
+        while not self._wm_watch_stop.is_set():
+            page = None
+            try:
+                pages = self._cdp_pages()
+                if self.wm_page_id:
+                    page = next((p for p in pages if p.get("id") == self.wm_page_id), None)
+                if page is None:
+                    self.wm_page_id = None
+                    self._wm_watch_stop.wait(3.0)
+                    continue
+            except Exception:
+                self._wm_watch_stop.wait(3.0)
+                continue
+            ws = None
+            try:
+                ws = websocket.create_connection(
+                    validated_endpoint(page), suppress_origin=True, timeout=10,
+                    redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+                ws.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
+                sequence = 1
+                next_probe = 0.0
+                while not self._wm_watch_stop.is_set():
+                    now = time.monotonic()
+                    if now >= next_probe:
+                        sequence += 1
+                        self._wm_probe_id = sequence
+                        ws.send(json.dumps({"id": sequence, "method": "Runtime.evaluate",
+                                            "params": {"expression": WM.WM_OPEN_TABLE_JS,
+                                                       "returnByValue": True, "silent": True}}))
+                        next_probe = now + 3.0
+                    ws.settimeout(0.5)
+                    try:
+                        message = json.loads(ws.recv())
+                    except Exception as exc:
+                        if type(exc).__name__ in ("WebSocketTimeoutException", "TimeoutError"):
+                            continue
+                        break
+                    if message.get("id") == getattr(self, "_wm_probe_id", 0):
+                        value = (message.get("result") or {}).get("result", {}).get("value")
+                        if isinstance(value, dict) and value.get("group") is not None \
+                                and value.get("game") is not None:
+                            self.wm_open_key = WM.table_key(value["game"], value["group"])
+                        else:
+                            # Đang ở sảnh (iframe bàn ẩn) thì không còn bàn đang mở.
+                            self.wm_open_key = ""
+                        continue
+                    if message.get("method") != "Network.webSocketFrameReceived":
+                        continue
+                    response = (message.get("params") or {}).get("response") or {}
+                    frame = WM.decode_frame(response.get("payloadData"),
+                                            response.get("opcode", 2))
+                    if frame is not None:
+                        self._wm_absorb(frame)
+            except Exception:
+                pass
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+            self._wm_watch_stop.wait(1.0)
+
+    def _wm_absorb(self, message):
+        """Cập nhật cache WM từ một khung protocol (gọi trong thread nghe)."""
+        data = message.get("data")
+        if not isinstance(data, dict):
+            return
+        protocol = message.get("protocol")
+        game, group = data.get("gameID"), data.get("groupID")
+        if game is None or group is None:
+            return
+        key = WM.table_key(game, group)
+        if protocol == WM.PROTOCOL_HISTORY:
+            rounds = WM.decode_history(data)
+            if rounds and (key not in self.wm_cache or len(rounds) >= len(self.wm_cache[key])):
+                self.wm_cache[key] = rounds
+        elif protocol == WM.PROTOCOL_TABLE:
+            self.wm_state[key] = WM.decode_table(data)
+        elif protocol == WM.PROTOCOL_CARD:
+            area = data.get("cardArea")
+            card = data.get("cardID")
+            if area == 1:
+                # Lá đầu tiên của ván mới: xoá bàn tay đang ghi.
+                self.wm_cards[key] = {}
+            if isinstance(area, int) and WM.valid_card(card):
+                self.wm_cards.setdefault(key, {})[area] = card
+        elif protocol == WM.PROTOCOL_RESULT:
+            round_data = WM.decode_round(data)
+            self.wm_state.setdefault(key, {})["last_round"] = round_data
+            self.wm_cards.pop(key, None)
+
+    def read_wm_bets(self, timeout=6.0):
+        """Đọc tổng cược 3 cửa của bàn WM (đơn vị VNDK, tổng cả bàn)."""
+        import websocket
+
+        page = self._cdp_page()
+        if page is None:
+            return {"ok": False, "error": "no_tab"}
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                validated_endpoint(page), suppress_origin=True, timeout=timeout,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
+            ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
+                "expression": WM.WM_BETS_JS, "returnByValue": True, "silent": True}}))
+            deadline = time.monotonic() + timeout
+            value = None
+            while time.monotonic() < deadline:
+                message = json.loads(ws.recv())
+                if message.get("id") != 2:
+                    continue
+                value = (message.get("result") or {}).get("result", {}).get("value")
+                break
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__}
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        if not isinstance(value, dict):
+            return {"ok": False, "error": "no_value"}
+        if value.get("reason"):
+            return {"ok": False, "error": value["reason"]}
+        return {"ok": False, "source": "wm", "unit": 1000, "error": "wm_table_totals",
+                "totals": {"B": value.get("banker"), "P": value.get("player"),
+                           "T": value.get("tie")},
+                "note": "WM chỉ hiện tổng cược cả bàn (VNDK); không tách được chip của bạn."}
+
+    def _probe_wm_pages(self):
+        """Tìm tab WM khi chưa biết: URL của nó không có dấu hiệu nhận biết.
+
+        Chỉ chạy khi ``wm_page_id`` còn trống và kết quả âm được nhớ ngắn, để nhịp
+        quét không phải mở CDP dò lại tab cổng mỗi 1,5 giây.
+        """
+        if self.wm_page_id:
+            return True
+        if time.time() - getattr(self, "_wm_scan_probe_at", 0.0) < 20.0:
+            return False
+        self._wm_scan_probe_at = time.time()
+        import websocket
+
+        try:
+            pages = self._cdp_pages()
+        except Exception:
+            return False
+        for page in reversed(pages):
+            if is_lobby_url(page.get("url")):
+                continue
+            try:
+                ws = websocket.create_connection(
+                    validated_endpoint(page), suppress_origin=True, timeout=4,
+                    redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            except Exception:
+                continue
+            try:
+                ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
+                ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
+                    "expression": WM.WM_DETECT_JS, "returnByValue": True, "silent": True}}))
+                deadline = time.monotonic() + 4
+                while time.monotonic() < deadline:
+                    message = json.loads(ws.recv())
+                    if message.get("id") != 2:
+                        continue
+                    value = (message.get("result") or {}).get("result", {}).get("value")
+                    if isinstance(value, dict) and value.get("is_wm"):
+                        self.wm_page_id = page.get("id")
+                        self.start_wm_watch()
+                        return True
+                    break
+            except Exception:
+                continue
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        return False
+
     def scan(self):
         """Chỉ đọc tab được phép, tối đa 64 context; WebDriver sâu 4 iframe."""
+        self._probe_wm_pages()
         with self.lock:
             if self.cdp_attached:
                 return self._scan_cdp()

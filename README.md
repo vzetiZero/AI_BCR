@@ -93,15 +93,38 @@ Một lần bấm chạy đúng chuỗi:
 1. Gắn Chrome CDP 9222 (chưa mở thì mở Chrome profile rồi yêu cầu đăng nhập + mở
    sảnh, bấm lại nút).
 2. Nhận tab sảnh → quét toàn bộ danh sách (cuộn hết, gom mọi ô bàn đã render).
-   Nhận cả sảnh EVO (`/frontend/evo/r3`) và sảnh Petalive (`/live-games/lobby/bcr`);
-   với Petalive, cầu được đọc trực tiếp từ ô bàn nên không cần WebSocket sảnh.
+   Nhận cả sảnh EVO (`/frontend/evo/r3`), sảnh Petalive (`/live-games/lobby/bcr`) và
+   sảnh **WM/M88** (tab có `iframe_109`/`iframe_101`); với Petalive, cầu được đọc
+   trực tiếp từ ô bàn, còn WM đọc lịch sử + lá bài qua WebSocket nhị phân.
 3. Mở **ô bàn đầu tiên có mã bàn**. Không chấm điểm/lọc cầu, không bỏ bàn Siêu
    Tốc Độ, không đối chiếu shoe.
 4. Bấm đúng ô bàn bằng pointer event thật, chờ URL xác nhận bàn: EVO dùng
-   `table_id`, Petalive dùng đường dẫn `/live-games/bcr/<id>`.
+   `table_id`, Petalive dùng đường dẫn `/live-games/bcr/<id>`, WM chờ
+   `iframe_101` (khung bàn) hiện ra.
 5. Xác nhận chỉ cần đọc được cầu trong bàn.
 6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa bấm chip
    (`sim.running = false`, `pending = null`).
+
+### Sảnh WM (M88)
+
+`aibcr/adapters/wm.py` giải mã dữ liệu thật của WM đã đối chiếu với 783 ván:
+
+- `protocol 26` — lịch sử từng bàn: mã kết quả + `resultContent` chứa danh sách lá
+  của Banker (`b:`) và Player (`p:`).
+- `protocol 25` — ván vừa ngã: `dtCard` khoá `1,3,5` là Player, `2,4,6` là Banker.
+- `protocol 24` — từng lá được chia (dùng cho AI live).
+- mã kết quả: `code & 3` → 1 = Banker, 2 = Player, 0 = Hoà; bit 3/4 là đôi Banker/
+  Player; bit 5/6 là có/không rút lá thứ 3; bit 7/8 là natural.
+- id lá 1..80, mỗi chất 20 mã: `rank = (id - 1) % 20 + 1` (14..20 là mã trống).
+
+Bàn đang mở được nhận ra qua class `game101 group<id>` của `#container` trong
+`iframe_101`, nên app chỉ đọc đúng bàn đang xem dù sảnh gửi kết quả của mọi bàn trên
+cùng một socket. `aibcr/live/wm_reader.py` cấp lá bài cho AI live; `browser.scan()`
+cấp cầu cho tool và tự nghe nền (`start_wm_watch`) để không bỏ lỡ `protocol 26`
+(mỗi ván chỉ gửi một lần).
+
+WM **chưa** tự bấm chip: app chỉ đọc lá bài/cầu, gợi ý cửa và hiện tổng cược 3 cửa
+của cả bàn; việc đặt chip vẫn do người dùng bấm trên bàn.
 
 Không có bàn nào có mã bàn thì tool tự quét lại (lượt đầu ngay, sau đó mỗi 15 giây)
 tới khi hết `ENTER_VALID_TIMEOUT = 240` giây thì báo lỗi. Nút **Dừng tự quét** huỷ

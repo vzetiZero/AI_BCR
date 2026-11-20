@@ -205,6 +205,12 @@ function renderChips(chips, plan) {
   } else if (live && live.error) {
     lines.push(`Chưa đọc được chip (${live.error}).`);
   }
+  if (live && live.source === 'wm' && live.totals) {
+    const parts = ['B', 'P', 'T']
+      .map((side) => (live.totals[side] ? `${SIDE_NAME[side]} ${live.totals[side]}K` : ''))
+      .filter(Boolean);
+    lines.push(`Tổng cược cả bàn: ${parts.length ? parts.join(' · ') : 'chưa có'}`);
+  }
   detailBox.innerHTML = lines.map((line) => `<div>${escapeHtml(line)}</div>`).join('');
 }
 
