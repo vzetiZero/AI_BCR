@@ -273,6 +273,7 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 .conn-note { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 8px; }
 .conn-note[data-state="on"] { color: var(--green); }
 .conn-note[data-state="err"] { color: var(--red); }
+.conn-note[data-state="skip"] { color: var(--gold); }
 .connect-row { align-items: center; gap: 10px; }
 .conn-hint { font-size: 12px; color: var(--muted); line-height: 1.55; }
 .conn-hint b { color: var(--text); }

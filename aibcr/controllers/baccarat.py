@@ -515,6 +515,7 @@ class BaccaratController:
                     "note": sim.note,
                     "place_skips": sim.place_skips,
                     "take_profit_done": bool(sim.take_profit_done),
+                    "auto_note": self.auto_bet_note,
                 },
                 "plan": plan,
                 "bet": {

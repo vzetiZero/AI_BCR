@@ -1248,6 +1248,18 @@ class BrowserSession:
             round_data = WM.decode_round(data)
             self.wm_state.setdefault(key, {})["last_round"] = round_data
             self.wm_cards.pop(key, None)
+            # Kết quả ván tới ngay qua protocol 25, còn lịch sử (26) chỉ về theo nhịp.
+            # Ghép ngay vào cache để cầu trên UI không bị trễ cả tay.
+            merged = WM.merge_result(self.wm_cache.get(key) or [], {
+                "game_no": data.get("gameNo"), "round": data.get("gameNoRound"),
+                "code": round_data.get("code"), "winner": round_data.get("winner"),
+                "banker_cards": round_data.get("banker_cards"),
+                "player_cards": round_data.get("player_cards"),
+                "banker_score": round_data.get("banker_score"),
+                "player_score": round_data.get("player_score"),
+            })
+            if merged:
+                self.wm_cache[key] = merged
 
     def read_wm_bets(self, timeout=6.0):
         """Đọc tổng cược 3 cửa của bàn WM (đơn vị VNDK, tổng cả bàn)."""

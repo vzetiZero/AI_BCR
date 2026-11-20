@@ -235,6 +235,38 @@ def letters(rounds):
     return "".join(row.get("winner") or "" for row in (rounds or []) if row.get("winner"))
 
 
+def merge_result(rounds, round_data):
+    """Ghép kết quả ván vừa ngã (protocol 25) vào lịch sử (protocol 26).
+
+    ``protocol 26`` chỉ được sàn đẩy theo nhịp (khoảng 20–30 giây/bàn), trong khi
+    ``protocol 25`` tới ngay khi ván kết thúc. Nếu chỉ chờ 26 thì cầu trên UI trễ cả tay
+    — đây chính là lý do cầu "đứng im". Hàm này chèn ván mới vào cuối, bỏ qua nếu đã có.
+    """
+    rounds = list(rounds or [])
+    if not isinstance(round_data, dict) or not round_data.get("winner"):
+        return rounds
+    key = (round_data.get("game_no"), round_data.get("round"))
+    for row in rounds:
+        if key[0] is not None and (row.get("game_no"), row.get("round")) == key:
+            return rounds
+        # Protocol 25 không kèm game_no ở một số bàn: so theo bộ lá để tránh trùng.
+        if (row.get("banker_cards") == round_data.get("banker_cards")
+                and row.get("player_cards") == round_data.get("player_cards")):
+            return rounds
+    rounds.append({
+        "game_no": round_data.get("game_no"),
+        "round": round_data.get("round"),
+        "code": round_data.get("code"),
+        "winner": round_data.get("winner"),
+        "banker_cards": round_data.get("banker_cards") or [],
+        "player_cards": round_data.get("player_cards") or [],
+        "banker_score": round_data.get("banker_score"),
+        "player_score": round_data.get("player_score"),
+        "source": "ws-25",
+    })
+    return rounds
+
+
 def decode_frame(payload_data, opcode=2):
     """Giải một khung WebSocket của WM (nhị phân base64 hoặc text JSON).
 

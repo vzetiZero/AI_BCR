@@ -526,6 +526,22 @@ function renderBaccarat(snapshot) {
     placeBox.dataset.state = place.ok === true ? 'on' : place.ok === false ? 'err' : '';
   }
 
+  /* --- AI decision note (real-time per-hand) --- */
+  const aiDecision = $('#ba-ai-decision');
+  if (aiDecision) {
+    const note = (table.auto_note || '').trim();
+    if (note) {
+      aiDecision.textContent = note;
+      aiDecision.hidden = false;
+      const low = note.toLowerCase();
+      aiDecision.dataset.state = low.includes('bỏ qua') || low.includes('chờ')
+        ? 'skip' : (low.includes('tự đặt') ? 'on' : '');
+    } else {
+      aiDecision.textContent = '';
+      aiDecision.hidden = true;
+    }
+  }
+
   renderTables(snapshot.tables || []);
   renderBaConfig(config);
   renderAiPanel(snapshot.live);
