@@ -269,7 +269,7 @@ class RpcTests(unittest.TestCase):
         self.assertEqual(placed[0]["stake"], 123.0)
         self.assertIn("AI", placed[0]["reason"])
 
-    def test_bet_place_refuses_auto_when_predict_says_botay(self):
+    def test_bet_place_refuses_auto_when_no_probabilities(self):
         controller, _ = self.make_controller()
 
         class FakeLive:
@@ -295,7 +295,7 @@ class RpcTests(unittest.TestCase):
         result, error = controller.dispatch("bet.place", {})
         self.assertIsNone(error)
         self.assertFalse(result["ok"])
-        self.assertIn("BỎ TAY", result["error"])
+        self.assertIn("Chưa có cửa", result["error"])
         self.assertEqual(placed, [])
         self.assertIsNone(controller.sim.pending)
 

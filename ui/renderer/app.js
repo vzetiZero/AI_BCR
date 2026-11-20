@@ -152,40 +152,95 @@ function setValue(selector, value) {
   if (node && document.activeElement !== node) node.value = value ?? '';
 }
 
-function renderRoad(letters) {
-  const box = $('#ba-road');
-  if (!box) return;
-  const text = String(letters || '');
-  if (!text) {
-    box.innerHTML = '<span class="hint">Chưa có cầu.</span>';
-    return;
+// Big Road: cùng quy ước với aibcr/live/road.py — lặp cửa thì xuống dòng, đổi cửa
+// thì mở cột mới, cột đủ 6 hàng thì đi sang phải (đuôi rồng). Hoà không tạo ô mới mà
+// là chấm xanh trên ô của vệt đang chạy (giống bàn thật).
+function bigRoadColumns(letters, rows = 6) {
+  const text = String(letters || '').replace(/[^PBT]/g, '').slice(-400);
+  const columns = [];
+  const taken = new Set();
+  let col = -1;
+  let row = 0;
+  let previous = '';
+  let leadingTies = 0;
+  let newest = null;
+  let cells = 0;
+  for (const side of text) {
+    if (side === 'T') {
+      if (newest) newest.ties += 1;
+      else leadingTies += 1;
+      continue;
+    }
+    cells += 1;
+    if (side !== previous) {
+      col += 1;
+      row = 0;
+    } else if (row + 1 < rows && !taken.has(`${col}:${row + 1}`)) {
+      row += 1;
+    } else {
+      let probe = col + 1;
+      while (taken.has(`${probe}:${row}`)) probe += 1;
+      col = probe;
+    }
+    taken.add(`${col}:${row}`);
+    while (columns.length <= col) columns.push([]);
+    newest = { side, row, ties: leadingTies };
+    columns[col].push(newest);
+    previous = side;
   }
-  box.innerHTML = text
-    .split('')
-    .slice(-60)
-    .map((ch) => `<span class="road-cell ${ch.toLowerCase()}">${ch}</span>`)
-    .join('');
+  return { columns, cells, leading_ties: leadingTies };
 }
 
-function renderHandCount(table) {
+function renderRoad(roadOrLetters) {
+  const box = $('#ba-road');
+  if (!box) return;
+  const road = (roadOrLetters && Array.isArray(roadOrLetters.columns))
+    ? roadOrLetters
+    : bigRoadColumns(roadOrLetters);
+  if (!road.cells) {
+    const ties = Number(road.leading_ties || road.leadingTies || 0);
+    box.innerHTML = `<span class="hint">${ties ? `Chưa có tay thắng/thua · ${ties} hoà.` : 'Chưa có cầu.'}</span>`;
+    return;
+  }
+  const cols = road.columns.slice(-40);
+  box.innerHTML = `<div class="bigroad">${cols.map((cells) => {
+    const slots = [];
+    let cursor = 0;
+    cells.forEach((cell) => {
+      while (cursor < cell.row) { slots.push('<i class="br-cell empty"></i>'); cursor += 1; }
+      const ties = Number(cell.ties || 0);
+      const title = `${SIDE_NAME[cell.side] || cell.side}${ties ? ` · ${ties} hoà` : ''}`;
+      slots.push(`<i class="br-cell ${String(cell.side).toLowerCase()}" title="${title}">${cell.side}`
+        + (ties ? '<em class="br-tie"></em>' : '') + '</i>');
+      cursor = cell.row + 1;
+    });
+    return `<div class="bigroad-col">${slots.join('')}</div>`;
+  }).join('')}</div>`;
+}
+
+function renderHandCount(table, live, letters) {
   const box = $('#ba-hand-count');
   if (!box) return;
-  const letters = String(table.letters || '');
-  const n = letters.length;
-  if (!table.key || !n) {
+  const text = String(letters || '');
+  const liveHand = Number((live && live.running && live.hand) || 0);
+  // Live có số tay thật của bàn (gameNoRound); chỉ fallback sang đếm ký tự khi chưa có.
+  const n = liveHand || Math.max(Number((table && table.hand) || 0), text.length);
+  if (!(table && table.key) || !n) {
     box.textContent = '';
     return;
   }
-  const last = letters[n - 1];
+  const last = text ? text[text.length - 1] : '';
   const name = SIDE_NAME[last] || '—';
-  box.innerHTML = `Tay <b>${n}</b> · ${name} · ${table.running ? 'đang chạy' : 'đã dừng'}`;
+  const state = live && live.running ? (live.state === 'BETTING' ? 'đang cược' : 'chờ kết quả') : '';
+  box.innerHTML = `Tay <b>${n}</b>${last ? ` · ${name}` : ''}${state ? ` · ${state}` : ''}`
+    + `<span class="hand-live" data-state="${live && live.running ? 'on' : 'off'}">`
+    + `${live && live.running ? 'LIVE' : 'OFF'}</span>`;
 }
 
-function renderRoadPattern(letters) {
+function renderRoadPattern(letters, note) {
   const box = $('#ba-road-pattern');
   if (!box) return;
   const text = String(letters || '');
-  if (!text) { box.textContent = ''; return; }
   const runs = [];
   let current = '', prev = '';
   for (const ch of text) {
@@ -195,8 +250,10 @@ function renderRoadPattern(letters) {
   }
   if (current) runs.push(current);
   const cls = { B: 'run-b', P: 'run-p', T: 'run-t' };
-  box.innerHTML = runs.map((run) =>
+  const chips = runs.slice(-10).map((run) =>
     `<span class="${cls[run[0]] || ''}">${run}</span>`).join(' ');
+  box.innerHTML = (chips ? `<div class="road-runs">${chips}</div>` : '')
+    + (note ? `<div class="road-note">${escapeHtml(note)}</div>` : '');
 }
 
 function renderChips(chips, plan) {
@@ -380,7 +437,15 @@ function renderAiPanel(live) {
     badge.textContent = analysis.verdict ? 'CÓ AI' : (ai.busy ? 'ĐANG HỎI AI' : 'ĐANG ĐỌC');
     badge.className = 'hero-state' + (analysis.verdict ? ' bet' : '');
   }
-  if (verdict) verdict.textContent = analysis.verdict || pred.recommendation || 'Chờ ván đầu tiên…';
+  const topSide = pred.top_side && SIDE_NAME[pred.top_side]
+    ? `${SIDE_NAME[pred.top_side]} ${pct((Number(pred.top_probability) || 0) * 100)}`
+    : '';
+  if (verdict) {
+    verdict.textContent = analysis.verdict
+      || (pred.ok && topSide
+        ? `Cửa cao nhất: ${topSide}${pred.pattern_note ? ` · ${pred.pattern_note}` : ''}`
+        : (pred.error || 'Chờ ván đầu tiên…'));
+  }
 
   const probs = pred.probabilities || {};
   const ev = pred.ev || {};
@@ -405,7 +470,7 @@ function renderAiPanel(live) {
   if (risk) risk.textContent = analysis.risk ? `Rủi ro: ${analysis.risk}` : '';
   if (explain) explain.textContent = analysis.explanation || '';
   if (meta) {
-    const bits = [live.table || '?', `${live.rounds || 0} ván`, ai.model || ''];
+    const bits = [live.table || '?', `tay ${live.hand || live.rounds || 0}`, ai.model || ''];
     if (analysis.round && analysis.round !== live.rounds) bits.push(`AI ở ván ${analysis.round}`);
     if (analysis.confidence) bits.push(`tin cậy: ${analysis.confidence}`);
     if (ai.error) bits.push(`lỗi AI: ${ai.error}`);
@@ -538,10 +603,18 @@ function renderBaccarat(snapshot) {
   if (planReason) planReason.textContent = reasonText;
 
   /* --- bàn đang theo dõi --- */
-  setText('#ba-table-name', table.key ? `${table.name || table.key} · ${table.hands || 0} tay` : 'Chưa chọn bàn');
-  renderRoad(table.letters);
-  renderHandCount(table);
-  renderRoadPattern(table.letters);
+  const live = snapshot.live || {};
+  const liveRunning = !!live.running;
+  const letters = liveRunning ? String(live.history || '') : String(table.letters || '');
+  const handNo = Number(live.hand || 0)
+    || Math.max(Number(table.hand || 0), String(table.letters || '').length);
+  setText('#ba-table-name', table.key
+    ? `${table.name || table.key} · ${handNo} tay`
+    : 'Chưa chọn bàn');
+  renderRoad(liveRunning && live.road ? live.road : letters);
+  renderHandCount(table, live, letters);
+  renderRoadPattern(letters, ((live.prediction || {}).pattern_note)
+    || (!liveRunning ? 'Bật AI live để đọc bàn theo thời gian thực.' : ''));
   const noteBits = [];
   if (table.key) {
     noteBits.push(table.running ? 'Đang theo dõi' : 'Đã dừng');
@@ -589,7 +662,14 @@ api.onEngineEvent(({ game, event, data }) => {
     return;
   }
   if (event === 'live_prediction') {
-    renderAiPanel(data);
+    // Sự kiện này bắn mỗi ván và mỗi lần AI trả lời: phải vẽ lại cả bàn (số tay,
+    // Big Road, xác suất) chứ không chỉ panel AI — nếu không UI đứng ở tay cũ.
+    if (state.baccarat) {
+      state.baccarat.live = data;
+      renderBaccarat(state.baccarat);
+    } else {
+      renderAiPanel(data);
+    }
     return;
   }
   if (event === 'log') {

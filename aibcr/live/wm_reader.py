@@ -128,9 +128,14 @@ class WMReader(threading.Thread):
         if game is None or group is None:
             return
         key = WM.table_key(game, group)
-        if not self.open_key or key != self.open_key:
-            # Chưa biết bàn đang mở (hoặc là bàn khác trong sảnh): bỏ qua để không trộn
-            # cầu/lá của hai bàn vào một shoe.
+        if not self.open_key:
+            # Không đọc được mã bàn từ iframe (khác origin hoặc iframe chưa render):
+            # học bàn từ protocol 21 đầu tiên thay vì bỏ toàn bộ dữ liệu.
+            if protocol != WM.PROTOCOL_TABLE:
+                return
+            self.open_key = key
+        elif key != self.open_key:
+            # Bàn khác trong sảnh: bỏ qua để không trộn cầu/lá của hai bàn vào một shoe.
             return
         self.frames += 1
         if protocol == WM.PROTOCOL_TABLE:
@@ -159,6 +164,9 @@ class WMReader(threading.Thread):
             canonical_player = [WM.canonical_card(card) for card in player]
             canonical_banker = [WM.canonical_card(card) for card in banker]
             signature = ",".join(str(card) for card in sorted(player + banker))
+            # Protocol 25 thường không kèm số tay; lấy số tay của pha cược gần nhất
+            # (protocol 21) để UI hiện đúng "Tay N" thay vì đếm lịch sử đã nạp.
+            last = self.last_state or {}
             payload = {
                 "issue_id": "%s:%s" % (key, signature),
                 "table": "WM %s" % key,
@@ -170,15 +178,20 @@ class WMReader(threading.Thread):
                 "player_score": round_data["player_score"],
                 "banker_score": round_data["banker_score"],
                 "code": round_data["code"],
+                "round": round_data.get("round") or last.get("round"),
+                "game_no": round_data.get("game_no") or last.get("game_no"),
                 "wm_cards": {"player": player, "banker": banker},
             }
             self.key = key
             self.table = payload["table"]
             self.last_round = payload
-            self.last_state = dict(self.last_state or {}, state="SHOW_RESULT",
-                                   table=self.table)
+            self.last_state = dict(last, state="SHOW_RESULT", table=self.table,
+                                   round=payload["round"], game_no=payload["game_no"],
+                                   time_remains=None)
             if self.on_round is not None:
                 self.on_round(payload)
+            if self.on_state is not None:
+                self.on_state(dict(self.last_state))
 
     def _seed_history(self, key, data):
         """Nạp lịch sử bàn (protocol 26) để AI có dữ liệu ngay khi vừa vào.
@@ -195,12 +208,18 @@ class WMReader(threading.Thread):
         self._seeded.add(key)
         if self.on_round is None:
             return
-        # Chỉ lấy ván CUỐI có đủ lá: nạp quá xa sẽ làm shoe lệch số bài thật còn lại.
-        for row in rounds[-30:]:
+        # Chỉ lấy 30 ván gần nhất có đủ lá: nạp quá xa sẽ làm shoe lệch số bài thật
+        # còn lại. ``round`` của ván cuối là số tay thật của bàn, dùng luôn cho UI.
+        tail = rounds[-30:]
+        current_game = (tail[-1] or {}).get("game_no") if tail else None
+        valid = [row for row in tail
+                 if (row.get("player_cards") and row.get("banker_cards")
+                     # Không trộn ván của shoe trước vào số tay/xác suất shoe đang chạy.
+                     and (current_game is None
+                          or row.get("game_no") in (None, current_game)))]
+        for index, row in enumerate(valid):
             player = row.get("player_cards") or []
             banker = row.get("banker_cards") or []
-            if not player or not banker:
-                continue
             card_signature = ",".join(str(card) for card in sorted(player + banker))
             self.on_round({
                 "issue_id": "%s:seed:%s" % (key, card_signature),
@@ -213,8 +232,11 @@ class WMReader(threading.Thread):
                 "player_score": row.get("player_score"),
                 "banker_score": row.get("banker_score"),
                 "code": row.get("code"),
+                "round": row.get("round"),
+                "game_no": row.get("game_no"),
                 "wm_cards": {"player": player, "banker": banker},
                 "seed": True,
+                "seed_last": index == len(valid) - 1,
             })
 
     # -------------------------------------------------------------------- vòng
@@ -276,7 +298,9 @@ class WMReader(threading.Thread):
                     if isinstance(value, dict) and value.get("group") is not None \
                             and value.get("game") is not None:
                         self.open_key = WM.table_key(value["game"], value["group"])
-                    else:
+                    elif not self.open_key:
+                        # Chỉ xoá khi chưa từng học được bàn; giữ bàn đã biết để
+                        # sảnh/iframe ẩn tạm thời không làm mất dữ liệu đang đọc.
                         self.open_key = ""
                     continue
                 if message.get("method") != "Network.webSocketFrameReceived":

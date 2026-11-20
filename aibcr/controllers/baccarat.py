@@ -117,7 +117,8 @@ class BaccaratController:
         # Luồng AI live (WebSocket Petalive) — chạy riêng, không chặn _loop().
         self.live_session = None
         self.live_reader = None
-        self.live_stop = threading.Event()
+        self.live_stop_event = threading.Event()
+        self.live_hand = 0
         # API key nhập từ UI: CHỈ RAM. Không đưa vào self.config, state file hay snapshot.
         self.ai_key_override = ""
         self.bet_config = {"side": self.config["bet_side"], "stake": self.config["bet_stake"]}
@@ -383,14 +384,16 @@ class BaccaratController:
         return rows
 
     def _ai_suggestion(self):
-        """Cửa do ``predict`` chốt; AI chỉ được đưa nhận định, không đổi cửa.
+        """Cửa để đặt tiền: cửa có xác suất ra cao nhất do ``predict`` tính.
 
         ``analysis.focus_side`` là văn bản do AI trả về nên KHÔNG được dùng để chọn
-        cửa. Khi ``playable=false`` hoặc ``best_side=None`` thì luôn trả ``side=None``.
+        cửa; AI chỉ giải thích. Thứ tự lấy: ``top_side`` (xác suất cao nhất) →
+        tự tính lại từ ``probabilities`` → ``best_side`` nếu bản predict cũ không có.
         """
         live = self.live_session.snapshot() if self.live_session is not None else None
         result = {"side": None, "verdict": "", "playable": False, "confidence": "",
-                  "explanation": "", "model": "", "round": None}
+                  "explanation": "", "model": "", "round": None,
+                  "probability": None, "top_side": None, "pattern": ""}
         if not live:
             return result
         analysis = live.get("analysis") or {}
@@ -401,10 +404,23 @@ class BaccaratController:
             "explanation": str(analysis.get("explanation") or ""),
             "model": str(analysis.get("model") or ""),
             "round": analysis.get("round"),
+            "playable": bool(prediction.get("playable")),
+            "pattern": str(prediction.get("pattern_note") or ""),
         })
-        if bool(prediction.get("playable")) and prediction.get("best_side") in ("P", "B", "T"):
+        probabilities = prediction.get("probabilities") or {}
+        key_of = {"P": "p_player", "B": "p_banker", "T": "p_tie"}
+        side = prediction.get("top_side")
+        if side not in key_of:
+            ranked = [(float(probabilities.get(key_of[s]) or 0.0), s) for s in ("P", "B", "T")]
+            ranked.sort(reverse=True)
+            side = ranked[0][1] if ranked and ranked[0][0] > 0 else None
+        if side in key_of:
+            result["side"] = side
+            result["top_side"] = side
+            result["probability"] = probabilities.get(key_of[side])
+        elif prediction.get("best_side") in key_of:
             result["side"] = prediction["best_side"]
-            result["playable"] = True
+            result["top_side"] = result["side"]
         return result
 
     def _resolve_order(self, params=None):
@@ -417,7 +433,13 @@ class BaccaratController:
         reason = "Lệnh UI"
         if side == "AUTO":
             side = suggestion["side"]
-            reason = ("Theo AI · %s" % suggestion["verdict"]) if suggestion["verdict"] else "Theo AI"
+            bits = []
+            if suggestion.get("top_side"):
+                bits.append("%s %.1f%%" % (suggestion["top_side"],
+                                           float(suggestion.get("probability") or 0) * 100))
+            if suggestion["verdict"]:
+                bits.append(suggestion["verdict"])
+            reason = ("Theo AI · " + " · ".join(bits)) if bits else "Theo AI"
         return {"side": side if side in ("P", "B", "T") else None,
                 "stake": min(1000000.0, max(1.0, stake)),
                 "reason": reason, "suggestion": suggestion}
@@ -510,6 +532,8 @@ class BaccaratController:
                     "name": sim.table_name,
                     "letters": sim.letters,
                     "hands": len(sim.letters or ""),
+                    "hand": max(len(sim.letters or ""),
+                                int(getattr(self, "live_hand", 0) or 0)),
                     "running": sim.running,
                     "entry_waiting": sim.entry_waiting,
                     "note": sim.note,
@@ -1022,8 +1046,8 @@ class BaccaratController:
         """Tự chốt lệnh cho tay kế khi tool đang chạy (chế độ một nút).
 
         Chỉ arm một lần cho mỗi tay: khoá theo chuỗi cầu hiện tại, nên không bấm lặp lại
-        cùng một tay. Cửa AUTO chỉ đánh khi AI chốt “đánh”; cửa cố định P/B/T thì đánh
-        mọi tay theo đúng cấu hình người dùng.
+        cùng một tay. Cửa AUTO đánh đúng cửa có xác suất ra cao nhất do ``predict`` tính;
+        cửa cố định P/B/T thì đánh mọi tay theo đúng cấu hình người dùng.
         """
         if not (self.tool_running and self.sim.running and self.config["auto_place"]):
             return
@@ -1045,7 +1069,7 @@ class BaccaratController:
         side = order.get("side")
         if not side:
             self.auto_bet_letters = letters
-            self.auto_bet_note = ("Tay này AI chốt bỏ qua (EV âm/nhiễu) · chờ tay kế."
+            self.auto_bet_note = ("Chưa có cửa để đặt (chưa đọc được xác suất) · chờ tay kế."
                                   if self.bet_config["side"] == "AUTO"
                                   else "Chưa chọn được cửa · chờ tay kế.")
             self.log(self.auto_bet_note, "info")
@@ -1949,17 +1973,60 @@ class BaccaratController:
             }
         return self.live_session.snapshot()
 
+    def _sync_live_to_sim(self, live):
+        """Đưa cầu đọc được từ WebSocket vào bàn đang theo dõi ngay lập tức.
+
+        Trước đây cầu chỉ cập nhật theo nhịp quét sảnh nên UI chậm 2 tay so với bàn
+        thật. WebSocket là nguồn realtime, nên mỗi ván về là ghi thẳng vào bàn.
+        """
+        if not isinstance(live, dict):
+            return False
+        if live.get("running"):
+            # Live là nguồn số tay thật của bàn đang mở; gán (không lấy max) để khi
+            # đổi bàn số tay không dính bàn cũ.
+            self.live_hand = int(live.get("hand") or 0)
+        letters = str(live.get("history") or "")
+        key = self.sim.table_key
+        if not key or not letters:
+            return False
+        with self.lock:
+            row = self.tables.get(key)
+            if row is None:
+                row = {"key": key, "label": self.sim.table_name, "letters": "",
+                       "table_id": "", "game_type": "baccarat", "read_error": "",
+                       "conflict": False, "source": "live-ws"}
+                self.tables[key] = row
+            if row.get("letters") == letters:
+                return False
+            row["letters"] = letters
+            row["ts"] = time.time()
+            row["stable"] = max(2, int(row.get("stable") or 0))
+            row["source"] = "live-ws"
+            row["read_error"] = ""
+            row["conflict"] = False
+            changed = self.sim.process(row)
+        if changed:
+            self._save_state()
+        return bool(changed)
+
     def _emit_live(self, data=None):
+        live = data if isinstance(data, dict) else self.live_snapshot()
         try:
-            self.emit.event("live_prediction", data if data is not None else self.live_snapshot())
+            changed = self._sync_live_to_sim(live)
+        except Exception:
+            changed = False
+        try:
+            self.emit.event("live_prediction", live)
         except Exception:
             pass
+        if changed:
+            self._push_state()
 
     def live_start(self):
         with self.lock:
             if self.live_reader is not None:
                 return {"ok": True, "note": "AI live đã chạy."}
-            self.live_stop.clear()
+            self.live_stop_event.clear()
             session = LiveSession(
                 on_prediction=self._emit_live,
                 on_status=lambda text, level="info": self.log("AI live: %s" % text, level),
@@ -1976,13 +2043,13 @@ class BaccaratController:
                 reader = WMReader(on_round=session.on_round, on_state=session.on_state,
                                   on_status=lambda text, level="info":
                                   self.log("AI live: %s" % text, level),
-                                  port=port, stop=self.live_stop)
+                                  port=port, stop=self.live_stop_event)
                 boot_note = "Đã bật AI live · đọc bàn WM qua WebSocket."
             else:
                 reader = LiveReader(on_round=session.on_round, on_state=session.on_state,
                                     on_status=lambda text, level="info":
                                     self.log("AI live: %s" % text, level),
-                                    port=port, stop=self.live_stop)
+                                    port=port, stop=self.live_stop_event)
                 boot_note = "Đã bật AI live · chờ tab bàn Petalive."
             self.live_session = session
             self.live_reader = reader
@@ -1997,7 +2064,7 @@ class BaccaratController:
             session = self.live_session
             self.live_reader = None
             self.live_session = None
-        self.live_stop.set()
+        self.live_stop_event.set()
         if reader is not None:
             reader.join(timeout=2)
         if session is not None:
@@ -2064,9 +2131,6 @@ class BaccaratController:
             if self.sim.entry_waiting:
                 return {"ok": False, "error": "Đang chờ tay hiện tại kết thúc; thử lại khi bàn sẵn sàng."}
             order = self._resolve_order()
-            if self.bet_config["side"] == "AUTO" and not order["suggestion"]["playable"]:
-                return {"ok": False, "error": ("predict chốt BỎ TAY (EV âm/nhiễu). Hãy chọn cửa thủ "
-                                               "công nếu vẫn muốn đặt.")}
             if not order["side"]:
                 return {"ok": False, "error": "Chưa có cửa để đặt: hãy chọn P/B/T hoặc bật AI live."}
             pending = self.sim.set_order(order["side"], order["stake"], reason=order["reason"])

@@ -200,6 +200,8 @@ def decode_round(data):
     return {
         "game_id": data.get("gameID"),
         "group_id": data.get("groupID"),
+        "game_no": data.get("gameNo"),
+        "round": data.get("gameNoRound"),
         "code": code,
         "winner": winner_from_code(code),
         "player_cards": player,

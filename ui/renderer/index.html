@@ -138,8 +138,10 @@
                   <button class="btn hidden" id="ba-bet-place">Đặt tay này</button>
                 </div>
                 <p class="hint">1 đơn vị = 1.000đ (bàn WM in khay chip theo nghìn đồng): <b>10 = 10k</b>,
-                  <b>50 = 50k</b>. Tool tự đặt mỗi tay theo cấu hình này. <b>Theo AI (AUTO)</b> chỉ vào tiền khi
-                  <code>predict</code> cho phép (EV dương); chọn <b>P/B/T</b> thì đánh mọi tay đúng cửa đó.</p>
+                  <b>50 = 50k</b>. Tool tự đặt mỗi tay theo cấu hình này. <b>Theo AI (AUTO)</b> lấy cửa
+                  có xác suất cao nhất do engine tính từ bộ bài còn lại rồi đặt đúng ô đó mỗi ván;
+                  chọn <b>P/B/T</b> thì đánh mọi tay đúng cửa đó. Dạng cầu (1-1, bệt…) chỉ để xem,
+                  không tạo lợi thế.</p>
               </div>
             </div>
 
@@ -258,8 +260,12 @@
             <div class="card pad">
               <h3>Lệnh cược mỗi tay</h3>
               <p class="hint">Tool tự đặt mỗi tay theo cấu hình ở tab <b>Bàn chơi</b>: chọn cửa (<b>AUTO</b>/P/B/T) và số chip cố định rồi bấm <b>Lưu lệnh</b>.</p>
-              <p class="hint"><b>AUTO</b> lấy cửa từ kết quả <code>predict</code>. AI chỉ viết nhận định: khi engine chốt <code>playable=false</code> hoặc <code>best_side=null</code> thì lệnh bị từ chối, dù AI nói khác.</p>
-              <p class="hint">Muốn tự ép cửa dù AI bảo bỏ tay, hãy chọn P/B/T thay vì AUTO.</p>
+              <p class="hint"><b>AUTO</b> lấy cửa có xác suất ra cao nhất từ kết quả <code>predict</code>
+                (Monte Carlo trên shoe còn lại) và đặt tay đó mỗi ván. AI chỉ viết nhận định; cửa đặt
+                luôn do engine chốt, không đổi theo văn bản AI.</p>
+              <p class="hint">Dạng cầu chỉ hiển thị cho dễ nhìn — 1-1 hay bệt không được cộng vào xác
+                suất vì lịch sử ngắn không tạo lợi thế toán học.</p>
+              <p class="hint">Muốn tự ép cửa dù engine xếp hạng khác, hãy chọn P/B/T thay vì AUTO.</p>
             </div>
 
             <div class="card pad">

@@ -13,7 +13,7 @@ import math
 import threading
 import time
 
-from aibcr.live import ai, cards, predict
+from aibcr.live import ai, cards, predict, road
 
 RECENT_LIMIT = 40
 
@@ -25,6 +25,17 @@ def _num(value):
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _int(value):
+    """Số nguyên an toàn cho số tay (bỏ bool/chuỗi rác)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 class LiveSession:
@@ -56,6 +67,8 @@ class LiveSession:
         self.analysis = None
         self.issue_seen = None
         self.duplicates = 0
+        # Số tay của bàn (WM gửi gameNoRound; Petalive không có nên đếm theo lịch sử).
+        self.hand_no = 0
         self.ai_busy = False
         self.ai_error = ""
         self.running = False
@@ -106,6 +119,7 @@ class LiveSession:
             self.duplicates = 0
             self.table = str(table or "")
             self.state = None
+            self.hand_no = 0
 
     def on_round(self, data):
         incoming = data.get("table") or ""
@@ -125,6 +139,17 @@ class LiveSession:
             self.rounds.append(dict(data, **verdict))
             self.rounds = self.rounds[-RECENT_LIMIT:]
             warning = verdict.get("warning") or ""
+            # ``round`` là số tay thật của bàn (WM: gameNoRound). ``game_no`` là mã
+            # shoe, không phải số tay nên không được dùng ở đây.
+            round_no = _int(data.get("round"))
+            if round_no:
+                self.hand_no = round_no
+            else:
+                self.hand_no = max(self.hand_no, len(self.history))
+            # Nạp lịch sử cũ: chỉ tính dự đoán một lần ở ván cuối để không chạy
+            # Monte Carlo 30 lần trên thread đọc WebSocket (làm UI đứng hình).
+            if data.get("seed") and not data.get("seed_last"):
+                return
             self.prediction = predict.predict(
                 self.shoe, self.history, trials=self.trials,
                 markov_weight=self.markov_weight)
@@ -134,11 +159,23 @@ class LiveSession:
         self._schedule_analysis()
 
     def on_state(self, state):
-        if self.table and state.get("table") != self.table:
-            return
+        incoming = state.get("table") or ""
+        if self.table and incoming and incoming != self.table:
+            # Đổi bàn: xoá cầu/shoe cũ để số tay và xác suất không dính bàn trước.
+            self.reset_table(incoming)
         with self.lock:
+            old_state = (self.state or {}).get("state")
+            old_round = (self.state or {}).get("round")
             self.state = dict(state)
             self.table = self.table or state.get("table") or ""
+            round_no = _int(state.get("round"))
+            if round_no:
+                self.hand_no = round_no
+            changed = (old_state != state.get("state") or old_round != state.get("round"))
+        # Đẩy UI ngay khi pha cược đổi hoặc số tay đổi; không bắn theo từng tick
+        # betMilliSecond để khỏi spam sự kiện.
+        if changed:
+            self._notify()
 
     # ---------------------------------------------------------------------- AI
     def _analysis_input(self):
@@ -243,6 +280,10 @@ class LiveSession:
                     "ev_uncertainty": uncertainty,
                     "best_side": pred.get("best_side"),
                     "least_bad_side": pred.get("least_bad_side"),
+                    "top_side": pred.get("top_side"),
+                    "top_probability": _num(pred.get("top_probability")),
+                    "pattern_note": pred.get("pattern_note"),
+                    "patterns": pred.get("patterns"),
                     "playable": bool(pred.get("playable")),
                     "recommendation": pred.get("recommendation"),
                     "trials": pred.get("trials"),
@@ -256,8 +297,11 @@ class LiveSession:
                 "state": (self.state or {}).get("state", "") if self.state else "",
                 "time_remains": (self.state or {}).get("time_remains") if self.state else None,
                 "rounds": len(self.rounds),
+                "hand": max(int(self.hand_no or 0), len(self.history)),
                 "duplicates": self.duplicates,
+                "history": self.history[-400:],
                 "history_tail": self.history[-60:],
+                "road": road.big_road(self.history),
                 "prediction": prediction_view,
                 "analysis": dict(self.analysis) if isinstance(self.analysis, dict) else None,
                 "ai": {

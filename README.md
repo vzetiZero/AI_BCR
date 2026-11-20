@@ -163,14 +163,15 @@ Người dùng chỉ cần mở Chrome đứng ở sảnh, rồi bấm **Chạy 
 3. nếu chưa vào được bàn (Chrome vừa mở, chưa đăng nhập) tool tự thử lại mỗi 15 giây;
 4. bấm **Dừng tool** → dừng phiên và tự rời bàn về sảnh.
 
-Cửa **AUTO** lấy từ `predict` và chỉ vào tiền khi `playable`; muốn đánh mọi tay thì chọn
-cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in khay chip theo nghìn đồng), mặc định
-`10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
+Cửa **AUTO** đánh đúng **cửa có xác suất ra cao nhất** do `predict` tính ở mỗi tay
+(không phụ thuộc `playable`), nên tay nào có dự đoán là tay đó được đặt. Muốn tự ép cửa
+thì chọn cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in khay chip theo nghìn
+đồng), mặc định `10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
 
-## Đọc bàn live + dự đoán (site Petalive BCR)
+## Đọc bàn live + dự đoán
 
-Bộ đọc **WebSocket thật** của Petalive (`w-plms*.petalive.live/live-games/bcr/...`)
-nằm ở `aibcr/live/`:
+Bộ đọc **WebSocket thật** nằm ở `aibcr/live/` — WM đọc khung nhị phân (protocol 21/24/
+25/26), Petalive đọc khung text. Cả hai cùng đổ vào `LiveSession`:
 
 ```
 python tools/dump_ws_frames.py --seconds 180     # gắn Chrome CDP đang mở, ghi khung
@@ -184,8 +185,16 @@ Mã hoá lá bài đã đối chiếu **129/129 ván thật**:
 20k ván Monte Carlo ≈ 0,15 giây, đủ nhanh cho cửa sổ cược ~25 giây.
 
 **Số liệu là của `predict.py`**: xác suất P/B/T, EV, sai số, shoe còn lại, cửa tốt
-nhất (`best_side`) và cờ `playable`. `playable = false` khi EV tốt nhất không vượt
-`2 × sai số Monte Carlo` — khi đó mọi lệnh AUTO bị từ chối.
+nhất (`best_side`), cửa có **xác suất cao nhất** (`top_side`) và cờ `playable`.
+`playable = false` khi EV tốt nhất không vượt `2 × sai số Monte Carlo` — chỉ là nhãn
+cảnh báo, không còn chặn lệnh AUTO.
+
+**Dạng cầu** (`pattern_stats`): đếm số tay mỗi cửa, độ dài chuỗi đang chạy, và tỉ lệ
+cửa kế tiếp của những lần trước có **cùng cửa + cùng độ dài chuỗi** (cần ≥ 8 mẫu mới
+dùng). Tín hiệu này **chỉ để hiển thị/mô tả**, không trộn vào xác suất: lịch sử ngắn
+không chứng minh được cầu bệt hay 1-1 sẽ lặp lại, nên 1-1 không tạo lợi thế toán học.
+Xác suất P/B/T chỉ đến từ bộ bài còn lại (Monte Carlo) + Markov phụ trợ 15%.
+
 
 ## AI trên giao diện Electron
 
@@ -200,6 +209,15 @@ Tab **AI dự đoán** bật/tắt luồng live mà không cần terminal:
 3. Panel hiện: xác suất P/B/T, EV tốt nhất ± sai số, % shoe đã chia, verdict
    (`BỎ TAY` / `Cân nhắc` / `Đánh`), mức tin cậy, rủi ro và giải thích. Nút
    **Phân tích ngay** gọi AI ngay cho ván kế.
+
+Card **Bàn đang theo dõi** cập nhật theo từng ván WebSocket (không chờ lượt quét):
+
+- **Tay hiện tại**: số tay lấy từ `gameNoRound` của bàn WM (Petalive đếm theo lịch
+  sử) nên không còn đứng ở tay cũ;
+- **Big Road**: sơ đồ cột 6 hàng đúng quy ước (lặp cửa xuống dòng, đổi cửa mở cột,
+  đủ 6 hàng thì đi sang phải), dựng từ `road.big_road()`;
+- **Dạng cầu**: dãy chuỗi gần nhất + câu `pattern_note` (số tay mỗi cửa, chuỗi tương
+  tự trong lịch sử, cửa có xác suất cao nhất).
 
 **Key AI chỉ có 2 nguồn, không bao giờ nằm trong repo:**
 
@@ -219,8 +237,8 @@ Các biến tuỳ chọn khác: `BCR_AI_MODE`, `BCR_AI_MODEL`, `BCR_AI_URL`, `BC
 Nếu từng dán key vào code/chat/bug report thì coi như key đã lộ: **xoay key đó** ở
 nhà cung cấp. Không dán giá trị key vào README, test, log hay issue.
 
-**AI không tham gia quyết định đặt cược**: AI bị ép trả `BỎ TAY` khi
-`playable=false`, và controller chỉ lấy cửa từ `prediction.best_side` — không đọc
+**AI không tham gia quyết định đặt cược**: AI chỉ viết nhận định/giải thích; controller
+chỉ lấy cửa từ số liệu `predict` (`top_side` = xác suất cao nhất) — không đọc
 `analysis.focus_side` do AI viết. AI cũng không được trả số liệu mới; mọi con số trên
 UI đều lấy từ `predict.predict()`.
 
@@ -237,9 +255,9 @@ Hành vi của `bet.place`:
 
 1. Từ chối nếu chưa vào bàn, chưa chạy tool, đang chờ tay hiện tại kết thúc, đang
    bấm lượt khác, hoặc đang tắt `auto_place`.
-2. `AUTO`: chỉ lấy cửa khi `predict` cho `playable=true` và có `best_side`. Nếu
-   `playable=false` / `best_side=null` thì từ chối với thông báo **BỎ TAY**, kể cả AI
-   có nói "Đánh". Muốn tự ép cửa thì chọn P/B/T thay vì AUTO.
+2. `AUTO`: lấy `top_side` (cửa có xác suất ra cao nhất) từ `predict`; nếu bản
+   snapshot cũ không có `top_side` thì tự tính từ `probabilities`. Chỉ từ chối khi
+   chưa đọc được xác suất nào. AI có nói gì cũng không đổi cửa.
 3. Chốt lệnh vào `sim.pending`, chờ gate `table_is_clear()` (cả 3 cửa về 0) rồi gọi
    `TB.place_bet(...)` — bấm chip thật trên site, có tuỳ chọn chuột người thật.
 4. Chỉ tính lãi/lỗ khi có xác nhận đã bấm chip trong cửa sổ đúng. Tay nào không đặt

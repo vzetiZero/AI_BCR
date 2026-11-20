@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """Xác suất tay kế tiếp cho BCR từ bộ bài còn lại.
 
-Ba lớp, mỗi lớp nói rõ nó đo cái gì:
+Hai lớp xác suất, mỗi lớp nói rõ nó đo cái gì:
 
     Monte Carlo   mô phỏng đúng luật chia bài Baccarat trên composition của shoe
-                  còn lại -> p(P), p(B), p(T). Đây là phần duy nhất có cơ sở toán.
+                  còn lại -> p(P), p(B), p(T). Đây là phần có cơ sở toán.
     Markov        ma trận chuyển tiếp B/P/T từ lịch sử bàn, làm mượt Laplace.
                   Thực nghiệm gần như đồng nhất, chỉ dùng làm tín hiệu phụ.
-    Kết hợp       trộn MC với Markov theo ``markov_weight`` (mặc định 0.15).
+
+Kết hợp trộn MC với Markov theo ``markov_weight`` (mặc định 0.15). Thống kê dạng
+cầu (bệt, 1-1, nhịp…) chỉ để MÔ TẢ lịch sử: không được trộn vào xác suất, vì chuỗi
+ngắn không chứng minh được cầu sẽ lặp lại và sẽ tạo ra "lợi thế" không có thật.
 
 ``predict`` trả cả EV từng cửa để biết có nên cược hay đứng ngoài.
 """
@@ -20,6 +23,94 @@ SIDES = ("P", "B", "T")
 PAYOUT = {"B": 0.95, "P": 1.0, "T": 8.0}
 DEFAULT_TRIALS = 20000
 DEFAULT_MARKOV_WEIGHT = 0.15
+# Thống kê dạng cầu chỉ để hiển thị. Lịch sử 30–60 tay không đủ để khẳng định "cầu
+# bệt" hay "1-1" lặp lại, nên số này KHÔNG bao giờ được trộn vào xác suất đặt cược.
+PATTERN_MIN_SAMPLES = 8
+PATTERN_MAX_RUN = 6
+
+
+def pattern_stats(history):
+    """Đếm số tay mỗi cửa + tỉ lệ cửa kế tiếp theo độ dài chuỗi hiện tại.
+
+    Ví dụ đang có 3 tay Banker liên tiếp: tìm trong lịch sử mọi lần chuỗi Banker dài
+    đúng 3 tay rồi kết thúc, xem tay ngay sau đó ra P/B/T bao nhiêu lần. Đó là "dạng
+    cầu" duy nhất mà dữ liệu ngắn còn đo được; không có mẫu đủ thì trả ``None``.
+    Chuỗi/tỉ lệ bỏ qua hoà (T) đúng như Big Road; số đếm thì vẫn tính cả hoà.
+    Số liệu này CHỈ để mô tả — ``predict`` không trộn nó vào xác suất đặt cược.
+    """
+    raw = [ch for ch in str(history or "") if ch in SIDES]
+    letters = [ch for ch in raw if ch in ("P", "B")]
+    counts = {side: raw.count(side) for side in SIDES}
+    total = len(raw)
+    shares = ({side: counts[side] / total for side in SIDES} if total
+              else {side: 0.0 for side in SIDES})
+    result = {
+        "total": total,
+        "counts": counts,
+        "shares": shares,
+        "streak": {"side": letters[-1] if letters else None, "length": 0},
+        "bucket": {"side": None, "length": 0, "samples": 0},
+        "probabilities": None,
+    }
+    if not letters:
+        return result
+    runs = []
+    for ch in letters:
+        if runs and runs[-1][0] == ch:
+            runs[-1][1] += 1
+        else:
+            runs.append([ch, 1])
+    streak_side, streak_length = runs[-1]
+    result["streak"] = {"side": streak_side, "length": streak_length}
+    tally = {side: 0 for side in SIDES}
+    samples = 0
+    for index in range(len(runs) - 1):
+        side, length = runs[index]
+        if side != streak_side or min(length, PATTERN_MAX_RUN) != min(streak_length,
+                                                                     PATTERN_MAX_RUN):
+            continue
+        tally[runs[index + 1][0]] += 1
+        samples += 1
+    result["bucket"] = {"side": streak_side,
+                        "length": min(streak_length, PATTERN_MAX_RUN),
+                        "samples": samples,
+                        "counts": dict(tally)}
+    if samples >= PATTERN_MIN_SAMPLES:
+        result["probabilities"] = {side: tally[side] / samples for side in SIDES}
+    return result
+
+
+def _as_probabilities(values):
+    return {"p_player": values["P"], "p_banker": values["B"], "p_tie": values["T"]}
+
+
+PROB_KEY = {"P": "p_player", "B": "p_banker", "T": "p_tie"}
+
+
+def pattern_note(patterns, top_side=None):
+    """Câu mô tả dạng cầu đang có, dùng cho UI/log. Không thêm số liệu ngoài dữ liệu."""
+    if not patterns or not patterns.get("total"):
+        return ""
+    streak = patterns.get("streak") or {}
+    bucket = patterns.get("bucket") or {}
+    counts = patterns.get("counts") or {}
+    bits = []
+    if streak.get("side"):
+        bits.append("Cầu %s %d tay" % (streak.get("side"), int(streak.get("length") or 0)))
+    else:
+        bits.append("Chưa có tay thắng/thua")
+    samples = int(bucket.get("samples") or 0)
+    probabilities = patterns.get("probabilities")
+    if probabilities and samples:
+        shares = " · ".join("%s %d%%" % (side, round(probabilities[side] * 100))
+                            for side in ("P", "B", "T"))
+        bits.append("chuỗi tương tự %d lần: %s" % (samples, shares))
+    bits.append("tổng %d tay: P %d / B %d / T %d" % (
+        patterns["total"], counts.get("P", 0), counts.get("B", 0), counts.get("T", 0)))
+    if top_side:
+        bits.append("cửa cao nhất: %s" % top_side)
+    return " · ".join(bits)
+
 
 
 def _draw(counts, rng):
@@ -229,6 +320,7 @@ def predict(shoe, history="", trials=DEFAULT_TRIALS, markov_weight=DEFAULT_MARKO
     if mc.get("trials", 0) == 0:
         return {"ok": False, "error": "Không mô phỏng được ván nào từ shoe hiện tại."}
     mk = markov(history)
+    patterns = pattern_stats(history)
     fused = _blend(mc, mk, markov_weight)
     ev = expected_value(fused)
     uncertainty = _ev_uncertainty(fused, mc["trials"])
@@ -236,15 +328,21 @@ def predict(shoe, history="", trials=DEFAULT_TRIALS, markov_weight=DEFAULT_MARKO
     # EV dương nhỏ hơn ~2 sai số chuẩn của Monte Carlo chỉ là nhiễu mô phỏng, không phải
     # lợi thế thật: 20k ván cho SE ≈ 0,008 nên EV +0,004 không có nghĩa gì.
     playable = ev[ranked] > 2.0 * max(uncertainty.values())
+    # Cửa có xác suất ra cao nhất (khác với cửa EV tốt nhất khi Banker ăn 0,95).
+    top_side = max(SIDES, key=lambda side: fused[PROB_KEY[side]])
     return {
         "ok": True,
         "trials": mc["trials"],
         "monte_carlo": {"p_player": mc["p_player"], "p_banker": mc["p_banker"],
                         "p_tie": mc["p_tie"]},
         "markov": mk,
+        "patterns": patterns,
         "probabilities": fused,
         "ev": ev,
         "ev_uncertainty": uncertainty,
+        "top_side": top_side,
+        "top_probability": fused[PROB_KEY[top_side]],
+        "pattern_note": pattern_note(patterns, top_side),
         "best_side": ranked if playable else None,
         "least_bad_side": ranked,
         "best_ev": ev[ranked],

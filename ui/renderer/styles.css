@@ -337,6 +337,34 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 .road-cell.p { background: rgba(63, 126, 223, 0.24); color: #cfe0ff; }
 .road-cell.t { background: rgba(52, 211, 153, 0.2); color: #bff5e3; }
 
+/* Big Road: cột dọc, mỗi cột tối đa 6 ô, cuộn ngang khi dài */
+.bigroad {
+  display: flex; gap: 3px; align-items: flex-start;
+  overflow-x: auto; overflow-y: hidden; padding-bottom: 4px;
+  max-height: 148px;
+}
+.bigroad-col { display: flex; flex-direction: column; gap: 3px; }
+.br-cell {
+  width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 10px; font-weight: 800; font-style: normal; position: relative;
+  background: rgba(255, 255, 255, 0.05); color: var(--text);
+}
+.br-cell.empty { background: transparent; }
+.br-cell.b { background: rgba(255, 107, 129, 0.85); color: #2b0a11; }
+.br-cell.p { background: rgba(63, 126, 223, 0.85); color: #04122b; }
+.br-cell.t { background: rgba(52, 211, 153, 0.85); color: #04261a; }
+.br-cell .br-tie {
+  position: absolute; right: -3px; bottom: -3px; width: 7px; height: 7px;
+  border-radius: 50%; background: #34d399; border: 1px solid rgba(5, 10, 18, 0.9);
+}
+.hand-live {
+  font-size: 9px; letter-spacing: 1px; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.hand-live[data-state="on"] { color: #bff5e3; border-color: rgba(52, 211, 153, 0.5); }
+.road-runs { display: block; }
+.road-note { margin-top: 4px; color: var(--muted); font-family: inherit; font-size: 11px; }
+
 .hand-count {
   font-size: 12px; color: var(--text); margin: 6px 0 2px;
   display: flex; justify-content: space-between; align-items: center;

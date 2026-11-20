@@ -132,7 +132,8 @@ function beadRoad(names) {
 function scanTableScreen(beads, href = 'https://tmrw17k36as.evo-games.com/frontend/evo/r3/#category=all_games&table_id=suropcmnbqpabwko') {
   const ctx = {window: {}, location: {href, origin: 'https://tmrw17k36as.evo-games.com', pathname: '/frontend/evo/r3/'},
     document: {title: 'Baccarat', querySelector: selector => {
-      assert.equal(selector, '[data-role="table-tile"]');
+      assert.ok(['[data-role="header-balance"]', '[data-role="footer-balance"]',
+        '[data-role="table-tile"]'].includes(selector), selector);
       return null;
     }, querySelectorAll: selector => {
       assert.ok(['*', 'svg circle, svg ellipse, svg rect, svg path, svg use',
@@ -488,6 +489,7 @@ function readChip(value, {selected = false} = {}) {
 function readTable({bead = false, tray = false, trayChips = [], spots = {},
                     marked = [], label = null, total = null} = {}) {
   const markedSelector = '[data-role="chip"][data-selected="true"]';
+  const chipSelector = '[data-role="chip"][data-value]';
   const trayEl = tray ? {querySelectorAll: (selector) => {
     if (selector === '[data-role="chip"]') return trayChips.map((v) => readChip(v));
     assert.equal(selector, markedSelector);
@@ -502,6 +504,7 @@ function readTable({bead = false, tray = false, trayChips = [], spots = {},
   }
   const document = {
     querySelectorAll: (selector) => {
+      if (selector === chipSelector) return [];
       assert.equal(selector, markedSelector);
       return marked.map((v) => readChip(v, {selected: true}));
     },
