@@ -406,11 +406,15 @@ WM_DETECT_JS = r"""(() => {
     const frames = {};
     for (const frame of document.querySelectorAll('iframe')) {
         const src = frame.getAttribute('src') || '';
-        const m = /iframe_(109|101)\//.exec(src);
-        if (!m) continue;
+        // WM may change the iframe URL format between mirrors/releases while
+        // keeping the stable iframe_109/iframe_101 DOM ids.
+        const idMatch = /^iframe_(109|101)$/.exec(frame.id || '');
+        const m = /iframe_(109|101)(?:\/|$|[?#])/.exec(src);
+        const frameKind = (idMatch || m || [])[1];
+        if (!frameKind) continue;
         const style = getComputedStyle(frame);
         const rect = frame.getBoundingClientRect();
-        frames[m[1]] = {
+        frames[frameKind] = {
             id: frame.id || '',
             src: src.slice(0, 200),
             display: style.display,
@@ -452,7 +456,9 @@ WM_TABLE_KEY_JS = r"""(() => {
 # từng context. Iframe bàn cùng origin với trang nên contentDocument truy cập được;
 # khác origin thì trả lý do để lớp gọi tự bỏ qua.
 WM_OPEN_TABLE_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
+    const frame = document.getElementById('iframe_101') ||
+        Array.from(document.querySelectorAll('iframe')).find((item) =>
+            /iframe_101(?:\/|$|[?#])/.test(item.getAttribute('src') || ''));
     if (!frame) return {reason: 'no_table_frame'};
     const style = getComputedStyle(frame);
     const rect = frame.getBoundingClientRect();
@@ -481,7 +487,9 @@ WM_OPEN_TABLE_JS = r"""(() => {
 # Tổng cược 3 cửa đang hiện trên bàn (đơn vị VNDK). Đây là tổng của CẢ BÀN, không
 # phải riêng người dùng — WM không tách chip của từng người trên màn hình.
 WM_BETS_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
+    const frame = document.getElementById('iframe_101') ||
+        Array.from(document.querySelectorAll('iframe')).find((item) =>
+            /iframe_101(?:\/|$|[?#])/.test(item.getAttribute('src') || ''));
     if (!frame) return {reason: 'no_table_frame'};
     if (getComputedStyle(frame).display === 'none') return {reason: 'table_hidden'};
     let doc = null;
@@ -500,7 +508,9 @@ WM_BETS_JS = r"""(() => {
 # Số dư ví thật của bàn WM: nằm trong iframe bàn (``#userBalanceBox`` in ``VNDK 80.84``,
 # tức 80.84 đơn vị = 80.840đ). Đây là con số người dùng thấy trên màn hình.
 WM_WALLET_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
+    const frame = document.getElementById('iframe_101') ||
+        Array.from(document.querySelectorAll('iframe')).find((item) =>
+            /iframe_101(?:\/|$|[?#])/.test(item.getAttribute('src') || ''));
     let doc = document;
     try { if (frame && frame.contentDocument) doc = frame.contentDocument; } catch (e) {}
     const el = doc.getElementById('userBalanceBox');
