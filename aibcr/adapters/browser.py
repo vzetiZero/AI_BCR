@@ -20,6 +20,7 @@ from aibcr.adapters import wm as WM
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(HERE, "chrome_profile")
 WINDOW_POSITION = (40, 40)
+PROXY_SERVER = ""
 READER_JS = os.path.join(HERE, "reader.js")
 DRIVER_PATH = os.path.join(HERE, "drivers", "chromedriver.exe")
 LOBBY_PATH = "/frontend/evo/r3"
@@ -361,6 +362,8 @@ def build_flags(pos=None, cdp=False, window=None):
         flags.append("--start-fullscreen")
     if cdp:
         flags.append("--remote-debugging-port=%d" % CDP_PORT)
+    if PROXY_SERVER:
+        flags.append("--proxy-server=%s" % PROXY_SERVER)
     if pos and not window["fullscreen"]:
         flags.append("--window-position=%d,%d" % pos)
     return flags

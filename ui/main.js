@@ -5,6 +5,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const { parseProxy, proxyLabel, startProxyBridge } = require('./proxy_bridge');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const PYTHON_CANDIDATES = [
@@ -251,6 +252,23 @@ class Engine {
 
 const engines = { baccarat: new Engine('baccarat', 1) };
 let activeProfileCount = 1;
+const activeProxyBridges = new Map();
+
+function profileEngine(index) {
+  return engines[index === 1 ? 'baccarat' : `baccarat-profile-${index}`];
+}
+
+function proxyServerUrl(proxy) {
+  if (!proxy) return '';
+  const host = proxy.host.includes(':') ? `[${proxy.host}]` : proxy.host;
+  return `${proxy.protocol}://${host}:${proxy.port}`;
+}
+
+async function closeProfileBridge(index) {
+  const bridge = activeProxyBridges.get(index);
+  activeProxyBridges.delete(index);
+  if (bridge) await bridge.close().catch(() => {});
+}
 
 // Lưới an toàn cuối: Electron biến mọi exception chưa bắt ở main process thành hộp
 // thoại đỏ "A JavaScript error occurred in the main process" và app đứng. Ghi log rồi
@@ -299,51 +317,125 @@ ipcMain.handle('engine:call', async (_event, { game, method, params }) => {
   }
 });
 
-ipcMain.handle('profiles:open', async (_event, { count, siteId }) => {
+ipcMain.handle('profiles:open', async (_event, { count, siteId, profiles }) => {
   const total = Math.max(1, Math.min(8, Math.trunc(Number(count) || 1)));
   const site = PROFILE_SITES.find((item) => item.id === siteId);
   if (!site) return { ok: false, error: 'Hãy chọn một site trong danh sách.' };
-  const oldCount = activeProfileCount;
-  if (total < oldCount) {
-    const closing = Array.from({ length: oldCount - total }, (_, index) =>
-      engines[`baccarat-profile-${total + index + 1}`]).filter(Boolean);
-    await Promise.all(closing.map((engine) => engine.call('chrome.close')));
+  const requested = Array.isArray(profiles) ? profiles : [];
+  const settings = [];
+  const newBridges = [];
+  try {
+    for (let index = 0; index < total; index += 1) {
+      const row = requested[index] || {};
+      const width = Math.max(520, Math.min(3840, Math.round(Number(row.width) || 900)));
+      const height = Math.max(200, Math.min(2160, Math.round(Number(row.height) || 500)));
+      const scale = Math.max(50, Math.min(200, Math.round(Number(row.scale) || 100)));
+      const proxy = parseProxy(row.proxy || '');
+      let proxyServer = proxyServerUrl(proxy);
+      if (proxy && proxy.username) {
+        const bridge = await startProxyBridge(proxy);
+        newBridges.push({ index: index + 1, bridge });
+        proxyServer = bridge.url;
+      }
+      settings.push({ width, height, scale, proxyServer, proxyLabel: proxyLabel(proxy), bridge:
+        newBridges.length && newBridges[newBridges.length - 1].index === index + 1
+          ? newBridges[newBridges.length - 1].bridge : null });
+    }
+  } catch (error) {
+    await Promise.all(newBridges.map(({ bridge }) => bridge.close().catch(() => {})));
+    return { ok: false, error: error.message || 'Cấu hình proxy không hợp lệ.' };
   }
-  activeProfileCount = total;
+
   const { screen } = require('electron');
   const area = screen.getPrimaryDisplay().workAreaSize;
   const columns = Math.ceil(Math.sqrt(total));
   const rows = Math.ceil(total / columns);
-  const width = Math.max(520, Math.floor(area.width / columns));
-  const height = Math.max(360, Math.floor(area.height / rows));
+  const columnWidths = Array(columns).fill(0);
+  const rowHeights = Array(rows).fill(0);
+  settings.forEach((item, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    columnWidths[column] = Math.max(columnWidths[column], item.width);
+    rowHeights[row] = Math.max(rowHeights[row], item.height);
+  });
+  const gap = 12;
+  const gridWidth = columnWidths.reduce((sum, width) => sum + width, 0) + gap * (columns - 1);
+  const gridHeight = rowHeights.reduce((sum, height) => sum + height, 0) + gap * (rows - 1);
+  const startX = Math.max(0, Math.floor((area.width - gridWidth) / 2));
+  const startY = Math.max(0, Math.floor((area.height - gridHeight) / 2));
+  const layouts = settings.map((item, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const left = startX + columnWidths.slice(0, column).reduce((sum, width) => sum + width + gap, 0);
+    const top = startY + rowHeights.slice(0, row).reduce((sum, height) => sum + height + gap, 0);
+    return { ...item, left, top };
+  });
+
+  if (total < activeProfileCount) {
+    const extras = Array.from({ length: activeProfileCount - total }, (_, offset) => total + offset + 1);
+    const closeResults = await Promise.allSettled(extras.map(async (index) => {
+      const engine = profileEngine(index);
+      if (engine) await engine.call('profile.configure', { close: true });
+      await closeProfileBridge(index);
+    }));
+    if (closeResults.some((item) => item.status === 'rejected')) {
+      await Promise.all(newBridges.map(({ bridge }) => bridge.close().catch(() => {})));
+      return { ok: false, error: 'Không đóng được các profile dư.' };
+    }
+  }
+
   const started = [];
-  const positions = [];
   for (let i = 1; i <= total; i += 1) {
     const game = i === 1 ? 'baccarat' : `baccarat-profile-${i}`;
-    const layout = {
-      left: ((i - 1) % columns) * width,
-      top: Math.floor((i - 1) / columns) * height,
-      width, height,
-    };
-    if (!engines[game]) engines[game] = new Engine(game, i, {
-      ...layout,
-    });
-    engines[game].layout = layout;
+    if (!engines[game]) engines[game] = new Engine(game, i, layouts[i - 1]);
+    engines[game].layout = layouts[i - 1];
     started.push(engines[game]);
-    positions.push(layout);
   }
-  await Promise.all(started.map((engine, index) => engine.call('chrome.window', {
-    ...positions[index], percent: 100, fullscreen: false, tile: true,
+
+  const configured = await Promise.allSettled(started.map((engine, index) => engine.call('profile.configure', {
+    url: site.url,
+    proxy_server: layouts[index].proxyServer,
+    width: layouts[index].width,
+    height: layouts[index].height,
+    scale: layouts[index].scale,
+    left: layouts[index].left,
+    top: layouts[index].top,
   })));
-  const replies = await Promise.all(started.map((engine) => engine.call('site.open', { url: site.url })));
+  const openResults = await Promise.allSettled(started.map((engine, index) => {
+    const result = configured[index];
+    if (result.status !== 'fulfilled' || !result.value.ok) {
+      return Promise.resolve({ ok: false,
+        error: result.status === 'rejected' ? result.reason.message : result.value.error,
+        proxy: settings[index].proxyLabel });
+    }
+    return engine.call('site.open', { url: site.url }).then((reply) => ({
+      ...reply, proxy: settings[index].proxyLabel, width: settings[index].width,
+      height: settings[index].height, scale: settings[index].scale,
+    }));
+  }));
+
+  for (let index = 1; index <= total; index += 1) {
+    const result = configured[index - 1];
+    const setting = settings[index - 1];
+    if (result.status === 'fulfilled' && result.value.ok) {
+      await closeProfileBridge(index);
+      if (setting.bridge) activeProxyBridges.set(index, setting.bridge);
+    } else if (setting.bridge) {
+      await setting.bridge.close().catch(() => {});
+    }
+  }
+  activeProfileCount = total;
+  const replies = openResults.map((result, index) => result.status === 'fulfilled'
+    ? result.value : { ok: false, error: result.reason.message, proxy: settings[index].proxyLabel });
   return { ok: true, count: total, site: site.label, replies };
 });
 
 ipcMain.handle('profiles:close', async () => {
-  const targets = Array.from({ length: activeProfileCount }, (_, index) => engines[
-    index === 0 ? 'baccarat' : `baccarat-profile-${index + 1}`]).filter(Boolean);
-  const replies = await Promise.all(targets.map((engine) => engine.call('chrome.close')));
-  return { ok: true, count: targets.length, replies };
+  const targets = Array.from({ length: activeProfileCount }, (_, index) => profileEngine(index + 1)).filter(Boolean);
+  const replies = await Promise.allSettled(targets.map((engine) => engine.call('profile.configure', { close: true })));
+  await Promise.all(Array.from(activeProxyBridges.keys(), (index) => closeProfileBridge(index)));
+  return { ok: true, count: targets.length, replies: replies.map((result) => result.status === 'fulfilled'
+    ? result.value : { ok: false, error: result.reason.message }) };
 });
 
 ipcMain.handle('app:info', () => ({
@@ -389,6 +481,8 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   Object.values(engines).forEach((engine) => engine.stop());
+  for (const bridge of activeProxyBridges.values()) bridge.close().catch(() => {});
+  activeProxyBridges.clear();
 });
 
 app.on('window-all-closed', () => {

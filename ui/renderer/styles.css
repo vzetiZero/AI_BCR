@@ -45,6 +45,14 @@ h1 { margin: 9px 0 8px; font-size: clamp(25px, 4vw, 34px); letter-spacing: -.7px
 h2 { margin: 5px 0 0; font-size: 19px; }
 .total { color: var(--muted); font-size: 11px; }
 .profile-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.profile-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.settings-card { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(17,26,46,.8); }
+.settings-title { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; color: #d8e2f8; font-size: 11px; }
+.settings-title span { color: var(--muted); font-size: 9px; font-weight: 400; }
+.setting-field { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: #aebbd7; font-size: 9px; }
+.setting-field input { width: 100%; min-width: 0; height: 35px; padding: 0 9px; border: 1px solid rgba(171,192,237,.17); border-radius: 7px; outline: none; background: #0a1223; color: #eff4ff; font-size: 10px; }
+.setting-field input:focus { border-color: var(--accent); }
+.proxy-field { grid-column: 1 / -1; }
 .profile-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 11px; min-height: 66px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px; background: rgba(17,26,46,.8); }
 .profile-number { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: rgba(129,168,255,.13); color: #a9c2ff; font-size: 11px; font-weight: 800; }
 .profile-info { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
@@ -64,4 +72,4 @@ h2 { margin: 5px 0 0; font-size: 19px; }
 .footnote { margin: 13px 2px 0; color: #7785a3; font-size: 10px; line-height: 1.55; }
 .toast { position: fixed; right: 18px; bottom: 18px; max-width: 400px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 9px; background: #17233b; color: #eaf0ff; font-size: 11px; opacity: 0; pointer-events: none; transform: translateY(6px); transition: .18s; }
 @keyframes pulse { to { opacity: .4; } }
-@media (max-width: 680px) { .page { width: calc(100% - 32px); padding-top: 32px; } .form-grid, .profile-list { grid-template-columns: 1fr; } .card { padding: 18px; } }
+@media (max-width: 680px) { .page { width: calc(100% - 32px); padding-top: 32px; } .form-grid, .profile-list, .profile-settings { grid-template-columns: 1fr; } .card { padding: 18px; } }

@@ -3,9 +3,11 @@ const $ = (selector) => document.querySelector(selector);
 const profileSelect = $('#site-select');
 const profileCount = $('#profile-count');
 const profileList = $('#profile-list');
+const settingsList = $('#profile-settings');
 const runButton = $('#run-profiles');
 const notice = $('#notice');
 const statusByIndex = new Map();
+const settingsByIndex = new Map();
 
 window.addEventListener('error', (event) => showNotice(String(event.message || event.error), true));
 window.addEventListener('unhandledrejection', (event) => showNotice(String(event.reason), true));
@@ -41,7 +43,10 @@ function renderProfiles(count, siteLabel, replies = []) {
     row.innerHTML = `<div class="profile-number">${String(index).padStart(2, '0')}</div>
       <div class="profile-info"><strong>Profile ${index}</strong><span class="profile-detail"></span></div>
       <span class="profile-state"></span>`;
-    row.querySelector('.profile-detail').textContent = reply.note || reply.error || '';
+    const detail = reply.note || reply.error || '';
+    const proxy = reply.proxy ? ` · ${reply.proxy}` : '';
+    const size = reply.width && reply.height ? ` · ${reply.width}×${reply.height} · ${reply.scale}%` : '';
+    row.querySelector('.profile-detail').textContent = `${detail}${proxy}${size}`;
     row.querySelector('.profile-state').textContent = reply.ok ? 'Đang mở' : 'Có lỗi';
     profileList.append(row);
     statusByIndex.set(index, row);
@@ -54,10 +59,53 @@ function updateSitePreview() {
   runButton.disabled = !site || !site.value;
 }
 
+function renderSettings(count) {
+  const previous = new Map();
+  for (const [index, card] of settingsByIndex) {
+    previous.set(index, {
+      proxy: card.querySelector('[data-setting="proxy"]').value,
+      width: card.querySelector('[data-setting="width"]').value,
+      height: card.querySelector('[data-setting="height"]').value,
+      scale: card.querySelector('[data-setting="scale"]').value,
+    });
+  }
+  settingsByIndex.clear();
+  settingsList.replaceChildren();
+  for (let index = 1; index <= count; index += 1) {
+    const saved = previous.get(index) || {};
+    const card = document.createElement('article');
+    card.className = 'settings-card';
+    card.innerHTML = `<div class="settings-title"><strong>Profile ${index}</strong><span>Thiết lập riêng</span></div>
+      <label class="setting-field proxy-field"><span>Proxy</span><input data-setting="proxy" type="password" autocomplete="off" spellcheck="false" placeholder="Để trống = IP trực tiếp" /></label>
+      <label class="setting-field"><span>Rộng (px)</span><input data-setting="width" type="number" min="520" max="3840" step="1" /></label>
+      <label class="setting-field"><span>Cao (px)</span><input data-setting="height" type="number" min="200" max="2160" step="1" /></label>
+      <label class="setting-field"><span>Scale (%)</span><input data-setting="scale" type="number" min="50" max="200" step="1" /></label>`;
+    card.querySelector('[data-setting="proxy"]').value = saved.proxy || '';
+    card.querySelector('[data-setting="width"]').value = saved.width || '900';
+    card.querySelector('[data-setting="height"]').value = saved.height || '500';
+    card.querySelector('[data-setting="scale"]').value = saved.scale || '100';
+    settingsList.append(card);
+    settingsByIndex.set(index, card);
+  }
+}
+
+function collectSettings(count) {
+  return Array.from({ length: count }, (_, offset) => {
+    const card = settingsByIndex.get(offset + 1);
+    return {
+      proxy: card.querySelector('[data-setting="proxy"]').value.trim(),
+      width: Number(card.querySelector('[data-setting="width"]').value) || 900,
+      height: Number(card.querySelector('[data-setting="height"]').value) || 500,
+      scale: Number(card.querySelector('[data-setting="scale"]').value) || 100,
+    };
+  });
+}
+
 profileSelect.addEventListener('change', updateSitePreview);
 $('#profile-count').addEventListener('change', () => {
   const value = Math.max(1, Math.min(8, Number(profileCount.value) || 1));
   profileCount.value = String(value);
+  renderSettings(value);
 });
 
 runButton.addEventListener('click', async () => {
@@ -67,7 +115,7 @@ runButton.addEventListener('click', async () => {
   runButton.classList.add('busy');
   showNotice('Đang khởi chạy các profile…');
   try {
-    const result = await api.openProfiles(count, profileSelect.value);
+    const result = await api.openProfiles(count, profileSelect.value, collectSettings(count));
     if (!result || !result.ok) {
       showNotice((result && result.error) || 'Không mở được các profile.', true);
       return;
@@ -129,6 +177,7 @@ api.onEngineEvent(({ game, event, data }) => {
       profileSelect.append(option);
     }
     profileSelect.disabled = false;
+    renderSettings(Math.max(1, Math.min(8, Number(profileCount.value) || 1)));
     updateSitePreview();
     showNotice('Chọn số lượng profile và website, sau đó bấm Chạy đồng thời.');
   } catch (error) {

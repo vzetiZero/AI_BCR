@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('aibcr', {
   info: () => ipcRenderer.invoke('app:info'),
   call: (game, method, params) => ipcRenderer.invoke('engine:call', { game, method, params }),
-  openProfiles: (count, siteId) => ipcRenderer.invoke('profiles:open', { count, siteId }),
+  openProfiles: (count, siteId, profiles) => ipcRenderer.invoke('profiles:open', { count, siteId, profiles }),
   closeProfiles: () => ipcRenderer.invoke('profiles:close'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   saveText: (name, text) => ipcRenderer.invoke('app:saveText', { name, text }),

@@ -594,6 +594,64 @@ class BaccaratController:
         self._pending_site_navigation = url
         return self.chrome_open()
 
+    def profile_configure(self, params):
+        """Apply ephemeral proxy and per-profile window settings before launching Chrome."""
+        params = params or {}
+        if params.get("close"):
+            self.tool_running = False
+            try:
+                self.live_stop()
+            except Exception:
+                pass
+            try:
+                self.browser.stop()
+            except Exception as exc:
+                return {"ok": False, "error": "Không đóng được Chrome profile (%s)." % type(exc).__name__}
+            self._push_state()
+            return {"ok": True, "note": "Đã đóng profile."}
+
+        url = str(params.get("url") or "").strip()
+        if not BR.valid_site_url(url):
+            return {"ok": False, "error": "URL website không hợp lệ."}
+        proxy_server = str(params.get("proxy_server") or "").strip()
+        if proxy_server:
+            try:
+                from urllib.parse import urlsplit
+                parsed = urlsplit(proxy_server)
+                if (parsed.scheme not in ("http", "https", "socks5") or not parsed.hostname
+                        or parsed.username is not None or parsed.password is not None
+                        or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+                    raise ValueError("invalid_proxy")
+                parsed.port  # Force validation of malformed ports.
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Proxy profile không hợp lệ."}
+
+        self.tool_running = False
+        try:
+            self.live_stop()
+        except Exception:
+            pass
+        try:
+            self.browser.stop()
+        except Exception as exc:
+            return {"ok": False, "error": "Không đóng được Chrome profile (%s)." % type(exc).__name__}
+
+        width = min(3840, max(520, _as_int(params.get("width"), 900)))
+        height = min(2160, max(200, _as_int(params.get("height"), 500)))
+        percent = min(200, max(50, _as_int(params.get("scale"), 100)))
+        left = max(0, _as_int(params.get("left"), 0))
+        top = max(0, _as_int(params.get("top"), 0))
+        BR.WINDOW_POSITION = (left, top)
+        BR.PROXY_SERVER = proxy_server
+        self.config["start_url"] = url
+        self.config["chrome_window"] = {"width": width, "height": height,
+                                        "percent": percent, "fullscreen": False}
+        self._save_state()
+        self._push_state()
+        return {"ok": True, "note": "Đã áp dụng cấu hình profile.",
+                "proxy_enabled": bool(proxy_server), "width": width,
+                "height": height, "scale": percent}
+
     def chrome_attach(self):
         if self.chrome_busy:
             return {"ok": False, "error": "Đang bận thao tác Chrome."}
@@ -2462,6 +2520,7 @@ class BaccaratController:
             "state": lambda p: self.snapshot(),
             "chrome.open": lambda p: self.chrome_open(),
             "site.open": self.site_open,
+            "profile.configure": self.profile_configure,
             "chrome.attach": lambda p: self.chrome_attach(),
             "chrome.close": lambda p: self.chrome_close(),
             "chrome.window": self.apply_window,

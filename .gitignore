@@ -1,5 +1,6 @@
 # Profile Chrome dang nhap (chua cookie ca nhan) - khong bao gio push
 chrome_profile/
+chrome_profile*/
 chrome_profile_longlong/
 chrome_profile_cdp/
 
@@ -13,6 +14,7 @@ __pycache__/
 # Trang thai may nguoi dung (von, loi, phien choi)
 aibcr_state.json
 aibcr_state_baccarat.json
+aibcr_state*.json
 aibcr-session-*.json
 live_reports.jsonl
 aibcr_trace.jsonl
