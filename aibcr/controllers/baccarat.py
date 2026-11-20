@@ -1128,7 +1128,15 @@ class BaccaratController:
         cùng một tay. Cửa AUTO đánh đúng cửa có xác suất ra cao nhất do ``predict`` tính;
         cửa cố định P/B/T thì đánh mọi tay theo đúng cấu hình người dùng.
         """
-        if not (self.tool_running and self.sim.running and self.config["auto_place"]):
+        if not self.tool_running:
+            return
+        if not self.sim.running:
+            # Sim bị pause (dữ liệu cũ / không đặt được chip): hiện đúng lý do pause,
+            # không để ghi chú "chờ WebSocket" cũ treo trên UI gây hiểu lầm.
+            if self.sim.table_key and self.sim.note:
+                self.auto_bet_note = self.sim.note
+            return
+        if not self.config["auto_place"]:
             return
         if self.place_busy or self.sim.pending or self.sim.entry_waiting:
             return
@@ -2196,13 +2204,29 @@ class BaccaratController:
         """Chrome rời bàn (về sảnh/đăng nhập) quá lâu: rời bàn để tool tự vào lại.
 
         Không có bước này thì sim vẫn bám bàn cũ trong khi bộ đọc không còn dữ liệu
-        bàn đó, khiến ghi chú treo mãi ở "chờ dữ liệu bàn mới từ WebSocket".
+        bàn đó, khiến ghi chú treo mãi ở "chờ dữ liệu bàn mới từ WebSocket". Xử lý cả
+        khi sim đã bị pause (dữ liệu cũ) chứ không chỉ khi đang chạy: pause + vẫn bám
+        bàn là trạng thái treo mà ``_tool_retry_enter`` không tự thoát được.
         """
-        if not self.sim.table_key or not self.sim.running:
+        if not self.tool_running or not self.sim.table_key:
             self.lobby_since = None
             return
-        if not self.browser.connected or getattr(self.browser, "wm_open_key", ""):
+        if self.sim.money.blocked or self.sim.take_profit_done:
             self.lobby_since = None
+            return
+        if not self.browser.connected:
+            self.lobby_since = None
+            return
+        wm_key = str(getattr(self.browser, "wm_open_key", "") or "")
+        if wm_key:
+            self.lobby_since = None
+            # Chrome còn trong bàn nhưng sim bị pause vì dữ liệu cũ: chạy lại tiếp.
+            if not self.sim.running and wm_key == self.sim.table_key.replace("id:", ""):
+                row = self.tables.get(self.sim.table_key)
+                if row is not None:
+                    self.sim.start(row)
+                    self.auto_bet_note = self.sim.note
+                    self.log("Tiếp tục theo dõi bàn %s sau khi dữ liệu bị ngắt." % row["label"])
             return
         now = time.monotonic()
         if self.lobby_since is None:

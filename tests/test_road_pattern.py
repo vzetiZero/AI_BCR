@@ -566,6 +566,32 @@ class HighestProbabilityBetTests(unittest.TestCase):
         self.assertTrue(controller.sim.running)
         self.assertIsNone(controller.lobby_since)
 
+    def test_paused_sim_in_lobby_detaches_and_reenters(self):
+        """Sim pause + vẫn bám bàn + Chrome về sảnh: phải rời bàn để tool vào lại."""
+        controller = self.make_controller()
+        self.ready(controller)
+        controller.sim.pause("Dữ liệu quá 45 giây chưa cập nhật.")
+        controller.browser.cdp_attached = True
+        controller.browser._alive_checked_at = time.monotonic()
+        controller.browser._alive_ok = True
+        controller.browser.wm_open_key = ""
+        controller.lobby_since = time.monotonic() - 30
+        controller._recover_from_lobby()
+        self.assertIsNone(controller.sim.table_key)
+        self.assertFalse(controller.sim.running)
+
+    def test_paused_sim_resumes_when_chrome_back_in_same_table(self):
+        controller = self.make_controller()
+        row = self.ready(controller)
+        controller.sim.pause("Dữ liệu quá 45 giây chưa cập nhật.")
+        controller.browser.cdp_attached = True
+        controller.browser._alive_checked_at = time.monotonic()
+        controller.browser._alive_ok = True
+        controller.browser.wm_open_key = "test"
+        controller._recover_from_lobby()
+        self.assertTrue(controller.sim.running)
+        self.assertEqual(controller.sim.table_key, row["key"])
+
     def test_root_left_site_is_session_loss_and_clears_wait_note(self):
         """Tab bị đẩy sang trang đăng nhập: dừng đặt + xoá ghi chú 'chờ WS' gây hiểu lầm."""
         controller = self.make_controller()
