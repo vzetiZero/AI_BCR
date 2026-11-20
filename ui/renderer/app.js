@@ -167,6 +167,38 @@ function renderRoad(letters) {
     .join('');
 }
 
+function renderHandCount(table) {
+  const box = $('#ba-hand-count');
+  if (!box) return;
+  const letters = String(table.letters || '');
+  const n = letters.length;
+  if (!table.key || !n) {
+    box.textContent = '';
+    return;
+  }
+  const last = letters[n - 1];
+  const name = SIDE_NAME[last] || '—';
+  box.innerHTML = `Tay <b>${n}</b> · ${name} · ${table.running ? 'đang chạy' : 'đã dừng'}`;
+}
+
+function renderRoadPattern(letters) {
+  const box = $('#ba-road-pattern');
+  if (!box) return;
+  const text = String(letters || '');
+  if (!text) { box.textContent = ''; return; }
+  const runs = [];
+  let current = '', prev = '';
+  for (const ch of text) {
+    if (ch === prev) { current += ch; continue; }
+    if (current) runs.push(current);
+    current = ch; prev = ch;
+  }
+  if (current) runs.push(current);
+  const cls = { B: 'run-b', P: 'run-p', T: 'run-t' };
+  box.innerHTML = runs.map((run) =>
+    `<span class="${cls[run[0]] || ''}">${run}</span>`).join(' ');
+}
+
 function renderChips(chips, plan) {
   const statusBox = $('#ba-chip-status');
   const detailBox = $('#ba-chip-detail');
@@ -508,6 +540,8 @@ function renderBaccarat(snapshot) {
   /* --- bàn đang theo dõi --- */
   setText('#ba-table-name', table.key ? `${table.name || table.key} · ${table.hands || 0} tay` : 'Chưa chọn bàn');
   renderRoad(table.letters);
+  renderHandCount(table);
+  renderRoadPattern(table.letters);
   const noteBits = [];
   if (table.key) {
     noteBits.push(table.running ? 'Đang theo dõi' : 'Đã dừng');
