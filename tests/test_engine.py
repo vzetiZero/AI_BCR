@@ -12,6 +12,7 @@ Không cần Chrome: bàn/Chrome được thay bằng đối tượng giả. M�
 
 import json
 import pathlib
+import threading
 import tempfile
 import time
 import unittest
@@ -207,6 +208,40 @@ class BaccaratEnterValidTests(unittest.TestCase):
 
     def service(self, letters=None, config=None):
         return make_service(config=config, letters=letters or self.VALID, source="evo-bead")
+
+    def test_live_reader_switches_to_wm_when_chrome_navigates_there(self):
+        from unittest.mock import patch
+        from aibcr.controllers import baccarat as BC
+
+        service = self.service()
+
+        class FakeReader:
+            def __init__(self):
+                self.started = False
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def start(self):
+                self.started = True
+
+            def join(self, timeout=None):
+                self.alive = False
+
+        old_reader, new_reader = FakeReader(), FakeReader()
+        old_stop = threading.Event()
+        service.live_session = object()
+        service.live_reader = old_reader
+        service.live_stop_event = old_stop
+        service.live_reader_probe_at = 0
+        service._make_live_reader = lambda _session, wm_detected=None: new_reader
+        with patch.object(BC, "find_wm_page", return_value=({"id": "wm"}, {"kind": "table"})):
+            service._refresh_live_reader_kind()
+
+        self.assertTrue(old_stop.is_set())
+        self.assertIs(service.live_reader, new_reader)
+        self.assertTrue(new_reader.started)
 
     def prime(self, service, letters=None):
         """Giả lập: đã bấm ô bàn và cầu trong bàn đã xác nhận cùng shoe."""

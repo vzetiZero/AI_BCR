@@ -118,6 +118,7 @@ class BaccaratController:
         self.live_session = None
         self.live_reader = None
         self.live_stop_event = threading.Event()
+        self.live_reader_probe_at = 0.0
         self.live_hand = 0
         # API key nhập từ UI: CHỈ RAM. Không đưa vào self.config, state file hay snapshot.
         self.ai_key_override = ""
@@ -2040,6 +2041,44 @@ class BaccaratController:
             reader = self.live_reader
         reader.start()
 
+    def _refresh_live_reader_kind(self):
+        """Switch live decoders when Chrome changes between WM and other sites.
+
+        The reader is selected when AI live starts. A still-alive Petalive reader
+        would otherwise keep running forever if WM opens afterward.
+        """
+        reader = self.live_reader
+        session = self.live_session
+        if reader is None or session is None or not reader.is_alive() \
+                or self.live_stop_event.is_set():
+            return
+        now = time.monotonic()
+        if now < self.live_reader_probe_at:
+            return
+        self.live_reader_probe_at = now + 3.0
+        try:
+            page, _detect = find_wm_page(getattr(BR, "CDP_PORT", 9222))
+        except Exception:
+            return
+        wants_wm = page is not None
+        if wants_wm == isinstance(reader, WMReader):
+            return
+
+        # The replacement owns a fresh event so a slow old CDP shutdown cannot
+        # stop the new reader.
+        old_stop = self.live_stop_event
+        new_stop = threading.Event()
+        old_stop.set()
+        with self.lock:
+            if self.live_reader is not reader or self.live_session is not session:
+                return
+            self.live_stop_event = new_stop
+            replacement = self._make_live_reader(session, wm_detected=wants_wm)
+            self.live_reader = replacement
+        replacement.start()
+        reader.join(timeout=0.2)
+        self.log("AI live: đã chuyển bộ đọc theo tab Chrome đang mở.", "info")
+
     def _tick(self):
         self._drain()
         self._watch_live_reader()
@@ -2050,6 +2089,7 @@ class BaccaratController:
                 self._on_chrome_lost()
         else:
             self._on_chrome_ready()
+            self._refresh_live_reader_kind()
             if self.enter_valid:
                 self._watch_enter_valid(time.time())
             if self.tool_running or self.enter_valid or self.valid_check_done:
@@ -2305,14 +2345,16 @@ class BaccaratController:
         if changed:
             self._push_state()
 
-    def _make_live_reader(self, session):
+    def _make_live_reader(self, session, wm_detected=None):
         """Chọn bộ đọc theo tab đang mở: WM đọc khung nhị phân, Petalive đọc text."""
         port = getattr(BR, "CDP_PORT", 9222)
-        try:
-            wm_page, _detect = find_wm_page(port)
-        except Exception:
-            wm_page = None
-        if wm_page is not None:
+        if wm_detected is None:
+            try:
+                wm_page, _detect = find_wm_page(port)
+            except Exception:
+                wm_page = None
+            wm_detected = wm_page is not None
+        if wm_detected:
             return WMReader(on_round=session.on_round, on_state=session.on_state,
                             on_status=lambda text, level="info":
                             self.log("AI live: %s" % text, level),
@@ -2327,6 +2369,7 @@ class BaccaratController:
             if self.live_reader is not None:
                 return {"ok": True, "note": "AI live đã chạy."}
             self.live_stop_event.clear()
+            self.live_reader_probe_at = 0.0
             session = LiveSession(
                 on_prediction=self._emit_live,
                 on_status=lambda text, level="info": self.log("AI live: %s" % text, level),
