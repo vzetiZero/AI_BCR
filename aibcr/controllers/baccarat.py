@@ -551,6 +551,12 @@ class BaccaratController:
                 if not attached and self.browser.last_diag.get("reason") == "evo_entry_auth_error":
                     self.events.put(("open_error", self.browser.note))
                     return
+                if attached and getattr(self, "_pending_site_navigation", None):
+                    ok, note = self.browser.navigate(self._pending_site_navigation)
+                    self._pending_site_navigation = None
+                    if not ok:
+                        self.events.put(("open_error", note))
+                        return
                 if not attached:
                     ok = self.browser.start(self.config["start_url"], pos=pos, cdp=True,
                                             window=window)
@@ -558,11 +564,12 @@ class BaccaratController:
                         self.events.put(("open_error", self.browser.last_error or "Không mở được Chrome."))
                         return
                     self.browser.wait_for_cdp()
+                    self._pending_site_navigation = None
                 try:
                     self.browser.resize_window(window, pos=pos)
                 except Exception:
                     pass
-                self.events.put(("opened", "%s · Đăng nhập, vào sảnh Baccarat rồi bấm “VÀO BÀN HỢP LỆ”."
+                self.events.put(("opened", "%s · Website đã mở."
                                  % self.browser.driver_info))
             except Exception as exc:
                 self.events.put(("open_error", "Không mở được Chrome (%s)." % type(exc).__name__))
@@ -570,6 +577,22 @@ class BaccaratController:
         threading.Thread(target=work, daemon=True, name="ba-chrome").start()
         self._push_state()
         return {"ok": True, "note": "Đang mở Chrome…"}
+
+    def site_open(self, params):
+        url = str((params or {}).get("url") or "").strip()
+        if not BR.valid_site_url(url):
+            return {"ok": False, "error": "URL site không hợp lệ; chỉ hỗ trợ HTTPS công khai."}
+        self.config["start_url"] = url
+        self._save_state()
+        if self.browser.connected:
+            ok, note = self.browser.navigate(url)
+            if not ok:
+                return {"ok": False, "error": note}
+            self.connection_text = note
+            self._push_state()
+            return {"ok": True, "note": note}
+        self._pending_site_navigation = url
+        return self.chrome_open()
 
     def chrome_attach(self):
         if self.chrome_busy:
@@ -2438,6 +2461,7 @@ class BaccaratController:
             "ping": lambda p: {"ok": True, "pong": True, "game": "baccarat"},
             "state": lambda p: self.snapshot(),
             "chrome.open": lambda p: self.chrome_open(),
+            "site.open": self.site_open,
             "chrome.attach": lambda p: self.chrome_attach(),
             "chrome.close": lambda p: self.chrome_close(),
             "chrome.window": self.apply_window,

@@ -1,9 +1,12 @@
 # AI_BCR Desktop
 
-Tool **Baccarat** (một trò duy nhất) theo kiến trúc MVC: engine Python đọc bàn qua
-Chrome CDP, giao diện Electron chỉ vẽ và gửi lệnh. Dự án **không có LONG-LONG** và
-**không còn phương pháp chia khối/thang cược cũ**: mỗi tay được cấu hình trực tiếp
-trên UI (cửa + số chip cố định) hoặc lấy cửa từ kết quả `predict`.
+Ứng dụng Electron quản lý **1–8 profile Chrome** và mở đồng thời cùng một website đã chọn.
+Mỗi profile có thư mục phiên và cổng CDP riêng. Giao diện hiện tại tập trung vào số lượng
+tài khoản, danh sách website, trạng thái profile và thao tác mở/đóng; không hiển thị vốn,
+tỉ lệ, dự đoán hay điều khiển cược.
+
+Backend Baccarat cũ vẫn nằm trong `aibcr/` theo kiến trúc MVC để tương thích với các công cụ
+nội bộ; profile manager không gọi các lệnh phân tích hoặc cược.
 
 > **BẮT BUỘC — push GitHub sau MỖI lần cập nhật hoặc sửa đổi**
 >
@@ -81,7 +84,10 @@ python -m aibcr.service.engine --game baccarat
 Cấu hình Chrome: cổng CDP **9222**, profile `chrome_profile/`, file phiên
 `aibcr_state_baccarat.json` (xem `aibcr/service/engine.py::GAMES`).
 
-## Một nút duy nhất: VÀO BÀN HỢP LỆ
+## Backend Baccarat legacy
+
+Các mục dưới đây mô tả controller Baccarat và JSON-RPC cũ. Chúng không xuất hiện trong
+giao diện Profile Manager hiện tại.
 
 Tab **Bàn chơi** có một nút thao tác bàn: **VÀO BÀN HỢP LỆ**
 (`table.enterValid`). Các nút cũ (Gắn Chrome / Nhận tab sảnh / Quét sảnh / Đọc lại
@@ -210,9 +216,9 @@ không chứng minh được cầu bệt hay 1-1 sẽ lặp lại, nên 1-1 khô
 Xác suất P/B/T chỉ đến từ bộ bài còn lại (Monte Carlo) + Markov phụ trợ 15%.
 
 
-## AI trên giao diện Electron
+## AI live qua backend RPC
 
-Tab **AI dự đoán** bật/tắt luồng live mà không cần terminal:
+Luồng live có thể được điều khiển bằng backend RPC hoặc script:
 
 1. Chọn nguồn: `off` · `local` (Ollama/llama.cpp, **không cần key**) · `api`
    (OpenAI-compatible, cần key). Endpoint/model mặc định:
@@ -254,13 +260,17 @@ nhà cung cấp. Không dán giá trị key vào README, test, log hay issue.
 
 **AI does not control wagering**: predictions and AI commentary remain in the analysis view only.
 
-## Wager choices
+## Backend wagering
 
-In the play tab, choose `P`, `B`, or `T` explicitly. The `AUTO` mode that used predictions to choose a side has been removed. `bet.config` stores the chosen side and stake. If `auto_place` is enabled, the tool places only the explicitly selected side; `bet.place` requests a one-time wager. AI live can still analyze the table but cannot change or choose a wager.
+The current Profile Manager has no wager controls or money/statistics display. Legacy backend
+methods accept only explicit `P`, `B`, or `T` selections; predictions cannot choose a wager.
 
-## Multiple browser profiles
+## Quản lý profile trên giao diện
 
-Use the profile count and **Open profiles simultaneously** controls in Configuration to launch up to eight isolated Chrome sessions. Each profile gets its own user-data directory and CDP port, and windows are tiled across the display. Sign in to each profile once, then use **Enter the same table on all profiles** to send the table-entry action concurrently.
+Trong trang Profile Manager, nhập số lượng tài khoản (1–8), chọn một trong sáu website rồi
+bấm **Chạy đồng thời**. Các cửa sổ Chrome mở cùng URL và được xếp theo lưới. Chọn **Đóng
+profiles** để đóng các cửa sổ trong nhóm đang chạy. Đăng nhập từng profile lần đầu ngay
+trong cửa sổ Chrome; phiên đăng nhập được Chrome lưu riêng theo profile.
 
 ## Lệnh JSON-RPC
 

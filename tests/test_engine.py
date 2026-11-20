@@ -131,6 +131,23 @@ class DispatchTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_site_open_updates_selected_url_on_an_existing_profile(self):
+        service = make_service()
+        visited = []
+        service.browser.navigate = lambda url: (visited.append(url) or (True, "opened"))
+        url = "https://example.com/account"
+        result, error = service.dispatch("site.open", {"url": url})
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(visited, [url])
+        self.assertEqual(service.config["start_url"], url)
+
+    def test_site_open_rejects_non_https_url(self):
+        service = make_service()
+        result, error = service.dispatch("site.open", {"url": "file:///secret"})
+        self.assertIsNone(error)
+        self.assertFalse(result["ok"])
+
     def test_legacy_auto_side_disables_auto_place(self):
         service = make_service()
         migrated = service._normalize_config({**service.config, "bet_side": "AUTO",

@@ -550,6 +550,41 @@ class BrowserSession:
                 self.connection_state = "error"
                 return False
 
+    def navigate(self, url):
+        """Navigate the managed/attached Chrome page to an explicitly selected public HTTPS URL."""
+        if not valid_site_url(url):
+            return False, "URL phải là HTTPS công khai hợp lệ."
+        with self.lock:
+            try:
+                import websocket
+                page = self._cdp_page()
+                if not page:
+                    return False, "Không tìm thấy tab Chrome để mở site."
+                ws = websocket.create_connection(validated_endpoint(page),
+                                                 suppress_origin=True,
+                                                 timeout=SCRIPT_TIMEOUT)
+                try:
+                    ws.send(json.dumps({"id": 1, "method": "Page.navigate",
+                                        "params": {"url": url}}))
+                    deadline = time.monotonic() + COMMAND_TIMEOUT
+                    reply = None
+                    while time.monotonic() < deadline:
+                        message = json.loads(ws.recv())
+                        if message.get("id") == 1:
+                            reply = message
+                            break
+                    if reply is None:
+                        return False, "Chrome chưa phản hồi lệnh mở site."
+                    if reply.get("error"):
+                        return False, "Chrome từ chối điều hướng trang."
+                finally:
+                    ws.close()
+                self.connection_state = "connected"
+                self._alive_checked_at = 0.0
+                return True, "Đã mở site trong Chrome."
+            except Exception as exc:
+                return False, "Không mở được site trong Chrome (%s)." % type(exc).__name__
+
     def wait_for_cdp(self, seconds=15):
         """Chrome do driver mở tự tạo cổng 9222, thường muộn hơn lệnh launch vài giây.
         Biết sớm để báo đúng: cổng lên rồi thì quét được cả sảnh, chưa lên thì app chỉ

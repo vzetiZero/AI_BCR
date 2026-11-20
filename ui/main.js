@@ -14,6 +14,15 @@ const PYTHON_CANDIDATES = [
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python313', 'python.exe'),
 ].filter(Boolean);
 
+const PROFILE_SITES = [
+  { id: 'febet', label: 'FEBET', url: 'https://febet.kiwi/event/tui-qua-than-tai?a=c76811abcadb64fed7d82b32d7e79f3c&utm_campaign=social&utm_source=aphonso&utm_medium=sale&utm_term=bee&utm_content=KANGIN&event=' },
+  { id: 'e3951', label: 'E3951', url: 'https://e39d5d05qc.e3951.com/m/gameRecord' },
+  { id: 'gk881', label: 'GK881', url: 'https://m.gk881.vip/' },
+  { id: 'vnwtop', label: 'VNWTop', url: 'https://vnwtop.com/' },
+  { id: '888ae66', label: '888AE66', url: 'https://www.888ae66.com/' },
+  { id: 'bum123', label: 'BUM123', url: 'https://www.bum123.com/aff/10459' },
+];
+
 let mainWindow = null;
 
 class Engine {
@@ -290,8 +299,16 @@ ipcMain.handle('engine:call', async (_event, { game, method, params }) => {
   }
 });
 
-ipcMain.handle('profiles:open', async (_event, { count }) => {
+ipcMain.handle('profiles:open', async (_event, { count, siteId }) => {
   const total = Math.max(1, Math.min(8, Math.trunc(Number(count) || 1)));
+  const site = PROFILE_SITES.find((item) => item.id === siteId);
+  if (!site) return { ok: false, error: 'Hãy chọn một site trong danh sách.' };
+  const oldCount = activeProfileCount;
+  if (total < oldCount) {
+    const closing = Array.from({ length: oldCount - total }, (_, index) =>
+      engines[`baccarat-profile-${total + index + 1}`]).filter(Boolean);
+    await Promise.all(closing.map((engine) => engine.call('chrome.close')));
+  }
   activeProfileCount = total;
   const { screen } = require('electron');
   const area = screen.getPrimaryDisplay().workAreaSize;
@@ -315,17 +332,17 @@ ipcMain.handle('profiles:open', async (_event, { count }) => {
     started.push(engines[game]);
     positions.push(layout);
   }
-  if (started.length) {
-    await started[0].call('chrome.window', { ...positions[0], percent: 100, fullscreen: false, tile: true });
-  }
-  const replies = await Promise.all(started.map((engine) => engine.call('chrome.open')));
-  return { ok: true, count: total, replies };
+  await Promise.all(started.map((engine, index) => engine.call('chrome.window', {
+    ...positions[index], percent: 100, fullscreen: false, tile: true,
+  })));
+  const replies = await Promise.all(started.map((engine) => engine.call('site.open', { url: site.url })));
+  return { ok: true, count: total, site: site.label, replies };
 });
 
-ipcMain.handle('profiles:enter-table', async () => {
+ipcMain.handle('profiles:close', async () => {
   const targets = Array.from({ length: activeProfileCount }, (_, index) => engines[
     index === 0 ? 'baccarat' : `baccarat-profile-${index + 1}`]).filter(Boolean);
-  const replies = await Promise.all(targets.map((engine) => engine.call('table.enterValid')));
+  const replies = await Promise.all(targets.map((engine) => engine.call('chrome.close')));
   return { ok: true, count: targets.length, replies };
 });
 
@@ -333,6 +350,7 @@ ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
   root: PROJECT_ROOT,
   engines: Object.keys(engines),
+  profileSites: PROFILE_SITES.map(({ id, label, url }) => ({ id, label, url })),
 }));
 
 ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
