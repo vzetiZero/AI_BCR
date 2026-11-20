@@ -79,6 +79,40 @@ class AiConfigTests(unittest.TestCase):
         self.assertFalse(ai.available(ai.config({"mode": "api", "key": ""})))
         self.assertTrue(ai.available(ai.config({"mode": "api", "key": "dummy"})))
 
+    def test_base_url_builds_chat_completions_endpoint(self):
+        self.assertEqual(ai.completion_url("https://api.example.test/v1"),
+                         "https://api.example.test/v1/chat/completions")
+        self.assertEqual(ai.completion_url(
+            "https://api.example.test/v1/chat/completions"),
+            "https://api.example.test/v1/chat/completions")
+        self.assertEqual(ai.completion_url("http://localhost:11434"),
+                         "http://localhost:11434/v1/chat/completions")
+        self.assertEqual(ai.completion_url("file:///tmp/model"), "")
+
+    def test_check_model_uses_entered_key_and_does_not_return_it(self):
+        fake = FakeResponse({"model": "demo-model", "choices": [
+            {"message": {"content": "OK"}}]})
+        with patch.object(ai, "urlopen", return_value=fake) as mocked:
+            result = ai.check_model({"mode": "api", "url": "https://api.example.test/v1",
+                                     "model": "demo-model", "key": "dummy-secret"})
+        request = mocked.call_args.args[0]
+        self.assertTrue(result["ok"])
+        self.assertEqual(request.full_url,
+                         "https://api.example.test/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer dummy-secret")
+        self.assertNotIn("key", result)
+        self.assertNotIn("dummy-secret", repr(result))
+
+    def test_check_model_reports_invalid_key_without_echoing_request_data(self):
+        error = HTTPError("https://api.example.test/v1/chat/completions", 401,
+                          "unauthorized", {}, None)
+        with patch.object(ai, "urlopen", side_effect=error):
+            result = ai.check_model({"mode": "api", "url": "https://api.example.test/v1",
+                                     "model": "demo-model", "key": "dummy-secret"})
+        self.assertFalse(result["ok"])
+        self.assertIn("401", result["error"])
+        self.assertNotIn("dummy-secret", repr(result))
+
     def test_missing_key_reports_error(self):
         result = ai.analyze(PREDICTION, cfg={"mode": "api"})
         self.assertFalse(result["ok"])
@@ -213,6 +247,21 @@ class RpcTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["has_key"])
         self.assertEqual(controller.ai_key_override, "dummy-ram-only")
+
+    def test_ai_check_uses_unsaved_provider_values(self):
+        from aibcr.controllers import baccarat as BC
+
+        controller, _events = self.make_controller()
+        values = {"mode": "api", "url": "https://provider.example/v1",
+                  "model": "custom-model", "key": "temporary-key"}
+        with patch.object(BC.LIVE_AI, "check_model",
+                          return_value={"ok": True, "model": "custom-model"}) as check:
+            result, error = controller.dispatch("ai.check", values)
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"])
+        self.assertEqual(check.call_args.args[0]["url"], values["url"])
+        self.assertEqual(check.call_args.args[0]["key"], values["key"])
+        self.assertEqual(controller.ai_key_override, "")
 
         # Khi live session đã tồn tại, key phải đi thẳng vào RAM của session đó.
         controller.live_session = LiveSession(ai_mode="api")

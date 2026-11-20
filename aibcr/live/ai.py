@@ -28,7 +28,7 @@ Biến môi trường:
 import json
 import os
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 DEFAULT_URL = "https://api.vilao.ai/v1/chat/completions"
@@ -76,6 +76,26 @@ def is_local_url(url):
     return host in LOCAL_HOSTS
 
 
+def completion_url(url):
+    """Accept a provider base URL or a complete chat-completions endpoint."""
+    raw = _text(url, 300).rstrip("/")
+    try:
+        parts = urlparse(raw)
+    except ValueError:
+        return ""
+    if (parts.scheme not in ("http", "https") or not parts.netloc
+            or parts.username is not None or parts.password is not None):
+        return ""
+    try:
+        _ = parts.port
+    except ValueError:
+        return ""
+    path = parts.path.rstrip("/")
+    if not path.endswith("/chat/completions"):
+        path += "/chat/completions" if path else "/v1/chat/completions"
+    return urlunparse(parts._replace(path=path))
+
+
 def config(overrides=None):
     """Cấu hình hiệu lực: UI override > biến môi trường > mặc định."""
     override = overrides if isinstance(overrides, dict) else {}
@@ -85,7 +105,8 @@ def config(overrides=None):
         url = _text(override.get("url") or os.environ.get("BCR_AI_URL"), 300) or DEFAULT_URL
         key = _text(override.get("key") or os.environ.get("BCR_AI_KEY"), 300)
         mode = "api" if key else ("local" if is_local_url(url) else "off")
-    url = _text(override.get("url") or os.environ.get("BCR_AI_URL"), 300) or DEFAULT_URL
+    raw_url = _text(override.get("url") or os.environ.get("BCR_AI_URL"), 300) or DEFAULT_URL
+    url = completion_url(raw_url)
     model = _text(override.get("model") or os.environ.get("BCR_AI_MODEL"), 80) or DEFAULT_MODEL
     key = _text(override.get("key") or os.environ.get("BCR_AI_KEY"), 300)
     try:
@@ -174,6 +195,57 @@ def _content(data):
     choices = (data or {}).get("choices") or []
     message = (choices[0] or {}).get("message") if choices else None
     return str((message or {}).get("content") or "").strip()
+
+
+def check_model(cfg=None, timeout=12):
+    """Make a tiny OpenAI-compatible request to verify URL, key, and model."""
+    settings = config(cfg)
+    if not settings["model"]:
+        return {"ok": False, "error": "Nhập tên model trước khi kiểm tra."}
+    if settings["mode"] == "off":
+        return {"ok": False, "error": "Chọn chế độ API hoặc Local trước khi kiểm tra."}
+    if settings["mode"] == "api" and not settings["key"]:
+        return {"ok": False, "error": "Nhập API key hoặc đặt biến BCR_AI_KEY."}
+    if not settings["url"]:
+        return {"ok": False, "error": "Base URL không hợp lệ."}
+
+    body = {
+        "model": settings["model"],
+        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "max_tokens": 4,
+        "temperature": 0,
+    }
+    headers = {"Content-Type": "application/json"}
+    if settings["key"]:
+        headers["Authorization"] = "Bearer " + settings["key"]
+    request = Request(settings["url"], data=json.dumps(body).encode("utf-8"),
+                      method="POST", headers=headers)
+    try:
+        with urlopen(request, timeout=max(2, min(20, int(timeout)))) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+    except HTTPError as exc:
+        messages = {
+            400: "Đã tới API nhưng provider từ chối model/yêu cầu (HTTP 400).",
+            401: "API key không hợp lệ hoặc đã hết hạn (HTTP 401).",
+            403: "API key không có quyền dùng model này (HTTP 403).",
+            404: "Không tìm thấy endpoint hoặc model (HTTP 404).",
+            429: "API nhận được yêu cầu nhưng đang giới hạn tốc độ/hết quota (HTTP 429).",
+        }
+        return {"ok": False, "error": messages.get(
+            exc.code, "API trả lỗi HTTP %d." % exc.code)}
+    except URLError:
+        return {"ok": False, "error": "Không kết nối được Base URL (mạng/tường lửa)."}
+    except (ValueError, OSError, TypeError):
+        return {"ok": False, "error": "Phản hồi từ API không đúng định dạng JSON."}
+
+    if not isinstance(data, dict) or data.get("error"):
+        return {"ok": False, "error": "Provider trả phản hồi lỗi; kiểm tra model và định dạng API."}
+    if not _content(data):
+        return {"ok": False, "error": "API đã phản hồi nhưng model không trả nội dung kiểm tra."}
+    returned_model = _text(data.get("model"), 80)
+    return {"ok": True, "model": returned_model or settings["model"],
+            "message": "Kết nối thành công · model %s hoạt động." %
+                       (returned_model or settings["model"])}
 
 
 def analyze(prediction, recent_rounds=None, table="", timeout=TIMEOUT, cfg=None):

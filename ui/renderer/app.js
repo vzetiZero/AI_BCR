@@ -313,7 +313,7 @@ function renderTables(rows) {
   });
   if (title) title.textContent = `Bàn đọc được · ${list.length}`;
   if (!list.length) {
-    box.innerHTML = '<p class="hint">Không có bàn nào khớp. Bấm “Chạy tool” để quét lại sảnh.</p>';
+    box.innerHTML = '<p class="hint">Không có bàn phù hợp.</p>';
     return;
   }
   box.innerHTML = list
@@ -421,7 +421,7 @@ function renderAiPanel(live) {
 
   if (!live.running) {
     if (badge) { badge.textContent = 'CHƯA BẬT'; badge.className = 'hero-state'; }
-    if (verdict) verdict.textContent = live.note || 'Bấm “Bật AI live” để đọc bàn Petalive.';
+    if (verdict) verdict.textContent = live.note || 'Chưa có dữ liệu live.';
     if (numbers) numbers.textContent = '—';
     if (probsBox) probsBox.innerHTML = '';
     if (risk) risk.textContent = '';
@@ -581,7 +581,7 @@ function renderBaccarat(snapshot) {
     if (!table.key) {
       planState.textContent = 'CHƯA CÓ BÀN';
       planState.className = 'hero-state';
-      planBox.textContent = 'Bấm “Chạy tool” để tự vào bàn và đặt cược.';
+      planBox.textContent = 'Chưa có đề xuất.';
       reasonText = '';
     } else if (money.blocked) {
       planState.textContent = 'ĐÃ CHẶN';
@@ -621,7 +621,7 @@ function renderBaccarat(snapshot) {
     if (table.entry_waiting) noteBits.push('chờ kết quả tay hiện tại');
     if (table.place_skips) noteBits.push(`bỏ ${table.place_skips} tay`);
   } else {
-    noteBits.push('Chưa vào bàn — bấm “Chạy tool”.');
+    noteBits.push('Chưa vào bàn');
   }
   setText('#ba-table-note', [table.note, noteBits.join(' · ')].filter(Boolean).join(' — '));
 
@@ -858,6 +858,36 @@ $('#ba-ai-save').addEventListener('click', async () => {
     live_markov_weight: Number($('#ba-live-markov').value),
   });
   if (reply) toast(reply.note || 'Đã lưu cấu hình AI.');
+});
+
+$('#ba-ai-check').addEventListener('click', async () => {
+  const button = $('#ba-ai-check');
+  const status = $('#ba-ai-check-status');
+  button.disabled = true;
+  status.dataset.state = 'busy';
+  status.textContent = 'Đang kiểm tra…';
+  try {
+    const reply = await api.call('baccarat', 'ai.check', {
+      mode: $('#ba-ai-mode').value,
+      url: $('#ba-ai-url').value.trim(),
+      model: $('#ba-ai-model').value.trim(),
+      key: $('#ba-ai-key').value.trim(),
+    });
+    const result = reply && reply.result;
+    if (reply && reply.ok !== false && result && result.ok) {
+      status.dataset.state = 'ok';
+      status.textContent = result.message || `Model ${result.model} hoạt động.`;
+    } else {
+      status.dataset.state = 'error';
+      status.textContent = (result && result.error) || (reply && reply.error)
+        || 'Không kiểm tra được API.';
+    }
+  } catch (error) {
+    status.dataset.state = 'error';
+    status.textContent = 'Không gửi được yêu cầu kiểm tra.';
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $('#ba-ai-key-save').addEventListener('click', async () => {

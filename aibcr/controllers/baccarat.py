@@ -33,6 +33,7 @@ from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
 from aibcr.live.wm_reader import WMReader, find_wm_page, find_wm_table
+from aibcr.live import ai as LIVE_AI
 from aibcr.models import engine as E
 from aibcr.models import money as M
 from aibcr.models.live_sim import (LiveSimulation, compare_chips, table_is_clear,
@@ -2424,6 +2425,17 @@ class BaccaratController:
                 "note": "Đã lưu API key trong phiên này (chỉ RAM)." if key
                         else "Đã xoá API key tuỳ biến; dùng BCR_AI_KEY nếu có."}
 
+    def ai_check(self, params):
+        """Probe the currently entered provider settings without saving the key."""
+        params = params or {}
+        cfg = {
+            "mode": params.get("mode") or self.config.get("ai_mode"),
+            "url": params.get("url") or self.config.get("ai_url"),
+            "model": params.get("model") or self.config.get("ai_model"),
+            "key": params.get("key") or self.ai_key_override,
+        }
+        return LIVE_AI.check_model(cfg)
+
     def bet_config_set(self, params):
         """Cấu hình lệnh cho tay kế tiếp: cửa (AUTO/P/B/T) + số chip cố định."""
         params = params or {}
@@ -2510,6 +2522,7 @@ class BaccaratController:
             "live.stop": lambda p: self.live_stop(),
             "live.state": lambda p: self.live_state(),
             "live.analyze": lambda p: self.live_analyze(),
+            "ai.check": self.ai_check,
             "ai.key.set": self.ai_key_set,
             "bet.config": self.bet_config_set,
             "bet.place": lambda p: self.bet_place(),
