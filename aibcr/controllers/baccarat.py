@@ -32,7 +32,7 @@ from aibcr.adapters.wm_bet import WMBet
 from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
-from aibcr.live.wm_reader import WMReader, find_wm_table
+from aibcr.live.wm_reader import WMReader, find_wm_page
 from aibcr.models import engine as E
 from aibcr.models import money as M
 from aibcr.models.live_sim import (LiveSimulation, compare_chips, table_is_clear,
@@ -166,6 +166,8 @@ class BaccaratController:
         # cầu của tay đã arm để không arm lặp lại cùng một tay.
         self.auto_bet_letters = None
         self.auto_bet_note = ""
+        # (table_key, số tay) đã chốt lệnh — chặn đặt trùng khi nguồn phát lại một ván.
+        self.placed_signatures = set()
         # Chưa có bàn (Chrome vừa mở/chưa đăng nhập) thì thử lại theo nhịp này.
         self.tool_retry_at = 0.0
 
@@ -871,6 +873,12 @@ class BaccaratController:
                 self.valid_note = "Tool đang chạy · " + self.sim.note
         self.log("Chạy tool: tự vào bàn, phân tích và đặt cược từng tay.")
         self._push_state()
+        # Tự bật bộ đọc lá bài để có dự đoán ngay — người dùng không phải bấm thêm nút.
+        if self.live_reader is None:
+            try:
+                self.live_start()
+            except Exception as exc:
+                self.log("Không bật được AI live (%s)." % type(exc).__name__, "warn")
         # Chưa có bàn: tự gắn/mở Chrome rồi tìm bàn hợp lệ (không cần bấm thêm nút nào).
         self.tool_retry_at = time.time() + 15.0
         if not self.sim.table_key and not self.enter_valid:
@@ -1025,6 +1033,13 @@ class BaccaratController:
         letters = self.sim.letters
         if letters == self.auto_bet_letters:
             return
+        # Chốt an toàn chống đặt trùng: nếu sổ đã có tay này cho cùng bàn thì không đặt lại
+        # (bảo vệ khi nguồn dữ liệu phát lại cùng một ván).
+        signature = (self.sim.table_key, len(letters))
+        if signature in self.placed_signatures:
+            self.auto_bet_letters = letters
+            self.auto_bet_note = "Tay này đã được xử lý · chờ tay kế."
+            return
         order = self._resolve_order()
         side = order.get("side")
         if not side:
@@ -1037,6 +1052,9 @@ class BaccaratController:
         pending = self.sim.set_order(side, order["stake"], reason=order["reason"])
         if pending is None:
             return
+        self.placed_signatures.add(signature)
+        if len(self.placed_signatures) > 500:
+            self.placed_signatures = set(list(self.placed_signatures)[-200:])
         self.auto_bet_letters = letters
         self.auto_bet_note = "Tự đặt tay %d · %s %s đv · %s" % (
             len(letters) + 1, E.SIDE_NAME.get(side, side),
@@ -1664,6 +1682,10 @@ class BaccaratController:
             self.sweep_note = self.valid_note
             self.log(self.valid_note, "win")
             return
+        # Đồng bộ vốn theo số dư THẬT trước khi bắt đầu theo dõi: sau khi start, vốn bị
+        # khoá để giữ đúng lãi/lỗ. Thiếu bước này phiên dùng vốn mặc định và bị chặn
+        # "hết vốn" ngay từ tay đầu. (Đọc CDP ngoài lock để không chặn vòng quét.)
+        self._wallet_sync_once()
         with self.lock:
             started = self.sim.start(row)
             note = self.sim.note
@@ -1760,10 +1782,30 @@ class BaccaratController:
                 self.sim.cycle_done = False
                 self.leave_table(take_profit=self.sim.take_profit_done)
 
+    def _wallet_sync_once(self):
+        """Đọc số dư thật một lần rồi đồng bộ vốn phiên (dùng khi bật tool)."""
+        try:
+            if getattr(self.browser, "wm_page_id", None):
+                wallet = self.browser.read_wm_wallet()
+            else:
+                wallet = {}
+            if wallet.get("ok"):
+                with self.lock:
+                    self._apply_wallet(wallet["value"], wallet.get("text") or "")
+                self._push_state()
+        except Exception:
+            pass
+
     def _sync_wallet(self, reports):
         text = next((str((report.get("page") or {}).get("wallet_balance") or "").strip()
                      for report in reports
                      if (report.get("page") or {}).get("wallet_balance")), "")
+        if not text and getattr(self.browser, "wm_page_id", None):
+            # WM: số dư thật nằm trong iframe bàn (#userBalanceBox), không nằm ở trang.
+            wallet = self.browser.read_wm_wallet()
+            if wallet.get("ok"):
+                self._apply_wallet(wallet["value"], wallet.get("text") or "")
+            return
         if not text:
             return
         try:
@@ -1771,13 +1813,34 @@ class BaccaratController:
         except (TypeError, ValueError):
             self.wallet_text = "Số dư ví trên web: không đọc được giá trị"
             return
-        self.wallet_text = "Số dư ví trên web: %s VN2" % M.fmt_amount(value)
+        self._apply_wallet(value, text)
+
+    def _apply_wallet(self, value, raw):
+        """Đồng bộ vốn phiên theo số dư thật đọc được trên web.
+
+        CHỈ đồng bộ khi phiên chưa theo dõi và chưa có tay nào. Nếu đồng bộ giữa phiên,
+        số dư sổ sách bị ghi đè bằng số dư ví sau mỗi lần đặt cược → lãi/lỗ hiển thị sai
+        và trông như "tiền bốc hơi". Trong phiên chỉ cập nhật nhãn hiển thị.
+        """
+        self.wallet_text = "Số dư ví: %s đv (= %sđ)" % (
+            M.fmt_money(value), M.fmt_money(value * 1000))
         book = self.sim.money
-        if not self.sim.running and not book.hands_played:
-            ok, _note = book.sync_capital(value)
-            if ok:
-                self.config["capital"] = float(value)
-                self.wallet_text += " · vốn phiên đã đồng bộ"
+        if self.sim.running or book.hands_played:
+            return
+        ok, _note = book.sync_capital(value)
+        if not ok:
+            return
+        self.config["capital"] = float(value)
+        # Đơn vị cược phải ≤ số dư thật, nếu không phiên bị chặn "hết vốn" ngay.
+        stake = float(self.bet_config["stake"] or 10.0)
+        if stake > value:
+            stake = max(1.0, float(int(value)))
+            self.bet_config["stake"] = stake
+            self.config["bet_stake"] = stake
+        book.unit = stake
+        self.sim.unit = stake
+        self.wallet_text += " · vốn phiên đã đồng bộ"
+        self._save_state()
 
     def _tick(self):
         self._drain()
@@ -1905,7 +1968,7 @@ class BaccaratController:
             # WM (M88) đọc lá bài từ WebSocket nhị phân của tab bàn; Petalive đọc khung
             # text. Dò tab bàn WM trước để chọn đúng bộ đọc, không cần người dùng chọn.
             try:
-                wm_page, _detect = find_wm_table(port)
+                wm_page, _detect = find_wm_page(port)
             except Exception:
                 wm_page = None
             if wm_page is not None:

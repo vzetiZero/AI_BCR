@@ -463,6 +463,19 @@ WM_BETS_JS = r"""(() => {
             tie: read('moneyBoxTie')};
 })()"""
 
+# Số dư ví thật của bàn WM: nằm trong iframe bàn (``#userBalanceBox`` in ``VNDK 80.84``,
+# tức 80.84 đơn vị = 80.840đ). Đây là con số người dùng thấy trên màn hình.
+WM_WALLET_JS = r"""(() => {
+    const frame = document.getElementById('iframe_101');
+    let doc = document;
+    try { if (frame && frame.contentDocument) doc = frame.contentDocument; } catch (e) {}
+    const el = doc.getElementById('userBalanceBox');
+    if (!el) return {reason: 'no_wallet'};
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    const m = /([0-9][0-9.,]*)/.exec(text);
+    return {text: text, value: m ? m[1] : '', unit: 'VNDK'};
+})()"""
+
 # Nút thoát bàn của WM nằm ở khung gốc (góc phải trên) — đo rồi bấm chuột thật.
 WM_EXIT_JS = r"""(() => {
     const btn = document.getElementById('exit_game_btn');

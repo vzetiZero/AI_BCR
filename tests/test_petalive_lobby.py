@@ -95,8 +95,10 @@ class PetaliveSweepTests(unittest.TestCase):
             {"id": "", "title": "ignored", "letters": "P"},
         ]
         stream = FakeStream(tiles)
+        # Không patch time.monotonic bằng list cố định: module ``time`` là toàn cục nên
+        # patch này rò rỉ sang test khác và làm chúng ném StopIteration.
         with patch("aibcr.adapters.lobby_stream.time.monotonic",
-                   side_effect=[0.0, 0.0, 100.0]):
+                   side_effect=lambda: 0.0 if len(stream.calls) < 2 else 100.0):
             rows = stream._sweep_petalive(object(), 1, {"scroll": {"top": 0}}, 10, False)
         self.assertEqual(len(rows), 2)
         by_id = {row["table_id"]: row for row in rows}
@@ -112,7 +114,7 @@ class PetaliveSweepTests(unittest.TestCase):
                               "read_error": ""}])
         stream.scroll = {"top": 0, "max": 0, "client": 500}
         with patch("aibcr.adapters.lobby_stream.time.monotonic",
-                   side_effect=[0.0, 0.0, 100.0]):
+                   side_effect=lambda: 0.0 if len(stream.calls) < 2 else 100.0):
             stream._sweep_petalive(object(), 1, {"scroll": {"top": 0}}, 10, False)
         self.assertTrue(any(isinstance(call, tuple) and call[0] == "scroll" and call[2]
                             for call in stream.calls))

@@ -246,7 +246,9 @@ class BaccaratEnterValidTests(unittest.TestCase):
         reply = service.tool_start()
         self.assertTrue(reply["ok"])
         self.assertTrue(service.sim.running)
-        self.assertTrue(service.sim.entry_waiting, "vẫn chờ hết tay hiện tại mới nhận lệnh")
+        # Theo dõi ngay; cửa sổ cược vẫn được bảo vệ bởi gate chờ bàn dọn chip
+        # (`_wait_for_next_hand`) trước khi bấm chip thật.
+        self.assertFalse(service.sim.entry_waiting)
         self.assertIsNone(service.sim.pending)
 
     def test_enter_valid_hunts_without_the_tool(self):

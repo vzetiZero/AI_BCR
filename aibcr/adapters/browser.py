@@ -949,18 +949,24 @@ class BrowserSession:
             if not open_key and tables and histories:
                 break
             time.sleep(0.15)
-        if detect.get("kind") != "table":
+        # Khi đo iframe hụt (0×0 lúc reflow), vẫn dùng được bàn mà watcher nền đã nhận ra
+        # và lịch sử watcher đã gom — nếu không, cầu trên UI sẽ đứng im dù bàn vẫn chạy.
+        if not open_key:
+            open_key = getattr(self, "wm_open_key", "") or ""
+        cached = getattr(self, "wm_cache", None) or {}
+
+        # KHÔNG chặn theo ``detect.kind``: iframe bàn có lúc đo ra 0×0 khi trang reflow và
+        # khi đó vẫn còn dữ liệu bàn chảy về. Chỉ cần biết bàn đang mở (hoặc nhận được
+        # protocol 26/21) là đủ để trả cầu.
+        if not open_key and not tables and not histories:
             report["diag"]["reason"] = "wm_lobby"
-            return report
-        if not tables and not open_key:
-            report["diag"]["reason"] = "wm_no_data"
             return report
         # Sảnh chỉ gửi protocol 26 theo nhịp (khoảng vài chục giây/bàn), trong khi vòng
         # quét chạy mỗi 1,5 giây: giữ lịch sử đã nhận để lượt sau không phải chờ lại.
         for key, rounds in histories.items():
             if rounds and (key not in cache or len(rounds) >= len(cache[key])):
                 cache[key] = rounds
-        key = open_key or next(iter(tables), "")
+        key = open_key or next(iter(tables), "") or next(iter(cached), "")
         info = tables.get(key) or {}
         rounds = cache.get(key) or []
         letters = WM.letters(rounds)
@@ -1282,6 +1288,64 @@ class BrowserSession:
                 "totals": {"B": value.get("banker"), "P": value.get("player"),
                            "T": value.get("tie")},
                 "note": "WM chỉ hiện tổng cược cả bàn (VNDK); không tách được chip của bạn."}
+
+    def read_wm_wallet(self, timeout=6.0):
+        """Đọc số dư ví thật trên bàn WM (``VNDK 80.84`` = 80,84 đơn vị).
+
+        Trả ``{"ok", "text", "value"}``; ``value`` là số đơn vị đúng như trên web (1 đv =
+        1.000đ), dùng để đồng bộ vốn phiên với số dư người dùng thấy.
+        """
+        # Dùng kết nối CDP dùng chung khi có: hàm này được gọi mỗi lượt quét, mở kết nối
+        # mới liên tục sẽ làm tab chậm.
+        socket = getattr(self, "wm_socket", None)
+        value = None
+        if socket is not None and getattr(socket, "_command", None) is not None:
+            try:
+                value = socket.evaluate(WM.WM_WALLET_JS)
+            except Exception:
+                value = None
+        if value is None:
+            value = self._read_wm_wallet_once(timeout)
+            if value is None:
+                return {"ok": False, "error": "no_tab"}
+        if not isinstance(value, dict) or value.get("reason"):
+            return {"ok": False, "error": (value or {}).get("reason", "no_value")}
+        try:
+            amount = float(str(value.get("value") or "").replace(",", ""))
+        except ValueError:
+            return {"ok": False, "error": "bad_value", "text": value.get("text")}
+        return {"ok": True, "text": value.get("text") or "", "value": amount,
+                "unit": "VNDK"}
+
+    def _read_wm_wallet_once(self, timeout=6.0):
+        import websocket
+
+        page = self._cdp_page()
+        if page is None:
+            return None
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                validated_endpoint(page), suppress_origin=True, timeout=timeout,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
+            ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
+                "expression": WM.WM_WALLET_JS, "returnByValue": True, "silent": True}}))
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                message = json.loads(ws.recv())
+                if message.get("id") != 2:
+                    continue
+                return (message.get("result") or {}).get("result", {}).get("value")
+        except Exception:
+            return None
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        return None
 
     def _probe_wm_pages(self):
         """Tìm tab WM khi chưa biết: URL của nó không có dấu hiệu nhận biết.

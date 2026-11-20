@@ -162,7 +162,9 @@ class EnterValidPipelineTests(unittest.TestCase):
 
         service.tool_start()
         self.assertTrue(service.sim.running)
-        self.assertTrue(service.sim.entry_waiting, "chờ hết tay hiện tại rồi mới cược")
+        # Theo dõi ngay (không treo "chờ hết tay"): cửa sổ cược vẫn được bảo vệ bởi gate
+        # `_wait_for_next_hand` trước khi bấm chip thật.
+        self.assertFalse(service.sim.entry_waiting)
         self.assertIsNone(service.sim.pending)
 
     def test_tool_start_without_a_table_starts_the_hunt_itself(self):

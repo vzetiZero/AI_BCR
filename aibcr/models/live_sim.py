@@ -207,7 +207,13 @@ class LiveSimulation:
         self.note = "Đã chọn bàn."
 
     def start(self, row):
-        """Bắt đầu theo dõi bàn đã chọn; chờ hết tay hiện tại trước khi nhận lệnh."""
+        """Bắt đầu theo dõi bàn đã chọn.
+
+        Không chờ "hết tay hiện tại" nữa: WM chỉ gửi kết quả khi ván kết thúc, nên trạng
+        thái chờ đó có thể treo rất lâu và UI đứng im. Tay đang chạy không có lệnh nên
+        không bị tính tiền; lệnh đầu tiên được arm ngay cho tay kế và gate đặt chip
+        (`_wait_for_next_hand`) vẫn chờ bàn dọn chip trước khi bấm.
+        """
         if row["key"] != self.table_key:
             self.note = "Hãy chọn bàn trước."
             return False
@@ -217,9 +223,9 @@ class LiveSimulation:
             self.note = self.money.blocked[1]
             return False
         self.running = True
-        self.entry_waiting = True
+        self.entry_waiting = False
         self.pending = None
-        self.note = "Vừa vào bàn · chờ hết tay hiện tại rồi mới nhận lệnh cược."
+        self.note = "Đang theo dõi · sẽ tự đặt cược tay kế tiếp."
         return True
 
     def pause(self, reason="Đã tạm dừng. Không ghi thêm kết quả vào vốn."):
@@ -310,9 +316,36 @@ class LiveSimulation:
             return False
         if letters == self.letters:
             return False
-        if not letters.startswith(self.letters) or len(letters) != len(self.letters) + 1:
-            self.pause("Cầu nhảy tay, đổi shoe hoặc không khớp. Đã dừng, không tính bù lãi/lỗ.")
-            return False
+        if not letters.startswith(self.letters):
+            # Cầu không nối tiếp cầu cũ: bàn được vẽ lại/xem lịch sử khác nguồn, hoặc vừa
+            # đổi shoe. Đồng bộ lại thay vì dừng phiên — dừng ở đây là lý do UI "đứng im"
+            # dù bàn vẫn có kết quả mới.
+            lost = self.pending
+            self.letters = letters
+            self.results = list(letters)
+            self.entry_waiting = False
+            if lost:
+                self.pending = None
+                self.place_skips += 1
+                self.note = "Cầu đổi nguồn · đã đồng bộ lại %d tay, bỏ tay đang chờ chip." % len(letters)
+            else:
+                self.note = "Đã đồng bộ lại cầu (%d tay)." % len(letters)
+            return True
+        if len(letters) > len(self.letters) + 1:
+            # Nguồn dữ liệu nhảy nhiều tay (lần đầu đọc được lịch sử dài hơn): nhận cầu mới
+            # nhưng không tự tính lãi/lỗ cho các tay không đặt được.
+            jumped = len(letters) - len(self.letters)
+            self.letters = letters
+            self.results = list(letters)
+            self.entry_waiting = False
+            if self.pending:
+                self.pending = None
+                self.place_skips += 1
+                self.note = ("Nhảy %d tay cùng lúc · bỏ lệnh đang chờ, cầu đã cập nhật."
+                             % jumped)
+            else:
+                self.note = "Đã cập nhật cầu (+%d tay)." % jumped
+            return True
 
         if self.entry_waiting:
             self.letters = letters

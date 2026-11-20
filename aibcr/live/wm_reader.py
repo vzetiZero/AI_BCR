@@ -29,11 +29,11 @@ def list_pages(port=DEFAULT_PORT):
                 if isinstance(page, dict) and page.get("type") == "page"]
 
 
-def find_wm_table(port=DEFAULT_PORT):
-    """Tìm tab đang hiện màn hình bàn WM. Trả ``(page, detect)`` hoặc ``(None, {})``.
+def find_wm_page(port=DEFAULT_PORT):
+    """Tìm tab WM (sảnh hoặc bàn). Trả ``(page, detect)`` hoặc ``(None, {})``.
 
-    Không nhận diện bằng URL (mirror đổi liên tục) mà bằng cấu trúc iframe
-    ``iframe_101`` đang hiển thị trong tab.
+    Dùng khi bật AI live: lúc đó có thể còn ở sảnh, nhưng vẫn phải chọn bộ đọc WM (nó tự
+    chờ tới khi bàn mở) thay vì rơi sang bộ đọc Petalive và không bao giờ có dữ liệu.
     """
     import websocket
 
@@ -58,7 +58,7 @@ def find_wm_table(port=DEFAULT_PORT):
                 if message.get("id") != 2:
                     continue
                 value = (message.get("result") or {}).get("result", {}).get("value")
-                if isinstance(value, dict) and value.get("kind") == "table":
+                if isinstance(value, dict) and value.get("is_wm"):
                     return page, value
                 break
         except Exception:
@@ -68,6 +68,18 @@ def find_wm_table(port=DEFAULT_PORT):
                 ws.close()
             except Exception:
                 pass
+    return None, {}
+
+
+def find_wm_table(port=DEFAULT_PORT):
+    """Tìm tab đang hiện màn hình bàn WM. Trả ``(page, detect)`` hoặc ``(None, {})``.
+
+    Không nhận diện bằng URL (mirror đổi liên tục) mà bằng cấu trúc iframe
+    ``iframe_101`` đang hiển thị trong tab.
+    """
+    page, detect = find_wm_page(port)
+    if page is not None and detect.get("kind") == "table":
+        return page, detect
     return None, {}
 
 
@@ -89,6 +101,8 @@ class WMReader(threading.Thread):
         # MỌI bàn qua cùng WebSocket, nên phải lọc đúng bàn đang xem.
         self.open_key = ""
         self._probe_id = 0
+        self._seeded = set()
+        self.live_rounds = 0
         self.last_error = ""
         self.last_round = None
         self.last_state = None
@@ -132,6 +146,10 @@ class WMReader(threading.Thread):
             }
             if self.on_state is not None:
                 self.on_state(dict(self.last_state))
+        elif protocol == WM.PROTOCOL_HISTORY:
+            # Nạp lịch sử bàn ngay khi vào: không có bước này thì AI phải chờ vài ván mới
+            # có dữ liệu, và UI đứng ở "chưa phân tích" dù bàn đã có cầu dài.
+            self._seed_history(key, data)
         elif protocol == WM.PROTOCOL_RESULT:
             round_data = WM.decode_round(data)
             player = round_data["player_cards"]
@@ -161,6 +179,43 @@ class WMReader(threading.Thread):
                                    table=self.table)
             if self.on_round is not None:
                 self.on_round(payload)
+
+    def _seed_history(self, key, data):
+        """Nạp lịch sử bàn (protocol 26) để AI có dữ liệu ngay khi vừa vào.
+
+        Chỉ nạp một lần cho mỗi bàn và chỉ khi phiên chưa có ván nào: lịch sử cũ không
+        được tính là ván mới (``issue_id`` riêng ``:seed``), nên không ảnh hưởng việc
+        đặt cược tay tiếp theo.
+        """
+        rounds = WM.decode_history(data)
+        if not rounds:
+            return
+        if key in self._seeded:
+            return
+        self._seeded.add(key)
+        if self.on_round is None:
+            return
+        # Chỉ lấy ván CUỐI có đủ lá: nạp quá xa sẽ làm shoe lệch số bài thật còn lại.
+        for row in rounds[-30:]:
+            player = row.get("player_cards") or []
+            banker = row.get("banker_cards") or []
+            if not player or not banker:
+                continue
+            card_signature = ",".join(str(card) for card in sorted(player + banker))
+            self.on_round({
+                "issue_id": "%s:seed:%s" % (key, card_signature),
+                "table": "WM %s" % key,
+                "room_id": key,
+                "player_cards": [WM.canonical_card(card) for card in player],
+                "banker_cards": [WM.canonical_card(card) for card in banker],
+                "bets": [],
+                "winner": row.get("winner") or "",
+                "player_score": row.get("player_score"),
+                "banker_score": row.get("banker_score"),
+                "code": row.get("code"),
+                "wm_cards": {"player": player, "banker": banker},
+                "seed": True,
+            })
 
     # -------------------------------------------------------------------- vòng
     def run(self):

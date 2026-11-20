@@ -175,7 +175,7 @@ class MoneyBook:
         self.peak = value
         self.max_drawdown = 0.0
         self.check_limits()
-        return True, "Đã đồng bộ vốn thật: %s đ." % fmt_money(value)
+        return True, "Đã đồng bộ vốn thật: %s đv." % fmt_money(value)
 
     def rebase_to_balance(self):
         """Chốt lời xong một bàn: vốn ban đầu của bàn kế tiếp = số dư hiện tại.
@@ -210,7 +210,7 @@ class MoneyBook:
         self.peak = value
         self.max_drawdown = 0.0
         self.check_limits()
-        return True, "Đã cập nhật vốn theo số dư ví: %s đ." % fmt_money(value)
+        return True, "Đã cập nhật vốn theo số dư ví: %s đv." % fmt_money(value)
 
     def check_limits(self):
         won_pct = (self.balance - self.start_capital) / self.start_capital * 100 if self.start_capital else 0

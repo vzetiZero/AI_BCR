@@ -496,10 +496,6 @@ function renderBaccarat(snapshot) {
       const source = plan.source === 'AUTO' ? 'AI/predict' : (SIDE_NAME[plan.source] || plan.source || 'UI');
       planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)} · ${source}`;
       if (plan.verdict) reasonText = `${plan.verdict} · ${reasonText}`;
-    } else if (plan.playable === false) {
-      planState.textContent = 'BỎ TAY';
-      planState.className = 'hero-state stop';
-      planBox.textContent = 'predict chốt bỏ tay (EV âm/nhiễu). Chọn P/B/T nếu vẫn muốn đặt.';
     } else {
       planState.textContent = 'CHỜ';
       planState.className = 'hero-state';
