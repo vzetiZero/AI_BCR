@@ -19,6 +19,7 @@ from aibcr.adapters import wm as WM
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(HERE, "chrome_profile")
+WINDOW_POSITION = (40, 40)
 READER_JS = os.path.join(HERE, "reader.js")
 DRIVER_PATH = os.path.join(HERE, "drivers", "chromedriver.exe")
 LOBBY_PATH = "/frontend/evo/r3"

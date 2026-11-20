@@ -285,7 +285,7 @@ class WmReaderHandTests(unittest.TestCase):
         self.assertEqual(states[-1]["round"], 15)
 
 
-class HighestProbabilityBetTests(unittest.TestCase):
+class ExplicitSideBetTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -321,7 +321,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
         controller.tool_running = True
         return row
 
-    def test_auto_side_is_highest_probability_even_when_ev_is_negative(self):
+    def test_explicit_side_is_not_replaced_by_prediction(self):
         controller = self.make_controller()
 
         class FakeLive:
@@ -330,7 +330,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
 
         self_outer = self
         controller.live_session = FakeLive()
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 60})
+        controller.dispatch("bet.config", {"side": "B", "stake": 60})
         self.ready(controller)
         placed = []
         controller._place_armed_bet = lambda order: placed.append(dict(order))
@@ -339,9 +339,9 @@ class HighestProbabilityBetTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(placed[0]["side"], "B")
         self.assertEqual(placed[0]["stake"], 60.0)
-        self.assertIn("46.0%", placed[0]["reason"])
+        self.assertIn("người dùng", placed[0]["reason"])
 
-    def test_auto_side_falls_back_to_probabilities_when_top_side_missing(self):
+    def test_explicit_side_does_not_use_prediction_fallback(self):
         controller = self.make_controller()
 
         class FakeLive:
@@ -356,17 +356,17 @@ class HighestProbabilityBetTests(unittest.TestCase):
 
         self_outer = self
         controller.live_session = FakeLive()
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        controller.dispatch("bet.config", {"side": "P", "stake": 10})
         self.ready(controller)
         placed = []
         controller._place_armed_bet = lambda order: placed.append(dict(order))
         result, error = controller.dispatch("bet.place", {})
         self.assertIsNone(error)
         self.assertTrue(result["ok"], result)
-        self.assertEqual(placed[0]["side"], "B")
+        self.assertEqual(placed[0]["side"], "P")
 
-    def test_auto_bet_tick_retries_when_prediction_arrives_late(self):
-        """Lúc mới vào bàn chưa có xác suất: không khoá tay, tick sau đặt ngay."""
+    def test_auto_bet_tick_uses_explicit_side_without_prediction(self):
+        """Cửa do người dùng chọn có thể đặt dù chưa có dữ liệu dự đoán."""
         controller = self.make_controller()
         self_outer = self
         state = {"view": self.view()}
@@ -377,20 +377,14 @@ class HighestProbabilityBetTests(unittest.TestCase):
                 return state["view"]
 
         controller.live_session = FakeLive()
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        controller.dispatch("bet.config", {"side": "P", "stake": 10})
         self.ready(controller)
         placed = []
         controller._place_armed_bet = lambda order: placed.append(dict(order))
 
         controller._auto_bet_tick()
-        self.assertIsNone(controller.auto_bet_letters)
-        self.assertIsNone(controller.sim.pending)
-        self.assertEqual(placed, [])
-
-        state["view"] = self_outer.view()
-        controller._auto_bet_tick()
         self.assertTrue(controller.sim.pending, controller.auto_bet_note)
-        self.assertEqual(placed[0]["side"], "B")
+        self.assertEqual(placed[0]["side"], "P")
 
     def test_chip_check_between_rounds_compares_last_placed_order(self):
         """Ván vừa ngã, chip ván đó còn trên bàn: không được báo SAI CỬA theo lệnh tay kế."""
@@ -402,7 +396,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
                 return self_outer.view()
 
         controller.live_session = FakeLive()
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 60})
+        controller.dispatch("bet.config", {"side": "B", "stake": 60})
         self.ready(controller)
         controller._place_armed_bet = lambda order: None
         controller.dispatch("bet.place", {})
@@ -417,7 +411,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
         # Chưa có lệnh nào: vẫn so theo lệnh sắp chốt như trước.
         controller.last_order = None
         controller._resolve_order = lambda params=None: {
-            "side": "P", "stake": 60.0, "reason": "", "suggestion": {}}
+            "side": "P", "stake": 60.0, "reason": ""}
         self.assertEqual(controller.chip_check()["status"], "wrong_side")
 
     def test_next_hand_no_uses_live_hand_not_road_length(self):
@@ -458,7 +452,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
                 return state["view"]
 
         controller.live_session = FakeLive()
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        controller.dispatch("bet.config", {"side": "B", "stake": 10})
         self.ready(controller)
         placed = []
         controller._place_armed_bet = lambda order: placed.append(dict(order))
@@ -524,7 +518,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
 
         controller.live_session = FakeLive()
         controller.browser.wm_open_key = "101_1352"
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        controller.dispatch("bet.config", {"side": "B", "stake": 10})
         controller._follow_open_table()
         self.assertEqual(controller.sim.table_key, "id:101_1352")
         self.assertEqual(controller.sim.letters, "BBPB")
@@ -618,7 +612,7 @@ class HighestProbabilityBetTests(unittest.TestCase):
                 return state["view"]
 
         controller.live_session = FakeLive()
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+        controller.dispatch("bet.config", {"side": "B", "stake": 10})
         self.ready(controller)
         placed = []
         controller._place_armed_bet = lambda order: placed.append(dict(order))

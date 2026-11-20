@@ -284,7 +284,7 @@ class RpcTests(unittest.TestCase):
         self.assertFalse(result["has_key"])
         self.assertEqual(controller.ai_key_override, "")
 
-    def test_bet_place_uses_predicted_side_and_fixed_stake(self):
+    def test_bet_place_uses_explicit_side_even_when_prediction_disagrees(self):
         controller, _ = self.make_controller()
 
         class FakeLive:
@@ -295,7 +295,7 @@ class RpcTests(unittest.TestCase):
                 return self.view
 
         controller.live_session = FakeLive(self.live_view())
-        result, error = controller.dispatch("bet.config", {"side": "AUTO", "stake": 123})
+        result, error = controller.dispatch("bet.config", {"side": "P", "stake": 123})
         self.assertIsNone(error)
         self.assertTrue(result["ok"], result)
 
@@ -313,12 +313,12 @@ class RpcTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertTrue(result["ok"], result)
         self.assertEqual(len(placed), 1)
-        # AI nói T nhưng predict chốt P: lệnh phải đi theo predict.
+        # The user's selected side remains authoritative even when AI says T.
         self.assertEqual(placed[0]["side"], "P")
         self.assertEqual(placed[0]["stake"], 123.0)
-        self.assertIn("AI", placed[0]["reason"])
+        self.assertNotIn("AI", placed[0]["reason"])
 
-    def test_bet_place_refuses_auto_when_no_probabilities(self):
+    def test_ai_auto_side_is_rejected_and_explicit_side_is_allowed(self):
         controller, _ = self.make_controller()
 
         class FakeLive:
@@ -330,7 +330,10 @@ class RpcTests(unittest.TestCase):
 
         controller.live_session = FakeLive(
             self.live_view(playable=False, best_side=None, focus_side="P"))
-        controller.dispatch("bet.config", {"side": "AUTO", "stake": 90})
+        result, error = controller.dispatch("bet.config", {"side": "AUTO", "stake": 90})
+        self.assertIsNone(error)
+        self.assertFalse(result["ok"])
+        result, error = controller.dispatch("bet.config", {"side": "P", "stake": 90})
         row = {"key": "id:t1", "label": "Bàn test", "letters": "BBP",
                "ts": time.time(), "table_id": "t1", "stable": 3}
         controller.tables = {row["key"]: row}
@@ -343,18 +346,8 @@ class RpcTests(unittest.TestCase):
 
         result, error = controller.dispatch("bet.place", {})
         self.assertIsNone(error)
-        self.assertFalse(result["ok"])
-        self.assertIn("Chưa có cửa", result["error"])
-        self.assertEqual(placed, [])
-        self.assertIsNone(controller.sim.pending)
-
-        # Người dùng chọn thủ công thì vẫn được đặt — AI không ép bỏ tay.
-        result, error = controller.dispatch("bet.config", {"side": "B", "stake": 90})
         self.assertTrue(result["ok"], result)
-        result, error = controller.dispatch("bet.place", {})
-        self.assertIsNone(error)
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(placed[-1]["side"], "B")
+        self.assertEqual(placed[-1]["side"], "P")
 
 
 if __name__ == "__main__":

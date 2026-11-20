@@ -91,16 +91,24 @@ def main(argv=None):
     parser.add_argument("--cdp-port", type=int, default=None)
     parser.add_argument("--profile-dir", default=None)
     parser.add_argument("--state", default=None)
+    parser.add_argument("--window-position", nargs=2, type=int, default=None)
+    parser.add_argument("--window-size", nargs=2, type=int, default=None)
     args = parser.parse_args(argv)
 
     port, profile, state_name = GAMES[args.game]
     # Cách ly từng trò: đặt lại hằng số của adapter TRƯỚC khi tạo service.
     BR.CDP_PORT = args.cdp_port or port
     BR.PROFILE_DIR = str(ROOT / (args.profile_dir or profile))
+    if args.window_position:
+        BR.WINDOW_POSITION = tuple(args.window_position)
     state_path = pathlib.Path(args.state) if args.state else ROOT / state_name
 
     emit = Emitter()
     service = build_service(args.game, emit, state_path)
+    if args.window_size:
+        service.config["chrome_window"].update({"width": args.window_size[0],
+                                                "height": args.window_size[1],
+                                                "fullscreen": False})
     emit.event("ready", {"game": args.game, "cdp_port": BR.CDP_PORT,
                          "profile": BR.PROFILE_DIR})
     emit.event("state", service.snapshot())

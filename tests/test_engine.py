@@ -131,6 +131,13 @@ class DispatchTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_legacy_auto_side_disables_auto_place(self):
+        service = make_service()
+        migrated = service._normalize_config({**service.config, "bet_side": "AUTO",
+                                              "auto_place": True})
+        self.assertEqual(migrated["bet_side"], "P")
+        self.assertFalse(migrated["auto_place"])
+
     def test_config_set_persists_the_per_hand_bet_order(self):
         service = make_service()
         reply = service.config_set({"bet_side": "P", "bet_stake": 250.5})

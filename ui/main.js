@@ -17,8 +17,10 @@ const PYTHON_CANDIDATES = [
 let mainWindow = null;
 
 class Engine {
-  constructor(game) {
+  constructor(game, profileIndex = 1, layout = null) {
     this.game = game;
+    this.profileIndex = profileIndex;
+    this.layout = layout;
     this.child = null;
     this.buffer = '';
     this.nextId = 1;
@@ -83,7 +85,13 @@ class Engine {
     this.stopping = false;
     this.stderrTail = '';
     this.buffer = '';
-    const child = spawn(python, ['-m', 'aibcr.service.engine', '--game', this.game], {
+    const args = ['-m', 'aibcr.service.engine', '--game', 'baccarat',
+      '--cdp-port', String(9222 + this.profileIndex - 1),
+      '--profile-dir', this.profileIndex === 1 ? 'chrome_profile' : `chrome_profile_${this.profileIndex}`,
+      '--state', this.profileIndex === 1 ? 'aibcr_state_baccarat.json' : `aibcr_state_baccarat_${this.profileIndex}.json`];
+    if (this.layout) args.push('--window-position', String(this.layout.left), String(this.layout.top),
+      '--window-size', String(this.layout.width), String(this.layout.height));
+    const child = spawn(python, args, {
       cwd: PROJECT_ROOT,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       windowsHide: true,
@@ -232,9 +240,8 @@ class Engine {
   }
 }
 
-const engines = {
-  baccarat: new Engine('baccarat'),
-};
+const engines = { baccarat: new Engine('baccarat', 1) };
+let activeProfileCount = 1;
 
 // Lưới an toàn cuối: Electron biến mọi exception chưa bắt ở main process thành hộp
 // thoại đỏ "A JavaScript error occurred in the main process" và app đứng. Ghi log rồi
@@ -281,6 +288,45 @@ ipcMain.handle('engine:call', async (_event, { game, method, params }) => {
   } catch (error) {
     return { ok: false, error: String(error.message || error), ms: Date.now() - started };
   }
+});
+
+ipcMain.handle('profiles:open', async (_event, { count }) => {
+  const total = Math.max(1, Math.min(8, Math.trunc(Number(count) || 1)));
+  activeProfileCount = total;
+  const { screen } = require('electron');
+  const area = screen.getPrimaryDisplay().workAreaSize;
+  const columns = Math.ceil(Math.sqrt(total));
+  const rows = Math.ceil(total / columns);
+  const width = Math.max(520, Math.floor(area.width / columns));
+  const height = Math.max(360, Math.floor(area.height / rows));
+  const started = [];
+  const positions = [];
+  for (let i = 1; i <= total; i += 1) {
+    const game = i === 1 ? 'baccarat' : `baccarat-profile-${i}`;
+    const layout = {
+      left: ((i - 1) % columns) * width,
+      top: Math.floor((i - 1) / columns) * height,
+      width, height,
+    };
+    if (!engines[game]) engines[game] = new Engine(game, i, {
+      ...layout,
+    });
+    engines[game].layout = layout;
+    started.push(engines[game]);
+    positions.push(layout);
+  }
+  if (started.length) {
+    await started[0].call('chrome.window', { ...positions[0], percent: 100, fullscreen: false, tile: true });
+  }
+  const replies = await Promise.all(started.map((engine) => engine.call('chrome.open')));
+  return { ok: true, count: total, replies };
+});
+
+ipcMain.handle('profiles:enter-table', async () => {
+  const targets = Array.from({ length: activeProfileCount }, (_, index) => engines[
+    index === 0 ? 'baccarat' : `baccarat-profile-${index + 1}`]).filter(Boolean);
+  const replies = await Promise.all(targets.map((engine) => engine.call('table.enterValid')));
+  return { ok: true, count: targets.length, replies };
 });
 
 ipcMain.handle('app:info', () => ({

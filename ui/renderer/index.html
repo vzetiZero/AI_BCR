@@ -109,7 +109,6 @@
                 <div class="bet-grid">
                   <label class="field">Cửa
                     <select id="ba-bet-side">
-                      <option value="AUTO">Theo AI (AUTO)</option>
                       <option value="P">Player (P)</option>
                       <option value="B">Banker (B)</option>
                       <option value="T">Hoà (T)</option>
@@ -249,7 +248,7 @@
             </div>
 
             <div class="card pad">
-              <h3>Lệnh cược mỗi tay</h3>
+            <h3>Lệnh theo cửa bạn chọn</h3>
             </div>
 
             <div class="card pad">
@@ -267,6 +266,14 @@
 
             <div class="card pad">
               <h3>Cửa sổ Chrome</h3>
+              <label class="field">Số profile mở đồng thời
+                <input id="ba-profile-count" type="number" min="1" max="8" step="1" value="4" />
+              </label>
+              <div class="row">
+                <button class="btn primary" id="ba-open-profiles">Mở đồng thời profile</button>
+                <button class="btn" id="ba-enter-profiles">Vào cùng bàn trên các profile</button>
+              </div>
+              <p class="muted">Mỗi cửa sổ dùng phiên đăng nhập riêng. Đăng nhập từng profile lần đầu, mở sảnh chung, rồi chọn “Vào cùng bàn”.</p>
               <label class="switch"><input type="checkbox" id="ba-fullscreen" /><span>Toàn màn hình</span></label>
               <div class="grid two tight">
                 <label class="field">Ngang

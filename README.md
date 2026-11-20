@@ -174,17 +174,13 @@ ngay (`table.cancelEnter`).
 Người dùng chỉ cần mở Chrome đứng ở sảnh, rồi bấm **Chạy tool**:
 
 1. tool tự gắn Chrome/ mở tab, nhận sảnh, quét và mở bàn đầu tiên có mã bàn;
-2. tự theo dõi cầu và **tự đặt cược từng tay** theo cấu hình (cửa `AUTO/P/B/T` + số đơn
-   vị); mỗi tay chỉ arm một lần (khoá theo chuỗi cầu), chờ bàn dọn chip rồi mới bấm.
+2. The tool tracks results and places only the explicitly selected `P`, `B`, or `T` side at the configured stake.
    WM công bố kết quả xong mới mở cửa cược ván kế (~25–35 giây sau) nên gate chờ
    tối đa `BET_GATE_TIMEOUT = 45` giây trước khi bấm;
 3. nếu chưa vào được bàn (Chrome vừa mở, chưa đăng nhập) tool tự thử lại mỗi 15 giây;
 4. bấm **Dừng tool** → dừng phiên và tự rời bàn về sảnh.
 
-Cửa **AUTO** đánh đúng **cửa có xác suất ra cao nhất** do `predict` tính ở mỗi tay
-(không phụ thuộc `playable`), nên tay nào có dự đoán là tay đó được đặt. Muốn tự ép cửa
-thì chọn cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in khay chip theo nghìn
-đồng), mặc định `10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
+The wager side is always selected explicitly by the user: `P`, `B`, or `T`. AI and predictions are for analysis only; they never choose a side or trigger a wager. One table unit is 1,000 VND.
 
 ## Đọc bàn live + dự đoán
 
@@ -205,7 +201,7 @@ Mã hoá lá bài đã đối chiếu **129/129 ván thật**:
 **Số liệu là của `predict.py`**: xác suất P/B/T, EV, sai số, shoe còn lại, cửa tốt
 nhất (`best_side`), cửa có **xác suất cao nhất** (`top_side`) và cờ `playable`.
 `playable = false` khi EV tốt nhất không vượt `2 × sai số Monte Carlo` — chỉ là nhãn
-cảnh báo, không còn chặn lệnh AUTO.
+`playable = false` marks a prediction without sufficient edge; it does not alter the user selected side.
 
 **Dạng cầu** (`pattern_stats`): đếm số tay mỗi cửa, độ dài chuỗi đang chạy, và tỉ lệ
 cửa kế tiếp của những lần trước có **cùng cửa + cùng độ dài chuỗi** (cần ≥ 8 mẫu mới
@@ -256,37 +252,15 @@ Các biến tuỳ chọn khác: `BCR_AI_MODE`, `BCR_AI_MODEL`, `BCR_AI_URL`, `BC
 Nếu từng dán key vào code/chat/bug report thì coi như key đã lộ: **xoay key đó** ở
 nhà cung cấp. Không dán giá trị key vào README, test, log hay issue.
 
-**AI không tham gia quyết định đặt cược**: AI chỉ viết nhận định/giải thích; controller
-chỉ lấy cửa từ số liệu `predict` (`top_side` = xác suất cao nhất) — không đọc
-`analysis.focus_side` do AI viết. AI cũng không được trả số liệu mới; mọi con số trên
-UI đều lấy từ `predict.predict()`.
+**AI does not control wagering**: predictions and AI commentary remain in the analysis view only.
 
-## Lệnh cược từng tay + tự đặt chip thật
+## Wager choices
 
-Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, phần **TAY KẾ TIẾP**:
+In the play tab, choose `P`, `B`, or `T` explicitly. The `AUTO` mode that used predictions to choose a side has been removed. `bet.config` stores the chosen side and stake. If `auto_place` is enabled, the tool places only the explicitly selected side; `bet.place` requests a one-time wager. AI live can still analyze the table but cannot change or choose a wager.
 
-- **Cửa**: `Theo AI (AUTO)` hoặc `P` / `B` / `T`.
-- **Chip cố định**: số VN2 đặt cho tay đó (mặc định 100).
-- **Lưu lệnh** (`bet.config`): chỉ đổi cấu hình cho tay kế.
-- **Tự đặt cược** (`bet.place`): lưu form rồi chốt lệnh ngay.
+## Multiple browser profiles
 
-Hành vi của `bet.place`:
-
-1. Từ chối nếu chưa vào bàn, chưa chạy tool, đang chờ tay hiện tại kết thúc, đang
-   bấm lượt khác, hoặc đang tắt `auto_place`.
-2. `AUTO`: lấy `top_side` (cửa có xác suất ra cao nhất) từ `predict`; nếu bản
-   snapshot cũ không có `top_side` thì tự tính từ `probabilities`. Chỉ từ chối khi
-   chưa đọc được xác suất nào. AI có nói gì cũng không đổi cửa.
-3. Chốt lệnh vào `sim.pending`, chờ gate `table_is_clear()` (cả 3 cửa về 0) rồi gọi
-   `TB.place_bet(...)` — bấm chip thật trên site, có tuỳ chọn chuột người thật.
-4. Chỉ tính lãi/lỗ khi có xác nhận đã bấm chip trong cửa sổ đúng. Tay nào không đặt
-   được thì ghi `not_placed`, không đụng vốn; sau `PLACE_SKIP_LIMIT` tay liên tiếp thì
-   dừng để người dùng kiểm tra khay chip.
-5. `PLACE_CONFIRM_TIMEOUT` / `PLACE_*` trong `aibcr/config.py` giới hạn thời gian gate
-   và xác nhận, tránh thread chết làm treo phiên.
-
-Sổ vốn, lịch sử và chốt lời vẫn dùng `aibcr/models/money.py`; dữ liệu lưu ở file
-state (không chứa API key).
+Use the profile count and **Open profiles simultaneously** controls in Configuration to launch up to eight isolated Chrome sessions. Each profile gets its own user-data directory and CDP port, and windows are tiled across the display. Sign in to each profile once, then use **Enter the same table on all profiles** to send the table-entry action concurrently.
 
 ## Lệnh JSON-RPC
 
@@ -297,7 +271,7 @@ lobby.enter|sweep|back,
 tables, table.enterValid|cancelEnter|open|select|leave,
 tool.start|stop, scan, chips.read,
 live.start|stop|state|analyze, ai.key.set,
-bet.config|bet.place,
+bet.config|bet.place,  # explicit P/B/T selection only
 config.get|set, session.new|reset|recover, log.clear, export
 ```
 

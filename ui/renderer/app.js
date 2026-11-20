@@ -590,9 +590,8 @@ function renderBaccarat(snapshot) {
     } else if (plan.action === 'bet') {
       planState.textContent = plan.armed ? 'ĐÃ CHỐT' : 'SẴN SÀNG';
       planState.className = 'hero-state bet';
-      const source = plan.source === 'AUTO' ? 'AI/predict' : (SIDE_NAME[plan.source] || plan.source || 'UI');
+      const source = SIDE_NAME[plan.source] || plan.source || 'UI';
       planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)} · ${source}`;
-      if (plan.verdict) reasonText = `${plan.verdict} · ${reasonText}`;
     } else {
       planState.textContent = 'CHỜ';
       planState.className = 'hero-state';
@@ -657,6 +656,10 @@ function renderBaccarat(snapshot) {
 
 /* ============================== sự kiện chung ============================== */
 api.onEngineEvent(({ game, event, data }) => {
+  if (game !== 'baccarat') {
+    if (event === 'log') appendLog('baccarat', data.level || 'info', `[${game}] ${data.text || ''}`);
+    return;
+  }
   if (event === 'state') {
     renderBaccarat(data);
     return;
@@ -798,6 +801,17 @@ $('#ba-save-window').addEventListener('click', async () => {
     fullscreen: $('#ba-fullscreen').checked,
   });
   if (reply) toast(reply.note || 'Đã lưu cửa sổ Chrome.');
+});
+
+$('#ba-open-profiles').addEventListener('click', async () => {
+  const count = Math.max(1, Math.min(8, Number($('#ba-profile-count').value) || 1));
+  const result = await api.openProfiles(count);
+  if (result && result.ok) toast(`Đang mở đồng thời ${result.count} profile Chrome.`);
+});
+
+$('#ba-enter-profiles').addEventListener('click', async () => {
+  const result = await api.enterProfileTable();
+  if (result && result.ok) toast(`Đã gửi lệnh vào bàn đồng thời cho ${result.count} profile.`);
 });
 
 $('#ba-save-url').addEventListener('click', async () => {

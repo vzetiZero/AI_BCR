@@ -49,8 +49,8 @@ DEFAULT_CONFIG = {
     "auto_hunt": True,
     "auto_recover": True,
     "tables_to_play": 1,
-    # Lệnh cược mặc định; UI có thể đổi từng tay. AUTO = lấy cửa từ AI.
-    "bet_side": "AUTO",         # AUTO | P | B | T
+    # Lệnh cược mặc định; cửa luôn do người dùng chọn trực tiếp.
+    "bet_side": "P",            # P | B | T; wagering never follows AI output
     # 10 đơn vị = 10.000đ (WM in khay chip theo nghìn đồng, 1 đv = 1.000đ).
     "bet_stake": 10.0,          # số đơn vị cố định cho mỗi tay
     "start_url": BR.START_URL,
@@ -210,13 +210,16 @@ class BaccaratController:
                     "live_exit_streak", "auto_cycle", "min_hands", "max_hands",
                     "max_streak", "min_lead", "max_lead", "tie_side"):
             config.pop(key, None)
+        legacy_ai_side = str(config.get("bet_side") or "").strip().upper() == "AUTO"
         config["capital"] = max(1.0, _as_float(config.get("capital"), DEFAULT_CONFIG["capital"]))
         config["take_profit_pct"] = max(1.0, _as_float(config.get("take_profit_pct"),
                                                        DEFAULT_CONFIG["take_profit_pct"]))
         for key in ("favorites_only", "human_mouse", "auto_place", "auto_hunt", "auto_recover"):
             config[key] = bool(config.get(key, DEFAULT_CONFIG[key]))
-        side = str(config.get("bet_side") or "AUTO").strip().upper()
-        config["bet_side"] = side if side in ("AUTO", "P", "B", "T") else "AUTO"
+        if legacy_ai_side:
+            config["auto_place"] = False
+        side = str(config.get("bet_side") or "P").strip().upper()
+        config["bet_side"] = side if side in ("P", "B", "T") else "P"
         config["bet_stake"] = min(1000000.0, max(1.0, _as_float(
             config.get("bet_stake"), DEFAULT_CONFIG["bet_stake"])))
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
@@ -336,7 +339,7 @@ class BaccaratController:
     def _window_pos(self, window):
         if window.get("fullscreen"):
             return None
-        return (40, 40)
+        return getattr(BR, "WINDOW_POSITION", (40, 40))
 
     def _window_text(self, window):
         return ("CHROME · toàn màn hình · tỉ lệ %d%%" % window["percent"] if window.get("fullscreen")
@@ -400,69 +403,18 @@ class BaccaratController:
         rows.sort(key=lambda item: (not item["ready"], item["label"].casefold()))
         return rows
 
-    def _ai_suggestion(self):
-        """Cửa để đặt tiền: cửa có xác suất ra cao nhất do ``predict`` tính.
-
-        ``analysis.focus_side`` là văn bản do AI trả về nên KHÔNG được dùng để chọn
-        cửa; AI chỉ giải thích. Thứ tự lấy: ``top_side`` (xác suất cao nhất) →
-        tự tính lại từ ``probabilities`` → ``best_side`` nếu bản predict cũ không có.
-        """
-        live = self.live_session.snapshot() if self.live_session is not None else None
-        result = {"side": None, "verdict": "", "playable": False, "confidence": "",
-                  "explanation": "", "model": "", "round": None,
-                  "probability": None, "top_side": None, "pattern": ""}
-        if not live:
-            return result
-        analysis = live.get("analysis") or {}
-        prediction = live.get("prediction") or {}
-        result.update({
-            "verdict": str(analysis.get("verdict") or ""),
-            "confidence": str(analysis.get("confidence") or ""),
-            "explanation": str(analysis.get("explanation") or ""),
-            "model": str(analysis.get("model") or ""),
-            "round": analysis.get("round"),
-            "playable": bool(prediction.get("playable")),
-            "pattern": str(prediction.get("pattern_note") or ""),
-        })
-        probabilities = prediction.get("probabilities") or {}
-        key_of = {"P": "p_player", "B": "p_banker", "T": "p_tie"}
-        side = prediction.get("top_side")
-        if side not in key_of:
-            ranked = [(float(probabilities.get(key_of[s]) or 0.0), s) for s in ("P", "B", "T")]
-            ranked.sort(reverse=True)
-            side = ranked[0][1] if ranked and ranked[0][0] > 0 else None
-        if side in key_of:
-            result["side"] = side
-            result["top_side"] = side
-            result["probability"] = probabilities.get(key_of[side])
-        elif prediction.get("best_side") in key_of:
-            result["side"] = prediction["best_side"]
-            result["top_side"] = result["side"]
-        return result
-
     def _resolve_order(self, params=None):
-        """Ghép lệnh từ cấu hình UI (mỗi tay) + gợi ý AI cho chế độ AUTO."""
+        """Resolve the explicit user-selected side; prediction output never selects a wager."""
         params = params or {}
         side = str(params.get("side", self.bet_config["side"])).strip().upper()
         stake = _as_float(params.get("stake", self.bet_config["stake"]),
                           self.bet_config["stake"])
-        suggestion = self._ai_suggestion()
-        reason = "Lệnh UI"
-        if side == "AUTO":
-            side = suggestion["side"]
-            bits = []
-            if suggestion.get("top_side"):
-                bits.append("%s %.1f%%" % (suggestion["top_side"],
-                                           float(suggestion.get("probability") or 0) * 100))
-            if suggestion["verdict"]:
-                bits.append(suggestion["verdict"])
-            reason = ("Theo AI · " + " · ".join(bits)) if bits else "Theo AI"
         return {"side": side if side in ("P", "B", "T") else None,
                 "stake": min(1000000.0, max(1.0, stake)),
-                "reason": reason, "suggestion": suggestion}
+                "reason": "Lệnh do người dùng chọn"}
 
     def _plan(self):
-        """Lệnh cược hiện tại cho tay kế tiếp (do UI hoặc predict chốt)."""
+        """Current wager plan based on the explicit user choice."""
         order = self._resolve_order()
         pending = self.sim.pending
         return {
@@ -472,10 +424,6 @@ class BaccaratController:
             "stake": order["stake"],
             "reason": order["reason"],
             "armed": pending is not None,
-            "verdict": order["suggestion"]["verdict"],
-            "playable": order["suggestion"]["playable"],
-            "confidence": order["suggestion"]["confidence"],
-            "ai_side": order["suggestion"]["side"],
             "source": self.bet_config["side"],
         }
 
@@ -563,8 +511,6 @@ class BaccaratController:
                     "side": self.bet_config["side"],
                     "stake": _finite(self.bet_config["stake"]),
                     "pending": dict(sim.pending) if sim.pending else None,
-                    "ai_side": plan["ai_side"],
-                    "verdict": plan["verdict"],
                 },
                 "money": money,
                 "chips": {
@@ -664,11 +610,19 @@ class BaccaratController:
         return {"ok": True, "note": "Đang ngắt kết nối…"}
 
     def apply_window(self, params):
+        if params.get("left") is not None and params.get("top") is not None:
+            try:
+                BR.WINDOW_POSITION = (int(params["left"]), int(params["top"]))
+            except (TypeError, ValueError):
+                pass
         window = BR.normalize_window(
             (params.get("width", self._window()["width"]),
              params.get("height", self._window()["height"])),
             params.get("percent", self._window()["percent"]),
             params.get("fullscreen", self._window()["fullscreen"]))
+        if params.get("tile"):
+            window["width"] = min(7680, max(520, _as_int(params.get("width"), window["width"])))
+            window["height"] = min(4320, max(200, _as_int(params.get("height"), window["height"])))
         self.config["chrome_window"] = window
         self._save_state()
         if not self.browser.connected:
@@ -1124,12 +1078,7 @@ class BaccaratController:
         return key == table or key.endswith(table) or table.endswith(key)
 
     def _auto_bet_tick(self):
-        """Tự chốt lệnh cho tay kế khi tool đang chạy (chế độ một nút).
-
-        Chỉ arm một lần cho mỗi tay: khoá theo chuỗi cầu hiện tại, nên không bấm lặp lại
-        cùng một tay. Cửa AUTO đánh đúng cửa có xác suất ra cao nhất do ``predict`` tính;
-        cửa cố định P/B/T thì đánh mọi tay theo đúng cấu hình người dùng.
-        """
+        """Place the explicitly selected side once per hand while the tool is running."""
         if not self.tool_running:
             return
         if not self.sim.running:
@@ -1189,9 +1138,7 @@ class BaccaratController:
             # Chưa có xác suất (dự đoán đang chạy/nạp lịch sử): KHÔNG khoá tay này,
             # tick sau thử lại ngay khi predict xong — nhờ vậy tay đầu tiên sau khi
             # nạp cầu cũ vẫn được đặt trong cửa sổ cược hiện tại.
-            note = ("Chưa có cửa để đặt (đang chờ xác suất) · sẽ thử lại."
-                    if self.bet_config["side"] == "AUTO"
-                    else "Chưa chọn được cửa · sẽ thử lại.")
+            note = "Chua chon duoc cua; will retry on the next tick."
             if note != self.auto_bet_note:
                 self.auto_bet_note = note
                 self.log(note, "info")
@@ -2437,12 +2384,12 @@ class BaccaratController:
         return LIVE_AI.check_model(cfg)
 
     def bet_config_set(self, params):
-        """Cấu hình lệnh cho tay kế tiếp: cửa (AUTO/P/B/T) + số chip cố định."""
+        """Configure the next hand using an explicit P/B/T choice and fixed stake."""
         params = params or {}
         with self.lock:
             side = str(params.get("side", self.bet_config["side"])).strip().upper()
-            if side not in ("AUTO", "P", "B", "T"):
-                return {"ok": False, "error": "Cửa phải là AUTO, P, B hoặc T."}
+            if side not in ("P", "B", "T"):
+                return {"ok": False, "error": "Cửa phải là P, B hoặc T; không hỗ trợ chọn cửa bằng AI."}
             stake = _as_float(params.get("stake", self.bet_config["stake"]),
                               self.bet_config["stake"])
             if not 1.0 <= stake <= 1000000.0:
