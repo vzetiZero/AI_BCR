@@ -356,6 +356,103 @@ class RpcTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(placed[-1]["side"], "B")
 
+    def test_bet_config_persists_progression_and_cap(self):
+        controller, _ = self.make_controller()
+        result, error = controller.dispatch("bet.config", {
+            "side": "B", "stake": 20,
+            "progression": "win_repeat_loss_double", "max_stake": 500,
+        })
+        self.assertIsNone(error)
+        self.assertTrue(result["ok"], result)
+        saved = json.loads(controller.state_path.read_text(encoding="utf-8"))["settings"]
+        self.assertEqual(saved["bet_progression"], "win_repeat_loss_double")
+        self.assertEqual(saved["bet_max_stake"], 500.0)
+
+        result, error = controller.dispatch("bet.config", {"progression": "martingale"})
+        self.assertIsNone(error)
+        self.assertFalse(result["ok"])
+
+        result, error = controller.dispatch("bet.config", {"stake": 100, "max_stake": 50})
+        self.assertIsNone(error)
+        self.assertFalse(result["ok"])
+        self.assertIn("tối đa", result["error"])
+
+
+class ProgressionTests(unittest.TestCase):
+    """Cơ chế mức cược: thắng đặt lại mức, thua gấp đôi (thuần model)."""
+
+    def test_flat_never_changes(self):
+        from aibcr.models.live_sim import PROGRESS_FLAT, progress_stake
+
+        for outcome in (None, "win", "loss", "push"):
+            self.assertEqual(progress_stake(20, current=40, last_outcome=outcome,
+                                            mode=PROGRESS_FLAT), 20)
+
+    def test_win_repeats_and_loss_doubles(self):
+        from aibcr.models.live_sim import PROGRESS_WIN_REPEAT_LOSS_DOUBLE as MODE
+        from aibcr.models.live_sim import progress_stake
+
+        self.assertEqual(progress_stake(20, current=None, last_outcome=None, mode=MODE), 20)
+        self.assertEqual(progress_stake(20, current=20, last_outcome="win", mode=MODE), 20)
+        self.assertEqual(progress_stake(20, current=20, last_outcome="loss", mode=MODE), 40)
+        self.assertEqual(progress_stake(20, current=40, last_outcome="loss", mode=MODE), 80)
+        # Hoà/push và tay không đặt được không phải thua: giữ nguyên mức đang đặt.
+        self.assertEqual(progress_stake(20, current=40, last_outcome="push", mode=MODE), 40)
+
+    def test_cap_stops_the_doubling(self):
+        from aibcr.models.live_sim import PROGRESS_WIN_REPEAT_LOSS_DOUBLE as MODE
+        from aibcr.models.live_sim import progress_stake
+
+        self.assertEqual(progress_stake(20, current=400, last_outcome="loss", mode=MODE,
+                                        max_stake=500), 500)
+
+    def test_order_uses_progression_and_exposes_base_stake(self):
+        controller = BaccaratController(
+            str(pathlib.Path(tempfile.mkdtemp()) / "s.json"),
+            type("E", (), {"event": lambda self, name, data: None})())
+        self.addCleanup(controller.shutdown)
+        controller.dispatch("bet.config", {"side": "P", "stake": 20,
+                                          "progression": "win_repeat_loss_double"})
+        controller.sim.progress_stake = 40.0
+        controller.sim.last_outcome = "loss"
+        order = controller._resolve_order()
+        self.assertEqual(order["side"], "P")
+        self.assertEqual(order["stake"], 80.0)
+        self.assertEqual(order["base_stake"], 20.0)
+        self.assertEqual(order["progression"], "win_repeat_loss_double")
+        self.assertIn("Gấp đôi", order["reason"])
+
+        controller.sim.last_outcome = "win"
+        order = controller._resolve_order()
+        self.assertEqual(order["stake"], 40.0)
+
+    def test_settle_feeds_the_next_stake(self):
+        """Kết toán một tay ghi lại mức đã đặt + kết quả cho tay kế."""
+        from aibcr.models import engine as E
+        from aibcr.models import money as M
+        from aibcr.models.live_sim import LiveSimulation
+
+        book = M.MoneyBook(capital=1000.0, unit=20.0)
+        sim = LiveSimulation(book, unit=20.0)
+        row = {"key": "id:t1", "label": "Bàn", "letters": "B", "ts": time.time(),
+               "table_id": "t1", "stable": 3}
+        sim.bind(row)
+        sim.start(row)
+        sim.letters = ""
+        sim.set_order(E.BANKER, 40.0, baseline="")
+        sim.mark_placing()
+        sim.mark_placed(True)
+        sim.process(dict(row, letters="B"))
+        self.assertEqual(sim.progress_stake, 40.0)
+        self.assertEqual(sim.last_outcome, "win")
+
+        sim.set_order(E.BANKER, 40.0, baseline="B")
+        sim.mark_placing()
+        sim.mark_placed(True)
+        sim.process(dict(row, letters="BP"))
+        self.assertEqual(sim.last_outcome, "loss")
+        self.assertEqual(sim.progress_stake, 40.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

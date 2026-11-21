@@ -15,6 +15,38 @@ from aibcr.models import chips
 from aibcr.models import engine as E
 from aibcr.models import money as M
 
+# Cơ chế mức cược mỗi tay. ``flat`` giữ đúng mức gốc; ``win_repeat_loss_double``
+# đặt lại đúng mức vừa đặt sau khi thắng, gấp đôi sau khi thua.
+PROGRESS_FLAT = "flat"
+PROGRESS_WIN_REPEAT_LOSS_DOUBLE = "win_repeat_loss_double"
+PROGRESS_MODES = (PROGRESS_FLAT, PROGRESS_WIN_REPEAT_LOSS_DOUBLE)
+PROGRESS_NAME = {
+    PROGRESS_FLAT: "Cược cố định mỗi tay",
+    PROGRESS_WIN_REPEAT_LOSS_DOUBLE: "Thắng giữ mức · thua gấp đôi",
+}
+
+
+def progress_stake(base, current=None, last_outcome=None, mode=PROGRESS_FLAT,
+                   max_stake=None):
+    """Mức cược cho tay kế tiếp theo cơ chế đã chọn (thuần số học, không I/O).
+
+    - ``flat``: luôn đúng mức gốc.
+    - ``win_repeat_loss_double``: tay trước thắng thì đặt lại đúng mức vừa đặt; tay
+      trước thua thì gấp đôi. Hoà (push) và tay không đặt được chip không phải thua
+      nên giữ nguyên mức, không nhân đôi.
+    - ``max_stake`` (số dư/vốn) chặn mức cược để không gửi lệnh vượt tiền thật.
+    """
+    base = max(1.0, float(base or 0))
+    if mode != PROGRESS_WIN_REPEAT_LOSS_DOUBLE:
+        stake = base
+    elif last_outcome == "loss":
+        stake = max(base, float(current or base) * 2.0)
+    else:
+        stake = float(current or base)
+    if max_stake is not None:
+        stake = min(stake, max(1.0, float(max_stake)))
+    return max(1.0, stake)
+
 
 def row_problem(row, now=None, check_fresh=True):
     """Lỗi đọc dữ liệu thật sự (mất kết nối, dữ liệu cũ, xung đột)."""
@@ -194,6 +226,10 @@ class LiveSimulation:
         self.place_skips = 0
         self.cycle_done = False
         self.take_profit_done = False
+        # Mức cược thực tế của tay vừa đặt + kết quả tay đó: hai số này nuôi cơ chế
+        # "thắng đặt lại mức · thua gấp đôi". Tay không đặt được chip thì không đổi.
+        self.progress_stake = None
+        self.last_outcome = None
 
     def bind(self, row):
         self.pause()
@@ -204,6 +240,8 @@ class LiveSimulation:
         self.cycle_done = False
         self.take_profit_done = False
         self.entry_waiting = False
+        self.progress_stake = None
+        self.last_outcome = None
         self.note = "Đã chọn bàn."
 
     def start(self, row):
@@ -243,6 +281,8 @@ class LiveSimulation:
         self.results = []
         self.place_skips = 0
         self.cycle_done = False
+        self.progress_stake = None
+        self.last_outcome = None
 
     def set_order(self, side, stake, reason="", baseline=None):
         """Chốt lệnh cược cho tay kế tiếp (do UI bấm nút “Tự đặt cược”)."""
@@ -385,6 +425,10 @@ class LiveSimulation:
         self.place_skips = 0
         result = letters[-1]
         settled = self.money.settle(order["side"], result, order["stake"], E.PAYOUT)
+        # Nuôi cơ chế mức cược: lần đặt thật + kết quả thật của tay này. Tay hoà
+        # không phải thắng cũng không phải thua nên giữ nguyên mức ở tay kế.
+        self.progress_stake = float(order["stake"])
+        self.last_outcome = settled["outcome"]
         self.letters = letters
         self.results = list(letters)
         self.pending = None

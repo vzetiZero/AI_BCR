@@ -36,8 +36,9 @@ from aibcr.live.wm_reader import WMReader, find_wm_page, find_wm_table
 from aibcr.live import ai as LIVE_AI
 from aibcr.models import engine as E
 from aibcr.models import money as M
-from aibcr.models.live_sim import (LiveSimulation, compare_chips, table_is_clear,
-                                   table_stats)
+from aibcr.models.live_sim import (PROGRESS_FLAT, PROGRESS_MODES, PROGRESS_NAME,
+                                   LiveSimulation, compare_chips, progress_stake,
+                                   table_is_clear, table_stats)
 
 # Cấu hình mặc định của tab Baccarat (đơn vị VN2 như hiển thị trên sàn).
 DEFAULT_CONFIG = {
@@ -53,6 +54,9 @@ DEFAULT_CONFIG = {
     "bet_side": "AUTO",         # AUTO | P | B | T
     # 10 đơn vị = 10.000đ (WM in khay chip theo nghìn đồng, 1 đv = 1.000đ).
     "bet_stake": 10.0,          # số đơn vị cố định cho mỗi tay
+    # Cơ chế mức cược: flat (cố định) | win_repeat_loss_double (thắng giữ, thua gấp đôi)
+    "bet_progression": "flat",
+    "bet_max_stake": 0.0,       # 0 = không giới hạn; >0 chặn mức cược tối đa
     "start_url": BR.START_URL,
     "chrome_window": {"width": 1280, "height": 800, "percent": 100, "fullscreen": False},
     # AI live (site Petalive): off | local | api. Key AI CHỈ đọc từ env BCR_AI_KEY.
@@ -124,6 +128,8 @@ class BaccaratController:
         # API key nhập từ UI: CHỈ RAM. Không đưa vào self.config, state file hay snapshot.
         self.ai_key_override = ""
         self.bet_config = {"side": self.config["bet_side"], "stake": self.config["bet_stake"]}
+        # Cơ chế đã áp ở lần lưu trước: đổi mức gốc/cơ chế thì thang cược bắt đầu lại.
+        self._last_progression = self.config.get("bet_progression", PROGRESS_FLAT)
 
         # cờ bận cho các thao tác web (giống controller Tk)
         self.chrome_busy = False
@@ -219,6 +225,10 @@ class BaccaratController:
         config["bet_side"] = side if side in ("AUTO", "P", "B", "T") else "AUTO"
         config["bet_stake"] = min(1000000.0, max(1.0, _as_float(
             config.get("bet_stake"), DEFAULT_CONFIG["bet_stake"])))
+        progression = str(config.get("bet_progression") or PROGRESS_FLAT).strip().lower()
+        config["bet_progression"] = (progression if progression in PROGRESS_MODES
+                                     else PROGRESS_FLAT)
+        config["bet_max_stake"] = max(0.0, _as_float(config.get("bet_max_stake"), 0.0))
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
         mode = str(config.get("ai_mode") or "off").strip().lower()
         config["ai_mode"] = mode if mode in ("off", "local", "api") else "off"
@@ -441,13 +451,30 @@ class BaccaratController:
         return result
 
     def _resolve_order(self, params=None):
-        """Ghép lệnh từ cấu hình UI (mỗi tay) + gợi ý AI cho chế độ AUTO."""
+        """Ghép lệnh từ cấu hình UI (mỗi tay) + gợi ý AI cho chế độ AUTO.
+
+        Số đơn vị đi qua cơ chế mức cược (``bet_progression``): cược cố định, hoặc
+        thắng giữ mức vừa đặt / thua gấp đôi. Cơ chế chỉ áp cho tay có đặt thật;
+        tay không đặt được chip không đổi mức (xem ``LiveSimulation``).
+        """
         params = params or {}
         side = str(params.get("side", self.bet_config["side"])).strip().upper()
-        stake = _as_float(params.get("stake", self.bet_config["stake"]),
-                          self.bet_config["stake"])
+        configured = _as_float(params.get("stake", self.bet_config["stake"]),
+                               self.bet_config["stake"])
         suggestion = self._ai_suggestion()
+        mode = self.config.get("bet_progression", PROGRESS_FLAT)
+        # Trần mức cược: giới hạn người dùng đặt trong Cấu hình, và không vượt số dư
+        # phiên (gấp đôi sau chuỗi thua có thể vượt vốn nếu không chặn).
+        caps = [value for value in (self.config.get("bet_max_stake") or None,
+                                   self.sim.money.balance or None) if value]
+        cap = min(caps) if caps else None
+        stake = progress_stake(configured, current=self.sim.progress_stake,
+                               last_outcome=self.sim.last_outcome, mode=mode,
+                               max_stake=cap)
         reason = "Lệnh UI"
+        if mode != PROGRESS_FLAT and self.sim.last_outcome == "loss" \
+                and stake > configured:
+            reason = "Gấp đôi sau thua (mức gốc %s)" % M.fmt_money(configured)
         if side == "AUTO":
             side = suggestion["side"]
             bits = []
@@ -459,6 +486,8 @@ class BaccaratController:
             reason = ("Theo AI · " + " · ".join(bits)) if bits else "Theo AI"
         return {"side": side if side in ("P", "B", "T") else None,
                 "stake": min(1000000.0, max(1.0, stake)),
+                "base_stake": configured,
+                "progression": mode,
                 "reason": reason, "suggestion": suggestion}
 
     def _plan(self):
@@ -470,6 +499,8 @@ class BaccaratController:
             "side": order["side"],
             "side_name": E.SIDE_NAME.get(order["side"], ""),
             "stake": order["stake"],
+            "base_stake": order["base_stake"],
+            "progression": order["progression"],
             "reason": order["reason"],
             "armed": pending is not None,
             "verdict": order["suggestion"]["verdict"],
@@ -562,6 +593,15 @@ class BaccaratController:
                 "bet": {
                     "side": self.bet_config["side"],
                     "stake": _finite(self.bet_config["stake"]),
+                    "progression": self.config.get("bet_progression", PROGRESS_FLAT),
+                    "progression_name": PROGRESS_NAME.get(
+                        self.config.get("bet_progression", PROGRESS_FLAT), ""),
+                    "next_stake": _finite(plan["stake"]),
+                    "base_stake": _finite(plan.get("base_stake") or self.bet_config["stake"]),
+                    "max_stake": _finite(self.config.get("bet_max_stake") or 0.0),
+                    "progress_stake": (None if self.sim.progress_stake is None
+                                       else _finite(self.sim.progress_stake)),
+                    "last_outcome": self.sim.last_outcome,
                     "pending": dict(sim.pending) if sim.pending else None,
                     "ai_side": plan["ai_side"],
                     "verdict": plan["verdict"],
@@ -1330,7 +1370,7 @@ class BaccaratController:
                 if key in params:
                     config[key] = bool(params[key])
                     changed.append(key)
-            for key in ("bet_side", "bet_stake"):
+            for key in ("bet_side", "bet_stake", "bet_progression", "bet_max_stake"):
                 if key in params:
                     config[key] = params[key]
                     changed.append(key)
@@ -1366,6 +1406,13 @@ class BaccaratController:
 
             self.config = normalized
             self.bet_config = {"side": normalized["bet_side"], "stake": normalized["bet_stake"]}
+            if (normalized["bet_progression"] != self._last_progression
+                    or abs(float(normalized["bet_stake"])
+                           - float(self.sim.progress_stake or normalized["bet_stake"])) >= 0.005):
+                # Thang cược của cấu hình cũ không được mang sang mức gốc mới.
+                self.sim.progress_stake = None
+                self.sim.last_outcome = None
+            self._last_progression = normalized["bet_progression"]
             book = self.sim.money
             book.take_profit_pct = normalized["take_profit_pct"]
             if not book.hands_played:
@@ -1421,6 +1468,7 @@ class BaccaratController:
                 pass
             self.config = config
             self.bet_config = {"side": config["bet_side"], "stake": config["bet_stake"]}
+            self._last_progression = config.get("bet_progression", PROGRESS_FLAT)
             book = M.MoneyBook(capital=config["capital"], unit=config["bet_stake"],
                                take_profit_pct=config["take_profit_pct"])
             sim = LiveSimulation(book, unit=config["bet_stake"])
@@ -2437,7 +2485,7 @@ class BaccaratController:
         return LIVE_AI.check_model(cfg)
 
     def bet_config_set(self, params):
-        """Cấu hình lệnh cho tay kế tiếp: cửa (AUTO/P/B/T) + số chip cố định."""
+        """Cấu hình lệnh cho tay kế tiếp: cửa (AUTO/P/B/T), số chip gốc + cơ chế mức cược."""
         params = params or {}
         with self.lock:
             side = str(params.get("side", self.bet_config["side"])).strip().upper()
@@ -2448,14 +2496,41 @@ class BaccaratController:
             if not 1.0 <= stake <= 1000000.0:
                 return {"ok": False,
                         "error": "Số đơn vị mỗi tay phải nằm trong 1 – 1.000.000 (1 đv = 1.000đ)."}
+            progression = str(params.get("progression") or
+                              self.config.get("bet_progression") or PROGRESS_FLAT)
+            progression = progression.strip().lower()
+            if progression not in PROGRESS_MODES:
+                return {"ok": False,
+                        "error": "Cơ chế mức cược phải là flat hoặc win_repeat_loss_double."}
+            max_stake = _as_float(params.get("max_stake",
+                                             self.config.get("bet_max_stake") or 0.0),
+                                  self.config.get("bet_max_stake") or 0.0)
+            max_stake = max(0.0, min(1000000.0, max_stake))
+            if max_stake and max_stake < stake:
+                return {"ok": False,
+                        "error": "Mức cược tối đa (%s) nhỏ hơn mức gốc (%s)."
+                                 % (M.fmt_money(max_stake), M.fmt_money(stake))}
             self.bet_config = {"side": side, "stake": stake}
             self.config["bet_side"] = side
             self.config["bet_stake"] = stake
+            self.config["bet_progression"] = progression
+            self.config["bet_max_stake"] = max_stake
+            if (abs(stake - float(self.sim.progress_stake or stake)) >= 0.005
+                    or progression != self._last_progression):
+                # Đổi mức gốc/cơ chế giữa phiên: thang cược bắt đầu lại từ mức mới,
+                # không mang mức đã gấp đôi của cấu hình cũ sang.
+                self.sim.progress_stake = None
+                self.sim.last_outcome = None
+            self._last_progression = progression
         self._save_state()
         self._push_state()
+        note = "Lệnh tay kế: %s · %s đv (= %sđ) · %s." % (
+            side, M.fmt_money(stake), M.fmt_money(stake * 1000),
+            PROGRESS_NAME.get(progression, progression))
+        if max_stake:
+            note += " · tối đa %s đv" % M.fmt_money(max_stake)
         return {"ok": True, "side": side, "stake": stake,
-                "note": "Lệnh tay kế: %s · %s đv (= %sđ)." % (
-                    side, M.fmt_money(stake), M.fmt_money(stake * 1000))}
+                "progression": progression, "max_stake": max_stake, "note": note}
 
     def bet_place(self):
         """Nút “Tự đặt cược”: chốt lệnh rồi bấm chip thật (có gate chờ ván mới)."""

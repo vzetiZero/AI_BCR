@@ -186,6 +186,10 @@ Cửa **AUTO** đánh đúng **cửa có xác suất ra cao nhất** do `predict
 thì chọn cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in khay chip theo nghìn
 đồng), mặc định `10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
 
+Mức cược mỗi tay đi qua **cơ chế mức cược** (mục “Lệnh cược từng tay”): `flat` giữ
+nguyên mức gốc, `win_repeat_loss_double` thắng đặt lại mức · thua gấp đôi, có trần
+`bet_max_stake` và luôn bị chặn bởi số dư phiên.
+
 ## Đọc bàn live + dự đoán
 
 Bộ đọc **WebSocket thật** nằm ở `aibcr/live/` — WM đọc khung nhị phân (protocol 21/24/
@@ -267,8 +271,20 @@ Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, ph�
 
 - **Cửa**: `Theo AI (AUTO)` hoặc `P` / `B` / `T`.
 - **Chip cố định**: số VN2 đặt cho tay đó (mặc định 100).
-- **Lưu lệnh** (`bet.config`): chỉ đổi cấu hình cho tay kế.
+- **Cơ chế mức cược** (`bet_progression`):
+  - `flat` — **Cược cố định mỗi tay**: luôn đúng mức gốc, không đổi theo thắng/thua.
+  - `win_repeat_loss_double` — **Thắng đặt lại mức · thua gấp đôi**: tay trước thắng thì
+    tay sau đặt lại đúng mức vừa đặt; tay trước thua thì gấp đôi mức vừa đặt. Hoà (push)
+    và tay không đặt được chip **không** phải thua nên không nhân đôi.
+- **Mức cược tối đa** (`bet_max_stake`, 0 = không giới hạn): chặn trần khi gấp đôi; mức
+  cược luôn bị chặn thêm bởi số dư phiên để không gửi lệnh vượt tiền thật.
+- **Lưu lệnh** (`bet.config`): lưu cửa + mức gốc + cơ chế + mức tối đa cho tay kế.
 - **Tự đặt cược** (`bet.place`): lưu form rồi chốt lệnh ngay.
+
+Cơ chế mức cược chỉ đọc **kết quả thật của tay đã đặt được chip** (`LiveSimulation`
+ghi `progress_stake`/`last_outcome` khi kết toán); đổi mức gốc hoặc cơ chế thì thang
+cược bắt đầu lại từ mức mới. Mỗi tay chỉ arm một lần, công thức thuần nằm ở
+`models/live_sim.py::progress_stake`.
 
 Hành vi của `bet.place`:
 
@@ -303,6 +319,11 @@ config.get|set, session.new|reset|recover, log.clear, export
 
 UI chỉ gọi `table.enterValid` cho thao tác vào bàn; `table.open`/`table.select` giữ
 lại cho script.
+
+Giao diện dùng **bản nháp cho mọi ô cấu hình**: gõ/đổi giá trị nào thì ô đó giữ nguyên
+bản nháp cho tới khi bấm nút Lưu tương ứng, kể cả khi engine đẩy snapshot mới (2
+giây/lần); nhờ vậy đổi ô này không làm mất giá trị đang sửa ở ô khác. Lưu xong có
+**hộp thoại xác nhận** liệt kê đúng những gì vừa lưu (`flat` cũng như tiến trình).
 
 ## Kiểm thử
 

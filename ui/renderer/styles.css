@@ -270,6 +270,25 @@ main::-webkit-scrollbar-thumb { background: #24314a; border-radius: 8px; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* hộp thoại xác nhận đã lưu cấu hình */
+.modal {
+  position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+  background: rgba(4, 8, 16, 0.62); backdrop-filter: blur(2px);
+}
+.modal.hidden { display: none; }
+.modal-box {
+  width: min(420px, 90vw); padding: 20px 22px; border-radius: var(--radius);
+  background: var(--panel); border: 1px solid var(--line-strong); box-shadow: var(--shadow);
+}
+.modal-title { font-size: 15px; font-weight: 700; color: var(--gold); }
+.modal-body {
+  margin-top: 10px; font-size: 12px; color: var(--text); line-height: 1.65;
+  max-height: 46vh; overflow-y: auto; user-select: text;
+}
+.modal-body ul { margin: 8px 0 0; padding-left: 18px; }
+.modal-body li { margin-bottom: 3px; }
+.modal-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+
 /* ===================== BACCARAT (port từ giao diện Tk) ===================== */
 .row.wrap { flex-wrap: wrap; }
 .grid.two.tight { gap: 8px; }

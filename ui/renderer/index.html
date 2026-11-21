@@ -119,6 +119,15 @@
                     <input id="ba-bet-stake" type="number" min="1" max="1000000" step="10" />
                   </label>
                 </div>
+                <label class="field">Cơ chế mức cược
+                  <select id="ba-bet-progression">
+                    <option value="flat">Cược cố định mỗi tay (không đổi)</option>
+                    <option value="win_repeat_loss_double">Thắng đặt lại mức · thua gấp đôi</option>
+                  </select>
+                </label>
+                <label class="field">Mức cược tối đa (đv, 0 = không giới hạn)
+                  <input id="ba-bet-max-stake" type="number" min="0" max="1000000" step="10" />
+                </label>
                 <div class="chip-presets" id="ba-stake-presets">
                   <button type="button" class="preset" data-stake="10">10 · 10k</button>
                   <button type="button" class="preset" data-stake="20">20 · 20k</button>
@@ -250,6 +259,9 @@
 
             <div class="card pad">
               <h3>Lệnh cược mỗi tay</h3>
+              <div class="conn-note" id="ba-bet-summary">Chưa có cấu hình.</div>
+              <p class="hint">Đổi nhanh ở khối <b>TAY KẾ TIẾP</b> trong tab Bàn chơi: cửa,
+                số đơn vị gốc, cơ chế mức cược và mức tối đa.</p>
             </div>
 
             <div class="card pad">
@@ -327,6 +339,17 @@
   </div>
 
   <div class="toast" id="toast"></div>
+
+  <div class="modal hidden" id="ba-dialog" role="dialog" aria-modal="true" aria-labelledby="ba-dialog-title">
+    <div class="modal-box">
+      <div class="modal-title" id="ba-dialog-title">Đã lưu thay đổi</div>
+      <div class="modal-body" id="ba-dialog-body"></div>
+      <div class="modal-actions">
+        <button class="btn primary" id="ba-dialog-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -147,9 +147,55 @@ function setText(selector, text) {
   if (node) node.textContent = text;
 }
 
+/* Giá trị người dùng đang sửa nhưng CHƯA bấm Lưu. Mọi vòng `state` (2 giây/lần) đều
+   gọi setValue; nếu không chặn, sửa ô A rồi sang ô B sẽ bị engine ghi đè A về số cũ
+   (chỉ ô đang focus được bảo vệ). Nhờ `dirtyFields`, bản nháp giữ nguyên cho tới khi
+   lưu thành công. */
+const dirtyFields = new Set();
+
 function setValue(selector, value) {
   const node = $(selector);
-  if (node && document.activeElement !== node) node.value = value ?? '';
+  if (!node || dirtyFields.has(selector)) return;
+  if (document.activeElement !== node) node.value = value ?? '';
+}
+
+function markDirty(selector) {
+  dirtyFields.add(selector);
+}
+
+function clearDirty(...selectors) {
+  selectors.forEach((selector) => dirtyFields.delete(selector));
+}
+
+// Ô nhập thuộc "bản nháp cấu hình": đánh dấu khi người dùng gõ/đổi để vòng state
+// không ghi đè giữa chừng.
+function draftField(selector) {
+  const node = $(selector);
+  if (!node) return;
+  const mark = () => markDirty(selector);
+  node.addEventListener('input', mark);
+  node.addEventListener('change', mark);
+}
+
+/* Hộp thoại thông báo: dùng cho các lần lưu cấu hình (yêu cầu rõ ràng của người
+   dùng), thay vì toast tự biến mất. */
+function showDialog(title, lines) {
+  const modal = $('#ba-dialog');
+  if (!modal) return;
+  $('#ba-dialog-title').textContent = title;
+  const body = $('#ba-dialog-body');
+  const items = (lines || []).filter(Boolean);
+  body.innerHTML = items.length
+    ? `<ul>${items.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`
+    : '';
+  modal.classList.remove('hidden');
+  const ok = $('#ba-dialog-ok');
+  if (ok) ok.focus();
+}
+
+function hideDialog() {
+  const modal = $('#ba-dialog');
+  if (modal) modal.classList.add('hidden');
 }
 
 // Big Road: cùng quy ước với aibcr/live/road.py — lặp cửa thì xuống dòng, đổi cửa
@@ -375,10 +421,15 @@ function renderBaConfig(config) {
   setValue('#ba-tables-target', config.tables_to_play);
   setValue('#ba-bet-side', config.bet_side);
   setValue('#ba-bet-stake', config.bet_stake);
+  setValue('#ba-bet-progression', config.bet_progression || 'flat');
+  setValue('#ba-bet-max-stake', config.bet_max_stake ?? 0);
   const stakeValue = Number(config.bet_stake);
-  document.querySelectorAll('#ba-stake-presets .preset').forEach((item) => {
-    item.classList.toggle('on', Number(item.dataset.stake) === stakeValue);
-  });
+  // Bản nháp đang sửa thì giữ đúng chip người dùng vừa bấm, không bị engine ghi đè.
+  if (!dirtyFields.has('#ba-bet-stake')) {
+    document.querySelectorAll('#ba-stake-presets .preset').forEach((item) => {
+      item.classList.toggle('on', Number(item.dataset.stake) === stakeValue);
+    });
+  }
   setValue('#ba-start-url', config.start_url);
   setValue('#ba-ai-mode', config.ai_mode);
   setValue('#ba-ai-url', config.ai_url);
@@ -387,6 +438,16 @@ function renderBaConfig(config) {
   setValue('#ba-ai-timeout', config.ai_timeout);
   setValue('#ba-live-trials', config.live_trials);
   setValue('#ba-live-markov', config.live_markov_weight);
+
+  const summary = $('#ba-bet-summary');
+  if (summary) {
+    const progressionName = config.bet_progression === 'win_repeat_loss_double'
+      ? 'thắng đặt lại mức · thua gấp đôi' : 'cược cố định';
+    const limit = Number(config.bet_max_stake) > 0
+      ? ` · tối đa ${fmtUnits(config.bet_max_stake)} đv` : '';
+    summary.textContent = `Cửa ${config.bet_side} · gốc ${fmtUnits(config.bet_stake)} đv`
+      + ` (= ${fmtVnd(Number(config.bet_stake) * 1000)}) · ${progressionName}${limit}`;
+  }
 
   const flags = {
     '#ba-auto-hunt': config.auto_hunt,
@@ -397,12 +458,12 @@ function renderBaConfig(config) {
   };
   Object.entries(flags).forEach(([selector, value]) => {
     const node = $(selector);
-    if (node) node.checked = !!value;
+    if (node && !dirtyFields.has(selector)) node.checked = !!value;
   });
 
   const window = config.chrome_window || {};
   const full = $('#ba-fullscreen');
-  if (full) full.checked = !!window.fullscreen;
+  if (full && !dirtyFields.has('#ba-fullscreen')) full.checked = !!window.fullscreen;
   setValue('#ba-win-w', window.width);
   setValue('#ba-win-h', window.height);
   setValue('#ba-win-scale', window.percent);
@@ -591,8 +652,17 @@ function renderBaccarat(snapshot) {
       planState.textContent = plan.armed ? 'ĐÃ CHỐT' : 'SẴN SÀNG';
       planState.className = 'hero-state bet';
       const source = plan.source === 'AUTO' ? 'AI/predict' : (SIDE_NAME[plan.source] || plan.source || 'UI');
-      planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)} · ${source}`;
+      const base = Number(plan.base_stake || 0);
+      const stake = Number(plan.stake || 0);
+      const doubled = plan.progression === 'win_repeat_loss_double' && base
+        && stake > base + 0.001;
+      planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)}`
+        + `${doubled ? ` (gấp đôi từ ${fmtUnits(base)} đv)` : ''} · ${source}`;
       if (plan.verdict) reasonText = `${plan.verdict} · ${reasonText}`;
+      if (plan.progression === 'win_repeat_loss_double') {
+        reasonText = `${reasonText ? `${reasonText} · ` : ''}` +
+          'thắng giữ mức · thua gấp đôi';
+      }
     } else {
       planState.textContent = 'CHỜ';
       planState.className = 'hero-state';
@@ -726,11 +796,18 @@ $('#ba-search').addEventListener('input', (event) => {
 });
 
 $('#ba-save-money').addEventListener('click', async () => {
+  const fields = ['#ba-capital-input', '#ba-tp-input'];
   const reply = await call('baccarat', 'config.set', {
     capital: Number($('#ba-capital-input').value),
     take_profit_pct: Number($('#ba-tp-input').value),
   });
-  if (reply) toast(reply.note || 'Đã lưu vốn.');
+  if (!reply) return;
+  clearDirty(...fields);
+  toast(reply.note || 'Đã lưu vốn.');
+  showDialog('Đã lưu thay đổi', [
+    `Vốn phiên: ${fmtUnits($('#ba-capital-input').value)} VN2`,
+    `Chốt lời: ${fmtUnits($('#ba-tp-input').value)}% vốn`,
+  ]);
 });
 
 $('#ba-new-session').addEventListener('click', async () => {
@@ -738,7 +815,13 @@ $('#ba-new-session').addEventListener('click', async () => {
     capital: Number($('#ba-capital-input').value),
     take_profit_pct: Number($('#ba-tp-input').value),
   });
-  if (reply) toast(reply.note || 'Đã tạo phiên mới.');
+  if (!reply) return;
+  clearDirty('#ba-capital-input', '#ba-tp-input');
+  toast(reply.note || 'Đã tạo phiên mới.');
+  showDialog('Đã tạo phiên mới', [
+    `Vốn phiên: ${fmtUnits($('#ba-capital-input').value)} VN2`,
+    `Chốt lời: ${fmtUnits($('#ba-tp-input').value)}% vốn`,
+  ]);
 });
 
 $('#ba-reset-session').addEventListener('click', async () => {
@@ -746,37 +829,66 @@ $('#ba-reset-session').addEventListener('click', async () => {
   if (reply) toast(reply.note || 'Đã reset phiên.');
 });
 
+const BET_FIELDS = ['#ba-bet-side', '#ba-bet-stake', '#ba-bet-progression',
+  '#ba-bet-max-stake'];
+
 function betFormParams() {
-  return {
+  const params = {
     side: $('#ba-bet-side').value,
     stake: Number($('#ba-bet-stake').value),
+    progression: $('#ba-bet-progression').value,
+    max_stake: Number($('#ba-bet-max-stake').value || 0),
   };
+  return params;
+}
+
+function describeBetReply(reply) {
+  const progression = reply.progression === 'win_repeat_loss_double'
+    ? 'Thắng đặt lại mức · thua gấp đôi' : 'Cược cố định mỗi tay';
+  const sideText = reply.side === 'AUTO'
+    ? 'Theo AI (AUTO — cửa có xác suất cao nhất)' : (SIDE_NAME[reply.side] || reply.side);
+  const lines = [
+    `Cửa: ${sideText}`,
+    `Mức gốc mỗi tay: ${fmtUnits(reply.stake)} đv (= ${fmtVnd(Number(reply.stake) * 1000)})`,
+    `Cơ chế: ${progression}`,
+    Number(reply.max_stake) > 0
+      ? `Mức tối đa: ${fmtUnits(reply.max_stake)} đv`
+      : 'Mức tối đa: không giới hạn',
+  ];
+  return lines;
 }
 
 $('#ba-bet-save').addEventListener('click', async () => {
   const reply = await call('baccarat', 'bet.config', betFormParams());
-  if (reply) toast(reply.note || 'Đã lưu lệnh cược.');
+  if (!reply) return;
+  clearDirty(...BET_FIELDS);
+  toast(reply.note || 'Đã lưu lệnh cược.');
+  showDialog('Đã lưu thay đổi', describeBetReply(reply));
 });
 
 /* Chip nhanh: 10 = 10k, 50 = 50k … (1 đơn vị = 1.000đ trên bàn WM) */
 document.querySelectorAll('#ba-stake-presets .preset').forEach((button) => {
-  button.addEventListener('click', async () => {
+  button.addEventListener('click', () => {
     const value = Number(button.dataset.stake);
     if (!value) return;
     $('#ba-bet-stake').value = String(value);
     document.querySelectorAll('#ba-stake-presets .preset')
       .forEach((item) => item.classList.toggle('on', item === button));
-    const reply = await call('baccarat', 'bet.config', betFormParams());
-    if (reply) toast(`Chip ${value} = ${(value * 1000).toLocaleString('vi-VN')}đ mỗi tay.`);
+    // Chỉ đổi giá trị đang soạn; người dùng bấm "Lưu lệnh" để áp dụng + xác nhận.
+    markDirty('#ba-bet-stake');
   });
 });
 
 $('#ba-bet-place').addEventListener('click', async () => {
   const saved = await call('baccarat', 'bet.config', betFormParams());
   if (!saved) return;
+  clearDirty(...BET_FIELDS);
   const reply = await call('baccarat', 'bet.place');
   if (reply) toast(reply.note || 'Đã gửi lệnh cược.');
 });
+
+const OPTION_FIELDS = ['#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only',
+  '#ba-human-mouse', '#ba-auto-place', '#ba-tables-target'];
 
 $('#ba-save-options').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', {
@@ -787,22 +899,66 @@ $('#ba-save-options').addEventListener('click', async () => {
     auto_place: $('#ba-auto-place').checked,
     tables_to_play: Number($('#ba-tables-target').value),
   });
-  if (reply) toast(reply.note || 'Đã lưu tùy chọn.');
+  if (!reply) return;
+  clearDirty(...OPTION_FIELDS);
+  toast(reply.note || 'Đã lưu tùy chọn.');
+  showDialog('Đã lưu thay đổi', [
+    `Tự săn bàn: ${$('#ba-auto-hunt').checked ? 'bật' : 'tắt'}`,
+    `Tự phục hồi phiên: ${$('#ba-auto-recover').checked ? 'bật' : 'tắt'}`,
+    `Chỉ quét bàn Ưa thích: ${$('#ba-favorites-only').checked ? 'bật' : 'tắt'}`,
+    `Chuột người thật: ${$('#ba-human-mouse').checked ? 'bật' : 'tắt'}`,
+    `Tự đặt chip thật: ${$('#ba-auto-place').checked ? 'bật' : 'tắt'}`,
+    `Số bàn muốn chơi: ${$('#ba-tables-target').value}`,
+  ]);
+});
+
+/* --------------------------- bản nháp cấu hình ---------------------------
+   Mọi ô cấu hình đều là "bản nháp": gõ vào ô nào thì ô đó được giữ nguyên cho tới
+   khi bấm nút Lưu tương ứng, kể cả khi engine đẩy snapshot mới (2 giây/lần). */
+[
+  '#ba-capital-input', '#ba-tp-input', '#ba-tables-target',
+  '#ba-bet-side', '#ba-bet-stake', '#ba-bet-progression', '#ba-bet-max-stake',
+  '#ba-start-url',
+  '#ba-ai-mode', '#ba-ai-url', '#ba-ai-model', '#ba-ai-every', '#ba-ai-timeout',
+  '#ba-live-trials', '#ba-live-markov',
+  '#ba-win-w', '#ba-win-h', '#ba-win-scale',
+  '#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only', '#ba-human-mouse',
+  '#ba-auto-place', '#ba-fullscreen',
+].forEach(draftField);
+
+
+$('#ba-dialog-ok').addEventListener('click', hideDialog);
+$('#ba-dialog').addEventListener('click', (event) => {
+  if (event.target === $('#ba-dialog')) hideDialog();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') hideDialog();
 });
 
 $('#ba-save-window').addEventListener('click', async () => {
+  const fields = ['#ba-win-w', '#ba-win-h', '#ba-win-scale'];
   const reply = await call('baccarat', 'chrome.window', {
     width: Number($('#ba-win-w').value),
     height: Number($('#ba-win-h').value),
     percent: Number($('#ba-win-scale').value),
     fullscreen: $('#ba-fullscreen').checked,
   });
-  if (reply) toast(reply.note || 'Đã lưu cửa sổ Chrome.');
+  if (!reply) return;
+  clearDirty(...fields);
+  toast(reply.note || 'Đã lưu cửa sổ Chrome.');
+  showDialog('Đã lưu thay đổi', [
+    `Cửa sổ Chrome: ${$('#ba-win-w').value} × ${$('#ba-win-h').value}`
+      + ` · tỉ lệ ${$('#ba-win-scale').value}%`
+      + ($('#ba-fullscreen').checked ? ' · toàn màn hình' : ''),
+  ]);
 });
 
 $('#ba-save-url').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', { start_url: $('#ba-start-url').value.trim() });
-  if (reply) toast(reply.note || 'Đã lưu link.');
+  if (!reply) return;
+  clearDirty('#ba-start-url');
+  toast(reply.note || 'Đã lưu link.');
+  showDialog('Đã lưu thay đổi', [`Link mở đầu: ${$('#ba-start-url').value.trim()}`]);
 });
 
 $('#ba-export').addEventListener('click', async () => {
@@ -848,6 +1004,8 @@ $('#ba-live-analyze').addEventListener('click', async () => {
 });
 
 $('#ba-ai-save').addEventListener('click', async () => {
+  const fields = ['#ba-ai-mode', '#ba-ai-url', '#ba-ai-model', '#ba-ai-every',
+    '#ba-ai-timeout', '#ba-live-trials', '#ba-live-markov'];
   const reply = await call('baccarat', 'config.set', {
     ai_mode: $('#ba-ai-mode').value,
     ai_url: $('#ba-ai-url').value.trim(),
@@ -857,7 +1015,16 @@ $('#ba-ai-save').addEventListener('click', async () => {
     live_trials: Number($('#ba-live-trials').value),
     live_markov_weight: Number($('#ba-live-markov').value),
   });
-  if (reply) toast(reply.note || 'Đã lưu cấu hình AI.');
+  if (!reply) return;
+  clearDirty(...fields);
+  toast(reply.note || 'Đã lưu cấu hình AI.');
+  showDialog('Đã lưu thay đổi', [
+    `Nguồn AI: ${$('#ba-ai-mode').value}`,
+    `Model: ${$('#ba-ai-model').value.trim() || '(mặc định)'}`,
+    `Gọi AI mỗi ${$('#ba-ai-every').value} ván · timeout ${$('#ba-ai-timeout').value}s`,
+    `Monte Carlo ${fmtUnits($('#ba-live-trials').value)} ván`
+      + ` · Markov ${$('#ba-live-markov').value}`,
+  ]);
 });
 
 $('#ba-ai-check').addEventListener('click', async () => {
