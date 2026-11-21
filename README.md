@@ -105,6 +105,25 @@ Một lần bấm chạy đúng chuỗi:
 6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa bấm chip
    (`sim.running = false`, `pending = null`).
 
+### Bàn xáo lại bài (số tay về 0)
+
+Shoe mới có quá ít ván nên xác suất/EV của `predict` gần như không có cơ sở: lịch sử
+shoe trước không dùng lại được. Vì vậy tool theo dõi số tay của **chính bàn đang đặt**:
+
+- Số tay tụt về 0 và **giữ nguyên 0** ít nhất `SHOE_RESET_CONFIRM_SECONDS` (5 giây) →
+  coi là xáo bài thật. Mốc đỉnh phải từng > 0, nên lúc bộ đọc live vừa gắn lại (nạp
+  lịch sử chưa xong, tạm báo 0 tay) **không** bị nhầm.
+- Khi đó tool `lobby_back()` về sảnh, dừng phiên và bật chế độ săn `min_hands_hunt`:
+  chỉ vào bàn đang có **≥ `min_hands` tay** (mặc định 15). Số lượt quét tối đa
+  `MIN_HANDS_HUNT_ROUNDS` (12); quá số đó mà không có bàn đủ tay thì vào bàn nhiều tay
+  nhất kèm cảnh báo để không kẹt vô hạn.
+- Trong lúc săn lại, `_follow_open_table` không bám lại bàn vừa rời và
+  `_tool_retry_enter` không mở bàn bất kể số tay.
+- Tắt bằng `leave_on_shoe_reset = false`; `min_hands = 0` thì không lọc số tay.
+
+Cấu hình trong tab **Cấu hình → Tùy chọn vận hành**: checkbox *Bàn xáo bài (0 tay) thì
+rời bàn tìm bàn khác* và ô *Số tay tối thiểu của bàn khi vào lại*.
+
 ### Sảnh WM (M88)
 
 `aibcr/adapters/wm.py` giải mã dữ liệu thật của WM đã đối chiếu với 783 ván:

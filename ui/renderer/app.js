@@ -419,6 +419,7 @@ function renderBaConfig(config) {
   setValue('#ba-capital-input', config.capital);
   setValue('#ba-tp-input', config.take_profit_pct);
   setValue('#ba-tables-target', config.tables_to_play);
+  setValue('#ba-min-hands', config.min_hands ?? 15);
   setValue('#ba-bet-side', config.bet_side);
   setValue('#ba-bet-stake', config.bet_stake);
   setValue('#ba-bet-progression', config.bet_progression || 'flat');
@@ -455,6 +456,7 @@ function renderBaConfig(config) {
     '#ba-favorites-only': config.favorites_only,
     '#ba-human-mouse': config.human_mouse,
     '#ba-auto-place': config.auto_place,
+    '#ba-leave-reset': config.leave_on_shoe_reset,
   };
   Object.entries(flags).forEach(([selector, value]) => {
     const node = $(selector);
@@ -623,9 +625,18 @@ function renderBaccarat(snapshot) {
       const spin = $('#ba-hunt-spin');
       if (spin) spin.textContent = state.huntTick % 2 ? '●' : '○';
       const remain = Math.max(0, Math.round(cycle.retry_in || 0));
-      setText('#ba-hunt-text', remain > 0
-        ? `Đang tự săn bàn… nghỉ ${remain}s rồi quét lại (đã thử ${cycle.attempts || 0} lượt).`
-        : `Đang tự quét sảnh tìm bàn có mã bàn… (đã thử ${cycle.attempts || 0} lượt)`);
+      if (cycle.min_hands_hunt) {
+        const target = cycle.min_hands || 0;
+        setText('#ba-hunt-text', remain > 0
+          ? `Bàn vừa xáo bài · đang tìm bàn ≥ ${target} tay, nghỉ ${remain}s rồi quét lại`
+            + ` (lượt ${cycle.min_hands_rounds || 0}/${cycle.min_hands_rounds_max || 12}).`
+          : `Bàn vừa xáo bài · đang quét sảnh tìm bàn ≥ ${target} tay`
+            + ` (lượt ${(cycle.min_hands_rounds || 0) + 1}/${cycle.min_hands_rounds_max || 12}).`);
+      } else {
+        setText('#ba-hunt-text', remain > 0
+          ? `Đang tự săn bàn… nghỉ ${remain}s rồi quét lại (đã thử ${cycle.attempts || 0} lượt).`
+          : `Đang tự quét sảnh tìm bàn có mã bàn… (đã thử ${cycle.attempts || 0} lượt)`);
+      }
       const cancel = $('#ba-hunt-cancel');
       if (cancel) cancel.textContent = 'Dừng tự quét';
     } else {
@@ -893,7 +904,8 @@ $('#ba-bet-place').addEventListener('click', async () => {
 });
 
 const OPTION_FIELDS = ['#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only',
-  '#ba-human-mouse', '#ba-auto-place', '#ba-tables-target'];
+  '#ba-human-mouse', '#ba-auto-place', '#ba-tables-target', '#ba-leave-reset',
+  '#ba-min-hands'];
 
 $('#ba-save-options').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', {
@@ -902,6 +914,8 @@ $('#ba-save-options').addEventListener('click', async () => {
     favorites_only: $('#ba-favorites-only').checked,
     human_mouse: $('#ba-human-mouse').checked,
     auto_place: $('#ba-auto-place').checked,
+    leave_on_shoe_reset: $('#ba-leave-reset').checked,
+    min_hands: Number($('#ba-min-hands').value),
     tables_to_play: Number($('#ba-tables-target').value),
   });
   if (!reply) return;
@@ -913,6 +927,8 @@ $('#ba-save-options').addEventListener('click', async () => {
     `Chỉ quét bàn Ưa thích: ${$('#ba-favorites-only').checked ? 'bật' : 'tắt'}`,
     `Chuột người thật: ${$('#ba-human-mouse').checked ? 'bật' : 'tắt'}`,
     `Tự đặt chip thật: ${$('#ba-auto-place').checked ? 'bật' : 'tắt'}`,
+    `Rời bàn khi xáo bài: ${$('#ba-leave-reset').checked ? 'bật' : 'tắt'}`
+      + ` · vào bàn ≥ ${$('#ba-min-hands').value} tay`,
     `Số bàn muốn chơi: ${$('#ba-tables-target').value}`,
   ]);
 });
@@ -928,7 +944,7 @@ $('#ba-save-options').addEventListener('click', async () => {
   '#ba-live-trials', '#ba-live-markov',
   '#ba-win-w', '#ba-win-h', '#ba-win-scale',
   '#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only', '#ba-human-mouse',
-  '#ba-auto-place', '#ba-fullscreen',
+  '#ba-auto-place', '#ba-fullscreen', '#ba-leave-reset', '#ba-min-hands',
 ].forEach(draftField);
 
 

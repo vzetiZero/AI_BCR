@@ -36,3 +36,10 @@ PLACE_SKIP_LIMIT = 3
 # vài giây bấm/đọc chip). Quá hạn mà chưa có xác nhận thì coi như không đặt được — nhờ
 # vậy thread chết giữa chừng không khiến việc tính tay bị treo vĩnh viễn.
 PLACE_CONFIRM_TIMEOUT = 60.0
+# Bàn xáo lại bài (số tay tụt về 0): dữ liệu shoe mới chưa đủ cho AI, nên rời bàn và
+# tìm bàn còn đủ tay. Số tay tụt phải giữ nguyên ít nhất ngần này giây mới coi là xáo
+# bài thật — tránh nhầm khi bộ đọc live vừa gắn lại và chưa nạp lịch sử.
+SHOE_RESET_CONFIRM_SECONDS = 5.0
+# Số lượt săn tối đa khi đang lọc bàn theo ``min_hands``. Không có bàn nào đủ tay sau
+# ngần này lượt thì nhận bàn nhiều tay nhất (kèm cảnh báo) để tool không kẹt vô hạn.
+MIN_HANDS_HUNT_ROUNDS = 12

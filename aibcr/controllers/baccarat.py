@@ -57,6 +57,10 @@ DEFAULT_CONFIG = {
     # Cơ chế mức cược: flat (cố định) | win_repeat_loss_double (thắng giữ, thua gấp đôi)
     "bet_progression": "flat",
     "bet_max_stake": 0.0,       # 0 = không giới hạn; >0 chặn mức cược tối đa
+    # Bàn vừa xáo bài (số tay về 0): dữ liệu shoe mới chưa đủ, nên rời bàn và chỉ vào
+    # bàn đang có ít nhất ``min_hands`` tay. 0 = tắt (vẫn ngồi lại bàn xáo bài).
+    "min_hands": 15,
+    "leave_on_shoe_reset": True,
     "start_url": BR.START_URL,
     "chrome_window": {"width": 1280, "height": 800, "percent": 100, "fullscreen": False},
     # AI live (site Petalive): off | local | api. Key AI CHỈ đọc từ env BCR_AI_KEY.
@@ -158,6 +162,9 @@ class BaccaratController:
         self.cycle_retry_at = 0.0
         self.cycle_table_key = None
         self.tables_done = 0
+        # Săn bàn theo số tay tối thiểu sau khi bàn cũ xáo bài.
+        self.min_hands_hunt = False
+        self.min_hands_rounds = 0
 
         # bàn vừa mở, chờ đọc được cầu rồi theo dõi
         self.auto_start_key = None
@@ -180,6 +187,15 @@ class BaccaratController:
         # Mốc Chrome rời bàn (về sảnh/đăng nhập) trong khi sim vẫn bám bàn cũ: quá
         # ngưỡng thì rời bàn để tool tự vào lại, thay vì treo ở "chờ dữ liệu WS".
         self.lobby_since = None
+        # Theo dõi xáo lại bài: số tay của bàn đang theo dõi tụt về 0 thì shoe mới chưa
+        # đủ dữ liệu cho AI → rời bàn và chỉ vào bàn có >= ``min_hands`` tay.
+        self.shoe_watch_key = None
+        self.shoe_peak_hands = 0
+        self.shoe_reset_since = 0.0
+        # Đang săn lại sau khi xáo bài: chỉ nhận bàn đã có >= ``min_hands`` tay.
+        self.min_hands_hunt = False
+        self.min_hands_rounds = 0
+        self.shoe_reset_left_key = None
         # Lệnh vừa đặt gần nhất (side/stake). Giữa hai ván chip trên bàn thuộc lệnh này,
         # không phải lệnh tay kế (chưa bấm) — dùng để không báo "SAI CỬA" oan.
         self.last_order = None
@@ -212,8 +228,9 @@ class BaccaratController:
 
     def _normalize_config(self, config):
         # Dọn config của phiên cũ: không để 3-3/3-2 sống sót qua file state.
+        # (``min_hands`` GIỮ LẠI: giờ là số tay tối thiểu của bàn để vào sau khi xáo bài.)
         for key in ("profile", "ladder", "ladder_mode", "ladder_base", "block_mode",
-                    "live_exit_streak", "auto_cycle", "min_hands", "max_hands",
+                    "live_exit_streak", "auto_cycle", "max_hands",
                     "max_streak", "min_lead", "max_lead", "tie_side"):
             config.pop(key, None)
         config["capital"] = max(1.0, _as_float(config.get("capital"), DEFAULT_CONFIG["capital"]))
@@ -229,6 +246,11 @@ class BaccaratController:
         config["bet_progression"] = (progression if progression in PROGRESS_MODES
                                      else PROGRESS_FLAT)
         config["bet_max_stake"] = max(0.0, _as_float(config.get("bet_max_stake"), 0.0))
+        # Số tay tối thiểu của bàn khi phải vào bàn mới sau khi bàn cũ xáo bài.
+        config["min_hands"] = min(400, max(0, _as_int(config.get("min_hands"),
+                                                      DEFAULT_CONFIG["min_hands"])))
+        config["leave_on_shoe_reset"] = bool(config.get(
+            "leave_on_shoe_reset", DEFAULT_CONFIG["leave_on_shoe_reset"]))
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
         mode = str(config.get("ai_mode") or "off").strip().lower()
         config["ai_mode"] = mode if mode in ("off", "local", "api") else "off"
@@ -571,6 +593,10 @@ class BaccaratController:
                     "waiting": bool(self.cycle_waiting),
                     "attempts": self.cycle_attempts,
                     "retry_in": max(0.0, (self.cycle_retry_at or 0) - now),
+                    "min_hands": int(self.config.get("min_hands") or 0),
+                    "min_hands_hunt": bool(self.min_hands_hunt),
+                    "min_hands_rounds": int(self.min_hands_rounds or 0),
+                    "min_hands_rounds_max": MIN_HANDS_HUNT_ROUNDS,
                 },
                 "tables_done": self.tables_done,
                 "tables_target": self._tables_target(),
@@ -609,6 +635,8 @@ class BaccaratController:
                                        else _finite(self.sim.progress_stake)),
                     "last_outcome": self.sim.last_outcome,
                     "pending": dict(sim.pending) if sim.pending else None,
+                    "min_hands": int(self.config.get("min_hands") or 0),
+                    "leave_on_shoe_reset": bool(self.config.get("leave_on_shoe_reset")),
                     "ai_side": plan["ai_side"],
                     "verdict": plan["verdict"],
                 },
@@ -1123,6 +1151,107 @@ class BaccaratController:
         threading.Thread(target=work, daemon=True, name="ba-chips").start()
         return {"ok": True, "note": "Đang đọc chip…"}
 
+    def _watch_shoe_reset(self, now=None):
+        """Bàn đang theo dõi vừa xáo lại bài (số tay về 0) → rời bàn, tìm bàn đủ tay.
+
+        Lý do: shoe mới có rất ít ván, xác suất/EV do ``predict`` tính trên shoe dự
+        phòng gần như không có cơ sở (lịch sử cũ của shoe trước không dùng được), nên
+        thà về sảnh và vào bàn đang có sẵn >= ``min_hands`` tay.
+
+        Chỉ tính là xáo bài khi số tay **đã từng** > 0 rồi tụt xuống 0 và giữ nguyên
+        như vậy ``SHOE_RESET_CONFIRM_SECONDS`` giây: bộ đọc live vừa gắn lại (nạp lịch
+        sử chưa xong) cũng tạm báo 0 tay, không được nhầm.
+        """
+        if not self.tool_running or not self.config.get("leave_on_shoe_reset"):
+            self.shoe_watch_key = None
+            self.shoe_peak_hands = 0
+            self.shoe_reset_since = 0.0
+            return
+        key = self.sim.table_key
+        if not key:
+            self.shoe_watch_key = None
+            self.shoe_peak_hands = 0
+            self.shoe_reset_since = 0.0
+            return
+        hands = self._table_hands(key)
+        if key != self.shoe_watch_key:
+            self.shoe_watch_key = key
+            self.shoe_peak_hands = hands
+            self.shoe_reset_since = 0.0
+            return
+        if hands > 0:
+            self.shoe_peak_hands = max(self.shoe_peak_hands, hands)
+            self.shoe_reset_since = 0.0
+            return
+        if self.shoe_peak_hands <= 0:
+            return
+        clock = time.time() if now is None else now
+        if not self.shoe_reset_since:
+            self.shoe_reset_since = clock
+            self.log("Bàn %s vừa xáo lại bài (0 tay) · chờ xác nhận trước khi rời bàn."
+                     % self.sim.table_name, "warn")
+            return
+        if clock - self.shoe_reset_since < SHOE_RESET_CONFIRM_SECONDS:
+            return
+        self._leave_for_shoe_reset()
+
+    def _table_hands(self, key):
+        """Số tay hiện có của bàn: ưu tiên số tay thật từ bộ đọc live."""
+        live_key = ""
+        hand = 0
+        if self.live_session is not None:
+            try:
+                live = self.live_snapshot()
+            except Exception:
+                live = {}
+            if live.get("running"):
+                live_key = str(live.get("table") or "").replace("WM ", "").strip()
+                hand = int(live.get("hand") or 0)
+        if live_key and (key == live_key or key.endswith(live_key)
+                        or live_key.endswith(key.replace("id:", ""))):
+            return max(0, hand)
+        row = self.tables.get(key) or {}
+        return max(0, len(row.get("letters") or ""))
+
+    def _leave_for_shoe_reset(self):
+        """Rời bàn xáo bài rồi bật chế độ săn bàn có >= ``min_hands`` tay."""
+        required = max(0, _as_int(self.config.get("min_hands"), 0))
+        name = self.sim.table_name
+        left_key = self.sim.table_key
+        self.shoe_watch_key = None
+        self.shoe_peak_hands = 0
+        self.shoe_reset_since = 0.0
+        self.auto_bet_letters = None
+        self.auto_bet_key = None
+        self.auto_bet_hand = 0
+        self.last_order = None
+        self.chip_live = None
+        self.chip_read_at = 0.0
+        with self.lock:
+            self.sim.detach("Bàn %s vừa xáo lại bài · đang rời bàn tìm bàn ≥ %d tay."
+                            % (name, required))
+        self.min_hands_hunt = True
+        self.min_hands_rounds = 0
+        self.shoe_reset_left_key = left_key
+        self.cycle_waiting = True
+        self.cycle_attempts = 0
+        self.cycle_retry_at = 0.0
+        # Không loại trừ bàn vừa rời: ``min_hands_hunt`` đã lọc theo số tay nên bàn 0 tay
+        # tự bị bỏ; nếu sau này nó đủ tay thì vẫn có thể vào lại.
+        self.cycle_table_key = None
+        self.sweep_note = ("Bàn %s vừa xáo bài (0 tay) · dữ liệu shoe mới chưa đủ cho AI "
+                           "· rời bàn, chỉ vào bàn ≥ %d tay." % (name, required))
+        self.log(self.sweep_note, "warn")
+        self._push_state()
+        self.lobby_back()
+
+    def _min_hands_ready(self, row):
+        """Bàn đủ tay để vào sau khi xáo bài (0 = không lọc)."""
+        required = max(0, _as_int(self.config.get("min_hands"), 0))
+        if not required:
+            return True
+        return len(row.get("letters") or "") >= required
+
     def _read_chip_state(self):
         if getattr(self.browser, "wm_page_id", None):
             # WM: đọc chip của CHÍNH MÌNH đang treo trên từng cửa (mybet_money).
@@ -1140,6 +1269,10 @@ class BaccaratController:
         không cần bấm thêm nút nào, tool tự thử lại mỗi 15 giây.
         """
         if not self.tool_running or self.sim.table_key or self.enter_valid:
+            return
+        if self.min_hands_hunt:
+            # Sau xáo bài: chỉ vào bàn đủ tay. ``enter_valid_table`` mở bàn đầu tiên bất
+            # kể số tay nên không được dùng đường này; ``_resume_cycle_hunt`` lo quét lại.
             return
         if self.open_table_busy or self.sweep_busy or self.chrome_busy:
             return
@@ -1372,11 +1505,12 @@ class BaccaratController:
         with self.lock:
             config = dict(self.config)
             for key in ("favorites_only", "human_mouse", "auto_place",
-                        "auto_hunt", "auto_recover"):
+                        "auto_hunt", "auto_recover", "leave_on_shoe_reset"):
                 if key in params:
                     config[key] = bool(params[key])
                     changed.append(key)
-            for key in ("bet_side", "bet_stake", "bet_progression", "bet_max_stake"):
+            for key in ("bet_side", "bet_stake", "bet_progression", "bet_max_stake",
+                        "min_hands"):
                 if key in params:
                     config[key] = params[key]
                     changed.append(key)
@@ -1680,6 +1814,8 @@ class BaccaratController:
             return
         self.session_lost = False
         self._ingest(rows, observed_at)
+        if self.min_hands_hunt:
+            self.min_hands_rounds = (self.min_hands_rounds or 0) + 1
         if self.config["favorites_only"]:
             allowed = {"id:" + row["table_id"] for row in rows if row.get("table_id")}
             self.tables = {k: v for k, v in self.tables.items()
@@ -1796,7 +1932,8 @@ class BaccaratController:
         if self.session_lost or (self.tool_running is False and not self.enter_valid):
             return False
         manual_enter = bool(self.enter_valid)
-        if not (self.cycle_waiting and (self.config["auto_hunt"] or manual_enter)):
+        if not (self.cycle_waiting and (self.config["auto_hunt"] or manual_enter
+                                        or self.min_hands_hunt)):
             return False
         if exclude_key:
             self.cycle_table_key = exclude_key
@@ -1863,13 +2000,40 @@ class BaccaratController:
 
     # ------------------------------------------------------------ tự săn bàn
     def auto_open_table(self, allow_sweep=False, exclude_key=None):
-        """Mở bàn đầu tiên có mã bàn — không còn điều kiện lọc cầu."""
+        """Mở bàn đầu tiên có mã bàn — không còn điều kiện lọc cầu.
+
+        Ngoại lệ duy nhất: vừa rời bàn vì xáo bài (``min_hands_hunt``) thì chỉ vào bàn
+        đang có ít nhất ``min_hands`` tay; không có bàn nào đủ sau
+        ``MIN_HANDS_HUNT_ROUNDS`` lượt thì nhận bàn nhiều tay nhất kèm cảnh báo.
+        """
         if self._busy_chrome() or not (self.tool_running or self.enter_valid):
             return
         if self.sim.running or getattr(self.sim, "take_profit_done", False):
             return
         candidates = [row for row in self.tables.values()
                       if row.get("table_id") and row["key"] != exclude_key]
+        required = max(0, _as_int(self.config.get("min_hands"), 0)) \
+            if self.min_hands_hunt else 0
+        fallback_note = ""
+        if candidates and required:
+            enough = [row for row in candidates if self._min_hands_ready(row)]
+            best = max(candidates, key=lambda row: len(row.get("letters") or ""))
+            if enough:
+                candidates = enough
+            elif (self.min_hands_rounds or 0) >= MIN_HANDS_HUNT_ROUNDS:
+                candidates = [best]
+                fallback_note = ("Không có bàn nào ≥ %d tay sau %d lượt quét · vào bàn "
+                                 "nhiều tay nhất (%d tay) để không kẹt."
+                                 % (required, self.min_hands_rounds,
+                                    len(best.get("letters") or "")))
+                self.log(fallback_note, "warn")
+            else:
+                self.sweep_note = ("Đang tìm bàn ≥ %d tay sau khi xáo bài · bàn nhiều nhất "
+                                   "hiện có %d tay (lượt %d/%d)." % (
+                                       required, len(best.get("letters") or ""),
+                                       (self.min_hands_rounds or 0) + 1,
+                                       MIN_HANDS_HUNT_ROUNDS))
+                candidates = []
         if not candidates:
             if not self.cycle_waiting and self.config["auto_hunt"]:
                 self.cycle_waiting = True
@@ -1888,6 +2052,8 @@ class BaccaratController:
         info = table_stats(list(row.get("letters") or ""))
         self.sweep_note = "Đang mở %s (%d tay, bên mạnh %s)…" % (
             row["label"], info["hands"], E.SIDE_NAME.get(info["strong"], "—"))
+        if fallback_note:
+            self.sweep_note += " " + fallback_note
         self.open_table(row["key"])
 
     def _auto_start_verified_table(self):
@@ -1939,6 +2105,11 @@ class BaccaratController:
             self.cycle_attempts = 0
             self.cycle_retry_at = 0.0
             self.cycle_table_key = None
+            self.min_hands_hunt = False
+            self.min_hands_rounds = 0
+            self.shoe_watch_key = None
+            self.shoe_peak_hands = 0
+            self.shoe_reset_since = 0.0
             self.log("Bắt đầu theo dõi %s." % row["label"])
         else:
             self.sweep_note = "Chưa thể bắt đầu: " + note
@@ -1952,7 +2123,9 @@ class BaccaratController:
     def _resume_cycle_hunt(self, now):
         take_profit = bool(getattr(self.sim, "take_profit_done", False))
         manual_enter = bool(self.enter_valid)
-        if not (self.cycle_waiting and (self.config["auto_hunt"] or manual_enter or take_profit)
+        if not (self.cycle_waiting
+                and (self.config["auto_hunt"] or manual_enter or take_profit
+                     or self.min_hands_hunt)
                 and self.cycle_retry_at and now >= self.cycle_retry_at):
             return
         self.cycle_retry_at = 0.0
@@ -1969,7 +2142,13 @@ class BaccaratController:
         if self._busy_chrome() or not self._cdp_available():
             self.cycle_retry_at = now + CYCLE_RETRY_SECONDS
             return
-        self.sweep_note = "Đang tự quét sảnh tìm bàn có mã bàn (lượt %d)…" % (self.cycle_attempts + 1)
+        if self.min_hands_hunt:
+            self.sweep_note = ("Đang quét sảnh tìm bàn ≥ %d tay sau khi xáo bài (lượt %d)…"
+                               % (self.config.get("min_hands") or 0,
+                                  (self.min_hands_rounds or 0) + 1))
+        else:
+            self.sweep_note = "Đang tự quét sảnh tìm bàn có mã bàn (lượt %d)…" % (
+                self.cycle_attempts + 1)
         self.lobby_sweep()
 
     # --------------------------------------------------------------- nhịp làm việc
@@ -2159,6 +2338,7 @@ class BaccaratController:
                     self.chips_read()      # đọc chip ở thread riêng, không chặn vòng chính
                 self._auto_start_verified_table()
                 self._follow_open_table()
+                self._watch_shoe_reset()
                 self._recover_from_lobby()
                 self._auto_bet_tick()
                 self._tool_retry_enter(now)
@@ -2259,6 +2439,9 @@ class BaccaratController:
         """
         if self.live_session is None or not self.sim.table_key or self.place_busy:
             return
+        if self.min_hands_hunt:
+            # Đang rời bàn xáo bài: không được bám lại chính bàn vừa rời.
+            return
         try:
             live = self.live_snapshot()
         except Exception:
@@ -2304,6 +2487,11 @@ class BaccaratController:
         bàn là trạng thái treo mà ``_tool_retry_enter`` không tự thoát được.
         """
         if not self.tool_running or not self.sim.table_key:
+            self.lobby_since = None
+            return
+        if self.min_hands_hunt:
+            # Đang chủ động rời bàn xáo bài: Chrome còn trong bàn một lúc, nhưng không
+            # được tự "tiếp tục theo dõi" lại chính bàn đó.
             self.lobby_since = None
             return
         if self.sim.money.blocked or self.sim.take_profit_done:

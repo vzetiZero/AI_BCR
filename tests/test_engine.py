@@ -18,6 +18,7 @@ import time
 import unittest
 
 from aibcr.adapters import browser as BR
+from aibcr.controllers import baccarat as BA
 from aibcr.service import engine
 
 
@@ -150,19 +151,31 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         saved = json.loads(service.state_path.read_text(encoding="utf-8"))["settings"]
         for key in ("profile", "ladder", "ladder_mode", "ladder_base", "block_mode",
-                    "live_exit_streak", "auto_cycle", "min_hands", "max_streak",
-                    "min_lead"):
+                    "live_exit_streak", "auto_cycle", "max_streak", "min_lead"):
             self.assertNotIn(key, saved)
             self.assertNotIn(key, service.config)
 
     def test_removed_filter_keys_are_ignored(self):
         service = make_service()
-        reply = service.config_set({"min_hands": 20, "max_streak": 2, "min_lead": 5,
+        reply = service.config_set({"max_hands": 12, "max_streak": 2, "min_lead": 5,
                                     "max_lead": 3, "tie_side": "P"})
         self.assertTrue(reply["ok"], reply)
-        for key in ("min_hands", "max_hands", "max_streak", "min_lead", "max_lead",
-                    "tie_side"):
+        for key in ("max_hands", "max_streak", "min_lead", "max_lead", "tie_side"):
             self.assertNotIn(key, service.config)
+
+    def test_min_hands_is_the_reentry_threshold_and_is_persisted(self):
+        """``min_hands`` giờ là số tay tối thiểu của bàn khi vào lại sau xáo bài."""
+        service = make_service()
+        reply = service.config_set({"min_hands": 18, "leave_on_shoe_reset": True})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(service.config["min_hands"], 18)
+        self.assertTrue(service.config["leave_on_shoe_reset"])
+        saved = json.loads(service.state_path.read_text(encoding="utf-8"))["settings"]
+        self.assertEqual(saved["min_hands"], 18)
+        self.assertTrue(saved["leave_on_shoe_reset"])
+
+        self.assertEqual(service.config_set({"min_hands": 9999})["ok"], True)
+        self.assertEqual(service.config["min_hands"], 400, "phải chặn trần 400 tay")
 
     def test_invalid_start_url_falls_back_to_the_default(self):
         service = make_service()
@@ -466,6 +479,122 @@ class BaccaratNoFilterTests(unittest.TestCase):
                                              "bet_stake": 75})["ok"])
         self.assertEqual(service.bet_config, {"side": "T", "stake": 75.0})
         self.assertEqual(service.sim.money.unit, 75.0)
+
+
+class ShoeResetTests(unittest.TestCase):
+    """Bàn xáo lại bài (số tay về 0): rời bàn và chỉ vào bàn đủ ``min_hands`` tay."""
+
+    @staticmethod
+    def road(count):
+        return "BP" * (count // 2) + ("B" if count % 2 else "")
+
+    def service(self, letters="BBBBPPPPBBBBPP", min_hands=15):
+        service = make_service(config={"min_hands": min_hands}, letters=letters)
+        service.tool_running = True
+        return service
+
+    def track(self, service):
+        row = service.tables["id:t1"]
+        with service.lock:
+            service.sim.bind(row)
+            service.sim.start(row)
+        return row
+
+    def test_shoe_reset_is_not_triggered_by_a_short_live_history(self):
+        """Bộ đọc live vừa gắn lại báo 0 tay NGAY TỪ ĐẦU: chưa từng có tay nên không
+        được coi là xáo bài."""
+        service = self.service()
+        self.track(service)
+        service.tables["id:t1"]["letters"] = ""
+        left = []
+        service.lobby_back = lambda: left.append(True) or {"ok": True}
+        for clock in (1000.0, 1010.0, 1100.0):
+            service._watch_shoe_reset(now=clock)
+        self.assertEqual(left, [])
+        self.assertFalse(service.min_hands_hunt)
+        self.assertEqual(service.shoe_peak_hands, 0)
+
+    def test_shoe_reset_leaves_the_table_and_requires_min_hands(self):
+        service = self.service()
+        self.track(service)
+        left = []
+        service.lobby_back = lambda: left.append(True) or {"ok": True}
+        # Trước hết bàn đang có tay: ghi mốc đỉnh.
+        service._watch_shoe_reset(now=900.0)
+        self.assertEqual(service.shoe_peak_hands, 14)
+        # Rồi xáo bài: số tay tụt về 0.
+        service.tables["id:t1"]["letters"] = ""
+        service._watch_shoe_reset(now=1000.0)
+        self.assertEqual(left, [], "mới 0 tay lần đầu thì chưa rời bàn")
+        service._watch_shoe_reset(now=1001.0)
+        self.assertEqual(left, [], "phải chờ đủ SHOE_RESET_CONFIRM_SECONDS")
+        service._watch_shoe_reset(now=1000.0 + BA.SHOE_RESET_CONFIRM_SECONDS + 0.1)
+        self.assertEqual(left, [True])
+        self.assertTrue(service.min_hands_hunt)
+        self.assertIsNone(service.sim.table_key)
+        self.assertEqual(service.config["min_hands"], 15)
+        self.assertIn("xáo bài", service.sweep_note)
+
+    def test_reentry_skips_tables_with_too_few_hands(self):
+        service = self.service()
+        self.track(service)
+        service.lobby_back = lambda: {"ok": True}
+        service._watch_shoe_reset(now=900.0)
+        service.tables["id:t1"]["letters"] = ""
+        service._watch_shoe_reset(now=1000.0)
+        service._watch_shoe_reset(now=1000.0 + BA.SHOE_RESET_CONFIRM_SECONDS + 0.1)
+        self.assertTrue(service.min_hands_hunt)
+
+        stamp = time.time()
+        service.tables = {
+            "id:tiny": {"key": "id:tiny", "label": "Bàn mới xáo", "letters": "BBB",
+                        "ts": stamp, "table_id": "tiny", "read_error": "",
+                        "conflict": False, "source": "evo-bead", "stable": 3},
+            "id:full": {"key": "id:full", "label": "Bàn đủ tay", "letters": self.road(24),
+                        "ts": stamp, "table_id": "full", "read_error": "",
+                        "conflict": False, "source": "evo-bead", "stable": 3},
+        }
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service.auto_open_table()
+        self.assertEqual(opened, ["id:full"], "chỉ vào bàn ≥ min_hands tay")
+
+    def test_reentry_falls_back_to_the_longest_table_after_limit(self):
+        service = self.service()
+        self.track(service)
+        service.lobby_back = lambda: {"ok": True}
+        service._watch_shoe_reset(now=900.0)
+        service.tables["id:t1"]["letters"] = ""
+        service._watch_shoe_reset(now=1000.0)
+        service._watch_shoe_reset(now=1000.0 + BA.SHOE_RESET_CONFIRM_SECONDS + 0.1)
+
+        stamp = time.time()
+        service.tables = {
+            "id:short": {"key": "id:short", "label": "Bàn ngắn", "letters": "BBPP",
+                         "ts": stamp, "table_id": "short", "read_error": "",
+                         "conflict": False, "source": "evo-bead", "stable": 3},
+            "id:mid": {"key": "id:mid", "label": "Bàn vừa", "letters": self.road(8),
+                       "ts": stamp, "table_id": "mid", "read_error": "",
+                       "conflict": False, "source": "evo-bead", "stable": 3},
+        }
+        service.min_hands_rounds = BA.MIN_HANDS_HUNT_ROUNDS
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service.auto_open_table()
+        self.assertEqual(opened, ["id:mid"], "hết lượt thì vào bàn nhiều tay nhất")
+        self.assertIn("nhiều tay nhất", service.sweep_note)
+
+    def test_disabled_option_keeps_watching_the_same_table(self):
+        service = self.service()
+        service.config["leave_on_shoe_reset"] = False
+        self.track(service)
+        left = []
+        service.lobby_back = lambda: left.append(True) or {"ok": True}
+        service.tables["id:t1"]["letters"] = ""
+        for clock in (1000.0, 1010.0, 1100.0):
+            service._watch_shoe_reset(now=clock)
+        self.assertEqual(left, [])
+        self.assertFalse(service.min_hands_hunt)
 
 
 class ChromeClosedRecoveryTests(unittest.TestCase):
