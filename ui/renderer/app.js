@@ -442,7 +442,7 @@ function renderBaConfig(config) {
   const summary = $('#ba-bet-summary');
   if (summary) {
     const progressionName = config.bet_progression === 'win_repeat_loss_double'
-      ? 'thắng đặt lại mức · thua gấp đôi' : 'cược cố định';
+      ? 'thắng về mức gốc · thua gấp đôi' : 'cược cố định';
     const limit = Number(config.bet_max_stake) > 0
       ? ` · tối đa ${fmtUnits(config.bet_max_stake)} đv` : '';
     summary.textContent = `Cửa ${config.bet_side} · gốc ${fmtUnits(config.bet_stake)} đv`
@@ -656,12 +656,17 @@ function renderBaccarat(snapshot) {
       const stake = Number(plan.stake || 0);
       const doubled = plan.progression === 'win_repeat_loss_double' && base
         && stake > base + 0.001;
+      const resetDown = plan.progression === 'win_repeat_loss_double' && base
+        && stake <= base + 0.001;
       planBox.textContent = `${plan.side_name || SIDE_NAME[plan.side] || '—'} ${fmtMoney(plan.stake)}`
         + `${doubled ? ` (gấp đôi từ ${fmtUnits(base)} đv)` : ''} · ${source}`;
       if (plan.verdict) reasonText = `${plan.verdict} · ${reasonText}`;
       if (plan.progression === 'win_repeat_loss_double') {
         reasonText = `${reasonText ? `${reasonText} · ` : ''}` +
-          'thắng giữ mức · thua gấp đôi';
+          'thắng về mức gốc · thua gấp đôi';
+        if (resetDown && plan.last_outcome === 'win') {
+          reasonText += ` (đã về mức gốc ${fmtUnits(base)} đv)`;
+        }
       }
     } else {
       planState.textContent = 'CHỜ';
@@ -844,7 +849,7 @@ function betFormParams() {
 
 function describeBetReply(reply) {
   const progression = reply.progression === 'win_repeat_loss_double'
-    ? 'Thắng đặt lại mức · thua gấp đôi' : 'Cược cố định mỗi tay';
+    ? 'Thắng về mức gốc · thua gấp đôi' : 'Cược cố định mỗi tay';
   const sideText = reply.side === 'AUTO'
     ? 'Theo AI (AUTO — cửa có xác suất cao nhất)' : (SIDE_NAME[reply.side] || reply.side);
   const lines = [

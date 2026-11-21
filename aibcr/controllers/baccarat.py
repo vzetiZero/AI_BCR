@@ -454,7 +454,7 @@ class BaccaratController:
         """Ghép lệnh từ cấu hình UI (mỗi tay) + gợi ý AI cho chế độ AUTO.
 
         Số đơn vị đi qua cơ chế mức cược (``bet_progression``): cược cố định, hoặc
-        thắng giữ mức vừa đặt / thua gấp đôi. Cơ chế chỉ áp cho tay có đặt thật;
+        thắng quay về đúng mức gốc / thua gấp đôi. Cơ chế chỉ áp cho tay có đặt thật;
         tay không đặt được chip không đổi mức (xem ``LiveSimulation``).
         """
         params = params or {}
@@ -475,6 +475,9 @@ class BaccaratController:
         if mode != PROGRESS_FLAT and self.sim.last_outcome == "loss" \
                 and stake > configured:
             reason = "Gấp đôi sau thua (mức gốc %s)" % M.fmt_money(configured)
+        elif mode != PROGRESS_FLAT and self.sim.last_outcome == "win" \
+                and float(self.sim.progress_stake or configured) > configured + 0.005:
+            reason = "Thắng · về lại mức gốc %s" % M.fmt_money(configured)
         if side == "AUTO":
             side = suggestion["side"]
             bits = []
@@ -501,6 +504,9 @@ class BaccaratController:
             "stake": order["stake"],
             "base_stake": order["base_stake"],
             "progression": order["progression"],
+            "last_outcome": self.sim.last_outcome,
+            "progress_stake": (None if self.sim.progress_stake is None
+                               else _finite(self.sim.progress_stake)),
             "reason": order["reason"],
             "armed": pending is not None,
             "verdict": order["suggestion"]["verdict"],

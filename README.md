@@ -187,7 +187,7 @@ thì chọn cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in k
 đồng), mặc định `10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
 
 Mức cược mỗi tay đi qua **cơ chế mức cược** (mục “Lệnh cược từng tay”): `flat` giữ
-nguyên mức gốc, `win_repeat_loss_double` thắng đặt lại mức · thua gấp đôi, có trần
+nguyên mức gốc, `win_repeat_loss_double` thắng quay về mức gốc · thua gấp đôi, có trần
 `bet_max_stake` và luôn bị chặn bởi số dư phiên.
 
 ## Đọc bàn live + dự đoán
@@ -270,12 +270,13 @@ UI đều lấy từ `predict.predict()`.
 Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, phần **TAY KẾ TIẾP**:
 
 - **Cửa**: `Theo AI (AUTO)` hoặc `P` / `B` / `T`.
-- **Chip cố định**: số VN2 đặt cho tay đó (mặc định 100).
+- **Mức gốc mỗi tay**: số đơn vị cấu hình cho tay đầu (mặc định 10 đv = 10.000đ).
 - **Cơ chế mức cược** (`bet_progression`):
   - `flat` — **Cược cố định mỗi tay**: luôn đúng mức gốc, không đổi theo thắng/thua.
-  - `win_repeat_loss_double` — **Thắng đặt lại mức · thua gấp đôi**: tay trước thắng thì
-    tay sau đặt lại đúng mức vừa đặt; tay trước thua thì gấp đôi mức vừa đặt. Hoà (push)
-    và tay không đặt được chip **không** phải thua nên không nhân đôi.
+  - `win_repeat_loss_double` — **Thắng về mức gốc · thua gấp đôi**: tay trước thắng thì
+    tay sau **quay lại đúng mức gốc đã cấu hình** (cấu hình 20 → thắng ở mức 80 vẫn đặt
+    lại 20, không giữ mức 80); tay trước thua thì gấp đôi mức vừa đặt. Hoà (push) và tay
+    không đặt được chip **không** phải thua nên không nhân đôi, giữ nguyên mức.
 - **Mức cược tối đa** (`bet_max_stake`, 0 = không giới hạn): chặn trần khi gấp đôi; mức
   cược luôn bị chặn thêm bởi số dư phiên để không gửi lệnh vượt tiền thật.
 - **Lưu lệnh** (`bet.config`): lưu cửa + mức gốc + cơ chế + mức tối đa cho tay kế.

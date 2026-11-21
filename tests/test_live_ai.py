@@ -379,7 +379,7 @@ class RpcTests(unittest.TestCase):
 
 
 class ProgressionTests(unittest.TestCase):
-    """Cơ chế mức cược: thắng đặt lại mức, thua gấp đôi (thuần model)."""
+    """Cơ chế mức cược: thắng về mức gốc, thua gấp đôi (thuần model)."""
 
     def test_flat_never_changes(self):
         from aibcr.models.live_sim import PROGRESS_FLAT, progress_stake
@@ -388,7 +388,7 @@ class ProgressionTests(unittest.TestCase):
             self.assertEqual(progress_stake(20, current=40, last_outcome=outcome,
                                             mode=PROGRESS_FLAT), 20)
 
-    def test_win_repeats_and_loss_doubles(self):
+    def test_win_returns_to_configured_base_and_loss_doubles(self):
         from aibcr.models.live_sim import PROGRESS_WIN_REPEAT_LOSS_DOUBLE as MODE
         from aibcr.models.live_sim import progress_stake
 
@@ -396,6 +396,9 @@ class ProgressionTests(unittest.TestCase):
         self.assertEqual(progress_stake(20, current=20, last_outcome="win", mode=MODE), 20)
         self.assertEqual(progress_stake(20, current=20, last_outcome="loss", mode=MODE), 40)
         self.assertEqual(progress_stake(20, current=40, last_outcome="loss", mode=MODE), 80)
+        # Yêu cầu: thắng khi đang gấp đôi thì về đúng mức gốc đã cấu hình (20), không
+        # giữ mức vừa thắng (80).
+        self.assertEqual(progress_stake(20, current=80, last_outcome="win", mode=MODE), 20)
         # Hoà/push và tay không đặt được không phải thua: giữ nguyên mức đang đặt.
         self.assertEqual(progress_stake(20, current=40, last_outcome="push", mode=MODE), 40)
 
@@ -422,9 +425,12 @@ class ProgressionTests(unittest.TestCase):
         self.assertEqual(order["progression"], "win_repeat_loss_double")
         self.assertIn("Gấp đôi", order["reason"])
 
+        # Thắng ở mức 80: tay sau về đúng mức gốc 20 đã cấu hình.
+        controller.sim.progress_stake = 80.0
         controller.sim.last_outcome = "win"
         order = controller._resolve_order()
-        self.assertEqual(order["stake"], 40.0)
+        self.assertEqual(order["stake"], 20.0)
+        self.assertIn("mức gốc", order["reason"])
 
     def test_settle_feeds_the_next_stake(self):
         """Kết toán một tay ghi lại mức đã đặt + kết quả cho tay kế."""
