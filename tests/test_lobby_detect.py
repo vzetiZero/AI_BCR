@@ -119,6 +119,8 @@ class DiagnoseTests(unittest.TestCase):
 
         stream = LobbyStream(FakeSession(), game="baccarat")
         stream._probe_wm = lambda page: {}
+        # Cô lập: không được chạm CDP thật (máy dev có thể đang mở Chrome 9222).
+        stream._probe_oopif = lambda: None
         reports = stream.probe_tabs()
         self.assertEqual(reports[0]["kind"], "unknown",
                          "trang cổng không phải sảnh — phải nói rõ để người dùng vào sảnh")

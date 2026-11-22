@@ -1147,6 +1147,7 @@ $('#ba-diagnose').addEventListener('click', async () => {
     'petalive-table': 'Bàn Petalive — dùng được',
     'wm-lobby': 'Sảnh WM — dùng được',
     'wm-table': 'Bàn WM — dùng được',
+    wrapper: 'Trang bọc ngoài — WM nằm trong iframe khác origin',
     entry: 'Trang /entry của EVO — token đã hết hạn, không dùng được',
     unknown: 'Không phải sảnh/bàn Baccarat — app không đọc được',
     error: 'Lỗi đọc danh sách tab',
@@ -1157,7 +1158,8 @@ $('#ba-diagnose').addEventListener('click', async () => {
   list.innerHTML = tabs.length
     ? tabs.map((tab) => {
       const ok = ['evo', 'petalive', 'petalive-table', 'wm-lobby', 'wm-table'].includes(tab.kind);
-      const badge = tab.kind === 'unknown' ? 'bad' : tab.kind === 'entry' ? 'warn' : ok ? 'ok' : 'warn';
+      const badge = tab.kind === 'unknown' || tab.kind === 'wrapper' ? 'bad'
+        : tab.kind === 'entry' ? 'warn' : ok ? 'ok' : 'warn';
       const extra = (tab.evidence && tab.evidence.length)
         ? ` · thấy: ${escapeHtml(tab.evidence.join(', '))}` : '';
       return `<div class="table-row">

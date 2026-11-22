@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
 
 from aibcr.adapters import wm as WM
+from aibcr.adapters import wm_targets as WT
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(HERE, "chrome_profile")
@@ -393,6 +394,13 @@ class BrowserSession:
         self.wm_state = {}
         self.wm_cards = {}
         self.wm_open_key = ""
+        # WM nằm trong iframe KHÁC ORIGIN (OOPIF): HTML nhúng từ máy chủ khác. Khi đó
+        # DOM khung gốc không thấy nội dung và Network của tab mẹ không thấy WebSocket
+        # của WM, nên phải gắn vào target iframe riêng.
+        self.wm_oopif_target = ""
+        self.wm_oopif_parent = ""
+        self.wm_oopif_detect = {}
+        self.wm_oopif_pending_at = 0.0
         self._wm_watch = None
         self._wm_watch_stop = threading.Event()
         # Kiểm tra "Chrome còn sống" có cache: tránh gọi HTTP mỗi lần UI hỏi state
@@ -464,6 +472,10 @@ class BrowserSession:
             self.last_diag = {}
             self.connection_state = "closed"
             self.wm_page_id = None
+            self.wm_oopif_target = ""
+            self.wm_oopif_parent = ""
+            self.wm_oopif_detect = {}
+            self.wm_oopif_pending_at = 0.0
             self._driver_info = "Chrome đã đóng."
             self._alive_checked_at = time.monotonic()
             self._alive_ok = False
@@ -1081,6 +1093,30 @@ class BrowserSession:
                     self.last_diag = dict(report["diag"])
                     self.connection_state = "reading" if report["tables"] else "waiting"
                     return [report] if report["tables"] else []
+                # WM nhúng trong iframe KHÁC ORIGIN (vd. wm_casino bọc wmvn.m8810.com):
+                # khung gốc không thấy gì và Network của tab mẹ không thấy WebSocket của
+                # WM, nên phải gắn vào target iframe rồi đọc ở đó.
+                if self._adopt_oopif_wm():
+                    oopif = getattr(self, "wm_oopif_target", "")
+                    if oopif:
+                        sock = None
+                        try:
+                            sock = WT.open_frame_socket(CDP_PORT, target_id=oopif,
+                                                        timeout=SCRIPT_TIMEOUT)
+                            sock.command("Runtime.enable")
+                            detect2 = sock.evaluate(WM.WM_DETECT_JS)
+                            report = self._scan_wm_page(sock.command, detect2, root_url,
+                                                        [], None)
+                            self.last_frames = 1
+                            self.last_diag = dict(report["diag"])
+                            self.connection_state = ("reading" if report["tables"]
+                                                     else "waiting")
+                            return [report] if report["tables"] else []
+                        except Exception:
+                            self.last_error = "Không đọc được iframe WM (khác origin)."
+                        finally:
+                            if sock is not None:
+                                sock.close()
                 if not contexts:
                     self.connection_state = "waiting"
                     self.last_diag = {"reason": "no_default_context"}
@@ -1164,10 +1200,27 @@ class BrowserSession:
 
         while not self._wm_watch_stop.is_set():
             page = None
+            oopif = getattr(self, "wm_oopif_target", "")
+            if oopif:
+                # WM nhúng trong iframe khác origin: WebSocket của nó chỉ hiện khi
+                # Network.enable chạy TRONG target iframe, không phải tab mẹ.
+                socket_ = None
+                try:
+                    socket_ = WT.open_frame_socket(CDP_PORT, target_id=oopif, timeout=10)
+                    self._wm_watch_pump(socket_, page=None)
+                except Exception:
+                    pass
+                finally:
+                    if socket_ is not None:
+                        socket_.close()
+                self._wm_watch_stop.wait(1.0)
+                continue
+            target_page = None
             try:
                 pages = self._cdp_pages()
                 if self.wm_page_id:
                     page = next((p for p in pages if p.get("id") == self.wm_page_id), None)
+                target_page = page
                 if page is None:
                     self.wm_page_id = None
                     self._wm_watch_stop.wait(3.0)
@@ -1178,43 +1231,9 @@ class BrowserSession:
             ws = None
             try:
                 ws = websocket.create_connection(
-                    validated_endpoint(page), suppress_origin=True, timeout=10,
+                    validated_endpoint(target_page), suppress_origin=True, timeout=10,
                     redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
-                ws.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
-                sequence = 1
-                next_probe = 0.0
-                while not self._wm_watch_stop.is_set():
-                    now = time.monotonic()
-                    if now >= next_probe:
-                        sequence += 1
-                        self._wm_probe_id = sequence
-                        ws.send(json.dumps({"id": sequence, "method": "Runtime.evaluate",
-                                            "params": {"expression": WM.WM_OPEN_TABLE_JS,
-                                                       "returnByValue": True, "silent": True}}))
-                        next_probe = now + 3.0
-                    ws.settimeout(0.5)
-                    try:
-                        message = json.loads(ws.recv())
-                    except Exception as exc:
-                        if type(exc).__name__ in ("WebSocketTimeoutException", "TimeoutError"):
-                            continue
-                        break
-                    if message.get("id") == getattr(self, "_wm_probe_id", 0):
-                        value = (message.get("result") or {}).get("result", {}).get("value")
-                        if isinstance(value, dict) and value.get("group") is not None \
-                                and value.get("game") is not None:
-                            self.wm_open_key = WM.table_key(value["game"], value["group"])
-                        else:
-                            # Đang ở sảnh (iframe bàn ẩn) thì không còn bàn đang mở.
-                            self.wm_open_key = ""
-                        continue
-                    if message.get("method") != "Network.webSocketFrameReceived":
-                        continue
-                    response = (message.get("params") or {}).get("response") or {}
-                    frame = WM.decode_frame(response.get("payloadData"),
-                                            response.get("opcode", 2))
-                    if frame is not None:
-                        self._wm_absorb(frame)
+                self._wm_watch_pump(ws, page=target_page)
             except Exception:
                 pass
             finally:
@@ -1224,6 +1243,48 @@ class BrowserSession:
                     except Exception:
                         pass
             self._wm_watch_stop.wait(1.0)
+
+    def _wm_watch_pump(self, ws, page=None):
+        """Vòng nghe một socket (tab mẹ hoặc iframe OOPIF) tới khi cần dừng.
+
+        `ws` là đối tượng có ``send``/``recv``/``settimeout`` — dùng chung cho socket
+        tab thường và ``WT.FrameSocket`` của iframe khác origin.
+        """
+        ws.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
+        sequence = 1
+        next_probe = 0.0
+        while not self._wm_watch_stop.is_set():
+            now = time.monotonic()
+            if now >= next_probe:
+                sequence += 1
+                self._wm_probe_id = sequence
+                ws.send(json.dumps({"id": sequence, "method": "Runtime.evaluate",
+                                    "params": {"expression": WM.WM_OPEN_TABLE_JS,
+                                               "returnByValue": True, "silent": True}}))
+                next_probe = now + 3.0
+            ws.settimeout(0.5)
+            try:
+                message = json.loads(ws.recv())
+            except Exception as exc:
+                if type(exc).__name__ in ("WebSocketTimeoutException", "TimeoutError"):
+                    continue
+                break
+            if message.get("id") == getattr(self, "_wm_probe_id", 0):
+                value = (message.get("result") or {}).get("result", {}).get("value")
+                if isinstance(value, dict) and value.get("group") is not None \
+                        and value.get("game") is not None:
+                    self.wm_open_key = WM.table_key(value["game"], value["group"])
+                else:
+                    # Đang ở sảnh (iframe bàn ẩn) thì không còn bàn đang mở.
+                    self.wm_open_key = ""
+                continue
+            if message.get("method") != "Network.webSocketFrameReceived":
+                continue
+            response = (message.get("params") or {}).get("response") or {}
+            frame = WM.decode_frame(response.get("payloadData"),
+                                    response.get("opcode", 2))
+            if frame is not None:
+                self._wm_absorb(frame)
 
     def _wm_remember_history(self, key, rounds):
         """Ghi lịch sử (protocol 26) vào cache, đổi shoe thì bỏ hẳn lịch sử cũ."""
@@ -1395,6 +1456,10 @@ class BrowserSession:
         if time.time() - getattr(self, "_wm_scan_probe_at", 0.0) < 20.0:
             return False
         self._wm_scan_probe_at = time.time()
+        # Iframe KHÁC ORIGIN (OOPIF): WM nhúng từ máy chủ khác bị Chrome tách thành
+        # target riêng. Phải dò ở cấp target trước, vì DOM khung gốc không thấy gì.
+        if self._adopt_oopif_wm():
+            return True
         import websocket
 
         try:
@@ -1433,6 +1498,50 @@ class BrowserSession:
                 except Exception:
                     pass
         return False
+
+    def _adopt_oopif_wm(self):
+        """Nhận WM nằm trong iframe khác origin; trả True nếu tìm thấy.
+
+        Trang cổng kiểu ``m.9vnv.com/vn/wm_casino`` nhúng WM bằng iframe trỏ sang
+        ``wmvn.m8810.com``. Chrome tách iframe đó thành target riêng nên:
+        ``iframe.contentDocument`` bị chặn, và ``Network.enable`` trên tab mẹ không
+        thấy WebSocket của WM. Ở đây ta tìm target iframe đó, xác nhận nội dung là WM
+        bằng chính ``WM_DETECT_JS`` chạy trong nó, rồi lưu lại để luồng đọc dùng.
+        """
+        try:
+            targets = WT.all_targets(CDP_PORT)
+        except Exception:
+            return False
+        frame, parent = WT.find_wm_frame_target(CDP_PORT)
+        if frame is None:
+            return False
+        try:
+            socket_ = WT.open_frame_socket(CDP_PORT, target_id=frame["id"], timeout=4)
+        except Exception:
+            return False
+        detected = {}
+        try:
+            socket_.command("Runtime.enable")
+            value = socket_.evaluate(WM.WM_DETECT_JS)
+            if isinstance(value, dict):
+                detected = value
+        except Exception:
+            detected = {}
+        finally:
+            socket_.close()
+        if not detected.get("is_wm"):
+            # Target có dấu hiệu WM nhưng nội dung chưa render (trang còn tải). KHÔNG
+            # gán ``wm_oopif_target`` — nếu gán, thread nghe sẽ bám mãi vào target chưa
+            # phải WM và không bao giờ dò lại. Chỉ ghi mốc thời gian để lần sau thử tiếp.
+            self.wm_oopif_pending_at = time.time()
+            return False
+        self.wm_oopif_target = frame.get("id")
+        self.wm_oopif_parent = (parent or {}).get("id") or ""
+        if parent and parent.get("id"):
+            self.wm_page_id = parent["id"]
+        self.wm_oopif_detect = detected
+        self.start_wm_watch()
+        return True
 
     def scan(self):
         """Chỉ đọc tab được phép, tối đa 64 context; WebDriver sâu 4 iframe."""

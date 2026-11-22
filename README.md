@@ -103,6 +103,14 @@ Một lần bấm chạy đúng chuỗi:
    phải sảnh** — nó không chứa danh sách bàn. Phải bấm vào **sảnh Baccarat bên trong**
    (WM đặt sảnh trong `iframe_109`, bàn trong `iframe_101`) rồi mới bấm “VÀO BÀN HỢP LỆ”.
 
+   **WM nhúng trong iframe khác origin (OOPIF)**: nhiều cổng bọc WM bằng iframe trỏ sang
+   máy chủ khác, ví dụ `9vnv.com/vn/wm_casino` → `wmvn.m8810.com/?sid=…&co=wm`. Khi đó
+   Chrome chặn `iframe.contentDocument` **và** tách iframe thành target riêng, nên cả dò
+   DOM lẫn `Network.enable` trên tab mẹ đều không thấy WM. App xử lý bằng
+   `aibcr/adapters/wm_targets.py`: `Target.getTargets` → chọn target iframe WM →
+   `Target.attachToTarget(flatten)` → chạy `WM_DETECT_JS` và `Network.enable` **trong
+   target đó**. Vì vậy sảnh và WebSocket của WM vẫn đọc được dù bị bọc ngoài.
+
    WM nhận diện **theo nội dung trước, theo id iframe sau**: `#game_list_box` / ô
    `groupBac_<game>_<group>_<type>` cho sảnh, `#container` có `gameNNN groupNNN` /
    `#bigRoadContainer` / `#userBalanceBox` cho bàn. Nhờ vậy mirror hoặc bản mobile đổi

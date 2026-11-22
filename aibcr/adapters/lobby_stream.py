@@ -1028,6 +1028,31 @@ class LobbyStream:
         ws = None
         try:
             self._ensure_wm_page()
+            # WM nhúng trong iframe KHÁC ORIGIN (vd. wm_casino bọc wmvn.m8810.com):
+            # iframe sảnh nằm ở target riêng nên socket phải gắn vào target đó, không
+            # phải tab mẹ (tab mẹ chỉ có khung bọc, không có game_list_box).
+            oopif = getattr(self.session, "wm_oopif_target", "")
+            if oopif:
+                from aibcr.adapters import wm_targets as WT
+                ws = WT.open_frame_socket(BR.CDP_PORT, target_id=oopif,
+                                          timeout=BR.SCRIPT_TIMEOUT)
+                self.lobby_kind = "wm"
+                self._command(ws, "Network.enable")
+                self._command(ws, "Runtime.enable")
+                wm_state = self._wm_detect(ws)
+                if wm_state.get("is_wm") and wm_state.get("kind") == "table":
+                    ok, note = self._back_to_lobby_wm(ws, wm_state, 20)
+                    if not ok:
+                        self.last_error = note
+                        return []
+                    self.contexts, self.context_frames = [], {}
+                    self._command(ws, "Runtime.enable")
+                context_id, snapshot = self._wait_lobby_context(ws)
+                if context_id is None:
+                    self.last_error = ("Sảnh WM (trong iframe khác origin) chưa hiển thị "
+                                       "danh sách bàn sau 25 giây chờ.")
+                    return []
+                return self._sweep_wm(ws, context_id, snapshot, max_seconds, favorites_only)
             page = self.session._cdp_page()
             if page is None:
                 self.last_error = "Không có tab sảnh Baccarat trong Chrome CDP 9222."
@@ -1633,12 +1658,21 @@ class LobbyStream:
 
     def _ensure_wm_page(self):
         """Nhận diện tab WM khi người dùng quét/mở bàn mà chưa bấm “Nhận tab sảnh”."""
-        if self.session.wm_page_id:
+        if self.session.wm_page_id or getattr(self.session, "wm_oopif_target", ""):
             return True
         # Kết quả âm được nhớ ngắn: mỗi vòng quét không phải mở CDP dò lại tab cổng.
         if time.time() - getattr(self, "_wm_probe_at", 0.0) < 30.0:
             return False
         self._wm_probe_at = time.time()
+        # WM nhúng trong iframe KHÁC ORIGIN (OOPIF): DOM tab mẹ không thấy gì nên phải
+        # dò ở cấp target trước, nếu không sẽ mãi báo "không thấy sảnh".
+        try:
+            if self.session._adopt_oopif_wm():
+                self.contexts, self.context_frames = [], {}
+                self.lobby_kind = "wm"
+                return True
+        except Exception:
+            pass
         try:
             pages = self.session._cdp_pages()
         except Exception:
@@ -1670,6 +1704,12 @@ class LobbyStream:
         except Exception as exc:
             return [{"url": "", "kind": "error", "evidence": [], "title": "",
                      "error": type(exc).__name__}]
+        # Iframe khác origin (OOPIF) không có trong /json/list: thêm một dòng riêng để
+        # người dùng thấy WM thật nằm ở đâu (vd. wmvn.m8810.com bên trong wm_casino).
+        try:
+            oopif = self._probe_oopif()
+        except Exception:
+            oopif = None
         for page in pages:
             if not isinstance(page, dict):
                 continue
@@ -1688,8 +1728,42 @@ class LobbyStream:
                     entry["kind"] = "wm-table" if state.get("kind") == "table" else "wm-lobby"
                     entry["evidence"] = list(state.get("evidence") or [])
                     entry["title"] = str(state.get("title") or "")
+                elif oopif is not None:
+                    # Tab chỉ là trang bọc; WM thật nằm trong iframe khác origin.
+                    entry["kind"] = "wrapper"
+                    entry["evidence"] = ["iframe khác origin: %s" % oopif["url"]]
             reports.append(entry)
+        if oopif is not None:
+            reports.append(oopif)
         return reports
+
+    def _probe_oopif(self):
+        """Dò WM trong iframe khác origin; trả một entry báo cáo hoặc None."""
+        from aibcr.adapters import wm_targets as WT
+
+        frame, parent = WT.find_wm_frame_target(BR.CDP_PORT)
+        if frame is None:
+            return None
+        entry = {"url": BR._safe_url(frame.get("url") or ""), "kind": "unknown",
+                 "evidence": ["iframe khác origin (OOPIF)"], "title": "",
+                 "parent": BR._safe_url((parent or {}).get("url") or "")}
+        try:
+            socket_ = WT.open_frame_socket(BR.CDP_PORT, target_id=frame["id"], timeout=4)
+        except Exception:
+            entry["evidence"].append("không gắn được target")
+            return entry
+        try:
+            socket_.command("Runtime.enable")
+            state = socket_.evaluate(WM.WM_DETECT_JS)
+        except Exception:
+            state = {}
+        finally:
+            socket_.close()
+        if isinstance(state, dict) and state.get("is_wm"):
+            entry["kind"] = "wm-table" if state.get("kind") == "table" else "wm-lobby"
+            entry["evidence"] = list(state.get("evidence") or []) + ["iframe khác origin"]
+            entry["title"] = str(state.get("title") or "")
+        return entry
 
     def _probe_wm(self, page):
         """Dò nhanh một tab xem có phải sảnh/bàn WM không (mở CDP, đọc iframe, đóng)."""
