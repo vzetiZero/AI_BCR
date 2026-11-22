@@ -263,11 +263,15 @@ class WMBet:
 
     # ------------------------------------------------------------------ đặt cược
     def place(self, side, units, confirm=True, max_chips=20, wait_seconds=40.0,
-              settle_seconds=1.2):
+              settle_seconds=1.2, allow_short=False):
         """Đặt ``units`` (đơn vị sảnh, 1 đv = 1.000đ) vào cửa ``side`` (B/P/T).
 
-        Trả dict ``{"ok", "placed", "total", "denominations", "error"}``. Không bao giờ
-        đặt thiếu tiền: không chia khít được thì dừng trước khi bấm.
+        Trả dict ``{"ok", "placed", "total", "denominations", "error"}``.
+
+        ``allow_short`` = chế độ ALL-IN: số tiền không chia khít được bằng mệnh giá
+        khay (ví dụ còn 636 mà khay chỉ có 10/20/50/100/500/1k/5k/10k) thì đặt mức lớn
+        nhất ghép được (630 = 500+100+20+10) thay vì bỏ tay. Chỉ bật khi lệnh bị chặn
+        bởi số dư cuối cùng — đặt đúng/đủ vẫn là mặc định.
         """
         side = str(side or "").upper()[:1]
         if side not in BET_AREA:
@@ -278,6 +282,7 @@ class WMBet:
             return {"ok": False, "error": "Số tiền không hợp lệ: %r" % (units,)}
         if target <= 0:
             return {"ok": False, "error": "Số tiền phải lớn hơn 0."}
+        all_in_note = ""
 
         # Chờ đúng cửa sổ cược trước khi làm bất cứ điều gì (áp dụng cho cả WS và chuột).
         phase = self.wait_phase(wait_seconds)
@@ -330,6 +335,14 @@ class WMBet:
                 return {"ok": False, "error": "Không thấy ô cược %s." % SIDE_NAME[side]}
             denominations = parse_denominations(state.get("chips"))
             plan = CHIPS.decompose(target, unit=1, denominations=denominations)
+            if (not plan.get("exact") or not plan.get("chips")) and allow_short:
+                # ALL-IN: không chia khít (ví dụ 636) → đặt mức lớn nhất ghép được (630).
+                short = CHIPS.affordable(target, unit=1, denominations=denominations)
+                if short > 0:
+                    target = short
+                    plan = CHIPS.decompose(target, unit=1, denominations=denominations)
+                    all_in_note = (" · all-in %d đv (số dư không chia khít mệnh giá)"
+                                   % target)
             if not plan.get("exact") or not plan.get("chips"):
                 return {"ok": False, "denominations": denominations,
                         "error": "Không chia được %d đv theo mệnh giá %s (thiếu %s đv)."
@@ -395,7 +408,9 @@ class WMBet:
             return {"ok": True, "placed": placed, "total": float(total),
                     "denominations": denominations, "confirmed": True,
                     "bet_area": BET_AREA[side], "my_bet_after": remaining,
-                    "note": "Đã đặt %g đv vào %s." % (float(total), SIDE_NAME[side])}
+                            "note": ("Đã đặt %g đv vào %s." % (float(total),
+                                                              SIDE_NAME[side])
+                                     + all_in_note)}
         except Exception as exc:
             self.last_error = "Lỗi khi đặt chip (%s)." % type(exc).__name__
             return {"ok": False, "placed": placed, "error": self.last_error}

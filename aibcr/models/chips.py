@@ -11,6 +11,20 @@ DEFAULT_CHIP_UNIT = 1
 DEFAULT_DENOMINATIONS = (20, 40, 100, 500, 2000, 10000)
 
 
+def affordable(amount, unit=DEFAULT_CHIP_UNIT, denominations=None):
+    """Số tiền LỚN NHẤT ≤ ``amount`` ghép được bằng mệnh giá đang có.
+
+    Dùng cho tình huống "all-in": ví còn 636 đv nhưng khay chip chỉ có
+    10/20/50/100/500/1k/5k/10k thì 636 không chia khít, phải đặt 630
+    (500+100+20+10) — đúng ý người dùng: làm tròn xuống mức chip gần nhất thay vì
+    bỏ tay.
+    """
+    plan = decompose(amount, unit=unit, denominations=denominations)
+    if plan.get("exact"):
+        return int(plan["total_vnd"] / max(1, int(unit or 1)))
+    return int(plan.get("units") or 0)
+
+
 def decompose(amount, unit=DEFAULT_CHIP_UNIT, denominations=None):
     """Chia số tiền thành các chip cần bấm, theo mệnh giá thật của khay.
 

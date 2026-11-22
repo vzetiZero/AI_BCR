@@ -289,9 +289,9 @@ thì chọn cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in k
 
 | Giá trị | Cách chọn cửa |
 |---|---|
-| `probability` (mặc định) | Cửa có xác suất ra cao nhất. Trên shoe 8 bộ, Banker thắng ~46% và Player ~44%, nên chế độ này chọn **Banker ở phần lớn tay** — đây là toán, không phải lỗi. |
-| `road` | Bám nhịp cầu đang ra: tay cuối **bệt** ≥ 3 tay → đánh tiếp cửa đó; **1:1** (3 chuỗi gần nhất đều 1 tay và đảo cửa) → đánh cửa ngược tay cuối. |
-| `hybrid` | Cầu đọc được rõ thì theo cầu, nhịp lộn xộn thì quay về xác suất. |
+| `hybrid` (**mặc định**) | Cầu đọc được rõ thì **đi theo cầu** (bệt → nối cửa, 1:1 → đảo cửa); nhịp lộn xộn mới theo xác suất. Nhờ vậy cầu bệt Player 6 tay sẽ đặt Player, không bị đặt ngược sang Banker. |
+| `road` | Chỉ bám nhịp cầu đang ra; không đọc được nhịp rõ thì vẫn theo xác suất. |
+| `probability` | Luôn cửa có xác suất ra cao nhất. Trên shoe 8 bộ, Banker thắng ~46% và Player ~44%, nên chế độ này chọn **Banker ở phần lớn tay** — kể cả khi cầu đang bệt Player. Chỉ chọn khi người dùng muốn vậy. |
 
 `predict` trả thêm `road_follow` (side/pattern/reason) nhưng **không trộn** nó vào
 `probabilities`: baccarat là trò độc lập nên "cầu" không tạo lợi thế thật, đây chỉ là
@@ -389,8 +389,12 @@ Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, ph�
   tay sau **quay lại đúng mức gốc đã cấu hình** (cấu hình 20 → thắng ở mức 80 vẫn đặt
   lại 20, không giữ mức 80); tay trước thua thì gấp đôi mức vừa đặt. Hoà (push) giữ
   nguyên mức; tay **không đặt được chip** thì **bắt đầu lại từ mức gốc**.
-- **Mức cược tối đa** (`bet_max_stake`, 0 = không giới hạn): chặn trần khi gấp đôi; mức
+  - **Mức cược tối đa** (`bet_max_stake`, 0 = không giới hạn): chặn trần khi gấp đôi; mức
   cược luôn bị chặn thêm bởi số dư phiên để không gửi lệnh vượt tiền thật.
+  - **All-in khi số dư cuối không chia khít chip**: ví còn 636 đv mà lệnh cần 640 thì
+    đặt **630** (500+100+20+10 = mức lớn nhất ghép được bằng mệnh giá khay,
+    `chips.affordable`) thay vì bỏ tay. Chỉ bật khi lệnh bị **số dư** cắt; bị
+    `bet_max_stake` cắt thì vẫn tôn trọng trần cấu hình.
 - **Lưu lệnh** (`bet.config`): lưu cửa + mức gốc + cơ chế + mức tối đa cho tay kế.
 - **Tự đặt cược** (`bet.place`): lưu form rồi chốt lệnh ngay.
 

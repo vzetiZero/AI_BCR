@@ -552,18 +552,19 @@ function renderBaConfig(config) {
   setValue('#ba-tp-input', config.take_profit_pct);
   setValue('#ba-tables-target', config.tables_to_play);
   setValue('#ba-min-hands', config.min_hands ?? 15);
+  setValue('#ba-place-rotate', config.place_rotate_after ?? 2);
   setValue('#ba-bet-side', config.bet_side);
   setValue('#ba-bet-stake', config.bet_stake);
   setValue('#ba-bet-progression', config.bet_progression || 'flat');
-  setValue('#ba-auto-source', config.auto_side_source || 'probability');
+  setValue('#ba-auto-source', config.auto_side_source || 'hybrid');
   const sourceHint = $('#ba-auto-source-hint');
   if (sourceHint) {
     const source = $('#ba-auto-source').value;
     sourceHint.textContent = source === 'road'
-      ? 'Đánh theo nhịp bàn: bệt thì nối cửa, 1:1 thì đảo cửa. Không đọc được nhịp rõ thì giữ theo xác suất.'
+      ? 'Chỉ đánh theo nhịp bàn: bệt thì nối cửa, 1:1 thì đảo cửa. Không đọc được nhịp rõ thì giữ theo xác suất.'
       : source === 'hybrid'
-        ? 'Cầu 1:1/bệt rõ thì theo cầu; nhịp lộn xộn thì quay về cửa có xác suất cao nhất.'
-        : 'Cửa có xác suất ra cao nhất. Banker thắng ~46% và Player ~44% trên shoe đầy nên chế độ này chọn Banker ở phần lớn tay.';
+        ? 'Mặc định: cầu bệt hoặc 1:1 rõ thì ĐI THEO CẦU; nhịp lộn xộn mới quay về cửa có xác suất cao nhất. Nhờ vậy bệt Player không bị đặt ngược sang Banker.'
+        : 'Luôn cửa có xác suất ra cao nhất. Banker thắng ~46% và Player ~44% trên shoe đầy nên chế độ này chọn Banker ở phần lớn tay — kể cả khi cầu đang bệt Player.';
   }
   setValue('#ba-bet-max-stake', config.bet_max_stake ?? 0);
   const stakeValue = Number(config.bet_stake);
@@ -1015,7 +1016,7 @@ function betFormParams() {
 const AUTO_SOURCE_NAME = {
   probability: 'Xác suất cao nhất',
   road: 'Nhịp cầu 1:1 / bệt',
-  hybrid: 'Cầu rõ theo cầu, còn lại theo xác suất',
+  hybrid: 'Theo cầu khi rõ (bệt / 1:1)',
 };
 
 function describeBetReply(reply) {
@@ -1066,7 +1067,7 @@ $('#ba-bet-place').addEventListener('click', async () => {
 
 const OPTION_FIELDS = ['#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only',
   '#ba-human-mouse', '#ba-auto-place', '#ba-tables-target', '#ba-leave-reset',
-  '#ba-min-hands'];
+  '#ba-min-hands', '#ba-place-rotate'];
 
 $('#ba-save-options').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', {
@@ -1077,6 +1078,7 @@ $('#ba-save-options').addEventListener('click', async () => {
     auto_place: $('#ba-auto-place').checked,
     leave_on_shoe_reset: $('#ba-leave-reset').checked,
     min_hands: Number($('#ba-min-hands').value),
+    place_rotate_after: Number($('#ba-place-rotate').value),
     tables_to_play: Number($('#ba-tables-target').value),
   });
   if (!reply) return;
@@ -1090,6 +1092,7 @@ $('#ba-save-options').addEventListener('click', async () => {
     `Tự đặt chip thật: ${$('#ba-auto-place').checked ? 'bật' : 'tắt'}`,
     `Rời bàn khi xáo bài: ${$('#ba-leave-reset').checked ? 'bật' : 'tắt'}`
       + ` · vào bàn ≥ ${$('#ba-min-hands').value} tay`,
+    `Đổi bàn sau: ${$('#ba-place-rotate').value} tay không đặt được chip`,
     `Số bàn muốn chơi: ${$('#ba-tables-target').value}`,
   ]);
 });
@@ -1107,6 +1110,7 @@ $('#ba-save-options').addEventListener('click', async () => {
   '#ba-win-w', '#ba-win-h', '#ba-win-scale',
   '#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only', '#ba-human-mouse',
   '#ba-auto-place', '#ba-fullscreen', '#ba-leave-reset', '#ba-min-hands',
+  '#ba-place-rotate',
 ].forEach(draftField);
 
 

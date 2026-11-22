@@ -153,9 +153,9 @@
                 </label>
                 <label class="field">Khi cửa là AUTO, lấy cửa theo
                   <select id="ba-auto-source">
-                    <option value="probability">Xác suất cao nhất (mặc định)</option>
-                    <option value="road">Nhịp cầu 1:1 / bệt</option>
-                    <option value="hybrid">Cầu rõ theo cầu, còn lại theo xác suất</option>
+                    <option value="hybrid">Theo cầu khi rõ (bệt / 1:1) — mặc định</option>
+                    <option value="road">Chỉ theo nhịp cầu 1:1 / bệt</option>
+                    <option value="probability">Xác suất cao nhất (hay ra Banker)</option>
                   </select>
                 </label>
                 <p class="hint" id="ba-auto-source-hint"></p>
@@ -314,6 +314,13 @@
                 bàn</b> (không chỉ sau khi xáo bài), và luôn chọn bàn nhiều tay nhất.
                 Nếu sau 12 lượt quét không có bàn nào đủ, tool vào bàn nhiều tay nhất kèm
                 cảnh báo để không kẹt. 0 = tắt lọc.</p>
+              <label class="field">Đổi bàn sau bao nhiêu tay không đặt được chip
+                <input id="ba-place-rotate" type="number" min="0" max="10" step="1" />
+              </label>
+              <p class="hint">Bàn có cửa sổ cược quá ngắn (ván đóng trước khi bấm xong
+                chip) thì ngồi lại chỉ hỏng tiếp. Đủ số tay này tool rời bàn tìm bàn
+                khác; đổi quá 3 lần mà vẫn không đặt được thì dừng để kiểm tra khay
+                chip. 0 = tắt (chỉ bỏ tay, không đổi bàn).</p>
               <label class="field">Số bàn muốn chơi
                 <input id="ba-tables-target" type="number" min="1" step="1" />
               </label>

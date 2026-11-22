@@ -74,9 +74,13 @@ DEFAULT_CONFIG = {
     # bàn đang có ít nhất ``min_hands`` tay. 0 = tắt (vẫn ngồi lại bàn xáo bài).
     "min_hands": 15,
     "leave_on_shoe_reset": True,
-    # Cửa AUTO lấy từ đâu: probability (xác suất cao nhất, mặc định) | road (theo nhịp
-    # cầu 1:1/bệt của bàn) | hybrid (cầu rõ thì theo cầu, không rõ thì theo xác suất).
-    "auto_side_source": "probability",
+    # Cửa AUTO lấy từ đâu: hybrid (mặc định — cầu rõ thì theo cầu) | road | probability.
+    # Mặc định ``hybrid`` để bệt/1:1 luôn được đi theo, không đánh ngược cầu.
+    "auto_side_source": "hybrid",
+    # Đặt chip thất bại liên tiếp bao nhiêu tay thì rời bàn tìm bàn khác. Bàn có cửa sổ
+    # cược quá ngắn (ván đóng trước khi bấm xong) thì ngồi lại chỉ hỏng tiếp; 0 = tắt
+    # (chỉ bỏ tay, không đổi bàn).
+    "place_rotate_after": 2,
     "start_url": BR.START_URL,
     # Trang cổng đã dùng trước khi biết URL WM thật; dùng làm đường lùi khi token của
     # URL WM hết hạn. Rỗng = chưa có.
@@ -233,6 +237,14 @@ class BaccaratController:
         self._last_pause_note = ""
         # Lần cuối tự quay về trang cổng vì URL WM hết hạn (chống nhảy qua nhảy lại).
         self.portal_fallback_at = 0.0
+        # Số tay liên tiếp không đặt được chip. Đủ ngưỡng thì rời bàn tìm bàn khác: bàn
+        # có cửa sổ cược quá ngắn thì ngồi lại chỉ hỏng tiếp từng tay.
+        self.place_fail_streak = 0
+        self.place_rotations = 0
+        # Thang cược mang sang bàn mới khi bàn cũ xáo bài giữa chuỗi thua. Ví dụ mốc 20
+        # đang thua 20 → 40 → 80 mà bàn xáo bài thì bàn mới đặt tiếp 160, không quay về
+        # 20. ``None`` = không có gì để mang.
+        self.ladder_carry = None
         # Cầu của bộ đọc WebSocket khi AI live đang chạy. Lượt quét CDP có thể trả về
         # bản cũ (bắt đầu trước khi ván mới về); không được để nó ghi đè/đảo cầu live.
         self.live_road = ""
@@ -283,9 +295,9 @@ class BaccaratController:
                                                       DEFAULT_CONFIG["min_hands"])))
         config["leave_on_shoe_reset"] = bool(config.get(
             "leave_on_shoe_reset", DEFAULT_CONFIG["leave_on_shoe_reset"]))
-        source = str(config.get("auto_side_source") or "probability").strip().lower()
+        source = str(config.get("auto_side_source") or AUTO_SIDE_HYBRID).strip().lower()
         config["auto_side_source"] = (source if source in AUTO_SIDE_SOURCES
-                                     else "probability")
+                                     else AUTO_SIDE_HYBRID)
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
         mode = str(config.get("ai_mode") or "off").strip().lower()
         config["ai_mode"] = mode if mode in ("off", "local", "api") else "off"
@@ -311,6 +323,8 @@ class BaccaratController:
         config["wm_url"] = (wm_url.strip() if isinstance(wm_url, str)
                             and BR.valid_site_url(wm_url.strip()) else "")
         config["start_url_locked"] = bool(config.get("start_url_locked"))
+        config["place_rotate_after"] = min(10, max(0, _as_int(
+            config.get("place_rotate_after"), DEFAULT_CONFIG["place_rotate_after"])))
         window = config.get("chrome_window")
         if not isinstance(window, dict):
             window = dict(DEFAULT_CONFIG["chrome_window"])
@@ -548,11 +562,13 @@ class BaccaratController:
 
         Nguồn do ``auto_side_source`` quyết định:
 
-        - ``probability`` (mặc định): cửa có xác suất ra cao nhất do ``predict`` tính.
-          Lưu ý Banker thắng nhiều hơn Player ~46% so với 44% trên shoe đầy, nên chế độ
-          này chọn Banker ở phần lớn tay — đó là toán, không phải lỗi.
-        - ``road``: bám nhịp cầu đang ra (bệt → nối cửa; 1:1 → đảo cửa).
-        - ``hybrid``: cầu đọc được rõ thì theo cầu, còn lại theo xác suất.
+        - ``hybrid`` (mặc định): cầu đọc được rõ thì **đi theo cầu** (bệt → nối cửa;
+          1:1 → đảo cửa), nhịp lộn xộn mới theo xác suất. Đây là nguyên tắc người dùng
+          đặt ra: bệt/1:1 phải theo cầu, không được đánh ngược cầu.
+        - ``road``: chỉ theo cầu; không rõ nhịp thì vẫn theo xác suất.
+        - ``probability``: luôn cửa có xác suất cao nhất. Banker thắng nhiều hơn Player
+          ~46% so với 44% trên shoe đầy, nên chế độ này chọn Banker ở phần lớn tay —
+          chính là lỗi "cầu bệt P mà vẫn đặt B".
 
         ``analysis.focus_side`` là văn bản do AI trả về nên KHÔNG được dùng để chọn
         cửa; AI chỉ giải thích.
@@ -626,9 +642,18 @@ class BaccaratController:
         caps = [value for value in (self.config.get("bet_max_stake") or None,
                                    self.sim.money.balance or None) if value]
         cap = min(caps) if caps else None
+        wanted = progress_stake(configured, current=self.sim.progress_stake,
+                                last_outcome=self.sim.last_outcome, mode=mode,
+                                max_stake=None)
         stake = progress_stake(configured, current=self.sim.progress_stake,
                                last_outcome=self.sim.last_outcome, mode=mode,
                                max_stake=cap)
+        # Bị SỐ DƯ cắt (không phải trần cấu hình) → tay này là all-in: đặt mức chip lớn
+        # nhất còn ghép được thay vì bỏ tay. Ví dụ còn 636 đv mà lệnh muốn 640 → 630.
+        balance = self.sim.money.balance or None
+        capped_by_balance = bool(balance and wanted > balance + 0.005
+                                 and (not self.config.get("bet_max_stake")
+                                      or balance <= self.config["bet_max_stake"]))
         reason = "Lệnh UI"
         if mode != PROGRESS_FLAT and self.sim.last_outcome == "loss" \
                 and stake > configured:
@@ -654,6 +679,7 @@ class BaccaratController:
                 "stake": min(1000000.0, max(1.0, stake)),
                 "base_stake": configured,
                 "progression": mode,
+                "all_in": capped_by_balance,
                 "auto_source": suggestion.get("source", ""),
                 "road_pattern": suggestion.get("road_pattern"),
                 "reason": reason, "suggestion": suggestion}
@@ -1343,6 +1369,10 @@ class BaccaratController:
         self.auto_bet_note = ""
         self.last_order = None
         self.tool_retry_at = 0.0
+        # Dừng tool là kết thúc chuỗi: không mang thang cược sang lần chạy sau.
+        self.ladder_carry = None
+        self.place_fail_streak = 0
+        self.place_rotations = 0
         if self.enter_valid:
             self.enter_valid = False
             self.valid_note = "Đã dừng tool · huỷ tìm bàn hợp lệ."
@@ -1503,6 +1533,10 @@ class BaccaratController:
         self.last_order = None
         self.chip_live = None
         self.chip_read_at = 0.0
+        # Mang thang cược sang bàn mới TRƯỚC khi detach: detach xoá progress_stake.
+        # Mốc 20 đang thua 20 → 40 → 80 mà bàn xáo bài thì bàn mới phải đặt tiếp 160.
+        with self.lock:
+            self.ladder_carry = (self.sim.progress_stake, self.sim.last_outcome)
         with self.lock:
             self.sim.detach("Bàn %s vừa xáo lại bài · đang rời bàn tìm bàn ≥ %d tay."
                             % (name, required))
@@ -1527,6 +1561,68 @@ class BaccaratController:
         self.log(self.sweep_note, "warn")
         self._push_state()
         self.lobby_back()
+
+    def _restore_ladder_carry(self):
+        """Áp lại thang cược đã mang sang bàn mới (nếu có). Trả ``(stake, outcome)``.
+
+        Gọi SAU ``sim.bind``/``sim.start`` vì hai hàm đó xoá ``progress_stake``. Nhờ vậy
+        chuỗi thua không bị đứt khi bàn cũ xáo bài giữa chừng: 20 → 40 → 80 rồi sang bàn
+        mới vẫn là 160.
+        """
+        carry = self.ladder_carry
+        self.ladder_carry = None
+        if not carry:
+            return None
+        stake, outcome = carry
+        if stake is None:
+            return None
+        with self.lock:
+            self.sim.progress_stake = stake
+            self.sim.last_outcome = outcome
+        self.log("Giữ thang cược sang bàn mới: mức vừa đặt %s đv%s." % (
+            M.fmt_money(stake),
+            " · thua" if outcome == "loss" else (" · thắng" if outcome == "win" else "")),
+            "info")
+        return stake, outcome
+
+    def _rotate_for_place_failure(self, note=""):
+        """Đổi bàn sau nhiều tay liên tiếp không đặt được chip.
+
+        Vì sao cần: bàn có cửa sổ cược quá ngắn thì mỗi tay đều "ván đã đóng" trước khi
+        bấm xong. Ở lại chỉ mất thêm tay, nên rời bàn tìm bàn khác — đúng ý người dùng.
+
+        Giới hạn ``place_rotations`` (3 lần) để không quay vòng vô hạn khi mọi bàn đều
+        có vấn đề; chạm giới hạn thì tạm dừng để người dùng kiểm tra khay chip/ô cược.
+        """
+        limit = max(0, _as_int(self.config.get("place_rotate_after"), 2))
+        if not limit or not self.tool_running:
+            return False
+        if self.place_fail_streak < limit:
+            return False
+        if self.place_rotations >= 3:
+            with self.lock:
+                self.sim.pause("Đã đổi %d bàn mà vẫn không đặt được chip (%s). Dừng để "
+                               "kiểm tra khay chip và ô cược." % (self.place_rotations,
+                                                                  note or "ván đóng"))
+            self.log(self.sim.note, "error")
+            return False
+        left = self.sim.table_key
+        self.place_rotations += 1
+        self.place_fail_streak = 0
+        with self.lock:
+            self.sim.detach("Không đặt được chip %d tay liên tiếp (%s) · đổi bàn khác."
+                            % (limit, note or "ván đóng"))
+        self.cycle_waiting = True
+        self.cycle_attempts = 0
+        # Loại bàn vừa rời khỏi lượt mở kế tiếp để không vào lại chính nó.
+        self.cycle_table_key = left
+        self.cycle_retry_at = time.time()
+        self.sweep_note = ("Không đặt được chip %d tay liên tiếp (%s) · rời bàn, tìm bàn "
+                           "khác." % (limit, note or "ván đóng"))
+        self.log(self.sweep_note, "warn")
+        self._push_state()
+        self.lobby_back()
+        return True
 
     def _min_hands_ready(self, row):
         """Bàn đủ tay để vào sau khi xáo bài (0 = không lọc)."""
@@ -1743,7 +1839,8 @@ class BaccaratController:
                     # Bàn WM: chip treo lên ô trước, đọc lại số tiền, đủ mới bấm xác nhận
                     # — cùng nguyên tắc an toàn của bản LONG-LONG (không đặt thiếu/lệch).
                     result = WMBet(self.browser).place(side, stake, confirm=True,
-                                                       wait_seconds=BET_GATE_TIMEOUT)
+                                                       wait_seconds=BET_GATE_TIMEOUT,
+                                                       allow_short=bool(plan.get("all_in")))
                     plan["placed_at"] = time.time()
                     note = result.get("note") or result.get("error") or ""
                     # Số tiền THẬT sàn xác nhận. Trần bàn/ví có thể cắt lệnh 200 xuống
@@ -1806,7 +1903,7 @@ class BaccaratController:
                     config[key] = bool(params[key])
                     changed.append(key)
             for key in ("bet_side", "bet_stake", "bet_progression", "bet_max_stake",
-                        "min_hands", "auto_side_source"):
+                        "min_hands", "auto_side_source", "place_rotate_after"):
                 if key in params:
                     config[key] = params[key]
                     changed.append(key)
@@ -1885,6 +1982,9 @@ class BaccaratController:
             self.cycle_table_key = None
             self.auto_start_key = None
             self.chip_live = None
+            self.ladder_carry = None
+            self.place_fail_streak = 0
+            self.place_rotations = 0
         self._save_state()
         self.log("Đã reset phiên Baccarat (vốn %s VN2)." % M.fmt_money(self.config["capital"]))
         self._push_state()
@@ -2096,6 +2196,14 @@ class BaccaratController:
                 self.log(("Đặt chip OK: " + note) if ok
                          else ("Chưa đặt được chip: " + note),
                          "win" if ok else "error")
+            if ok:
+                self.place_fail_streak = 0
+                self.place_rotations = 0
+            else:
+                self.place_fail_streak += 1
+                # Bàn này đóng ván trước khi bấm xong (hoặc ô cược bị chặn): ngồi lại chỉ
+                # hỏng tiếp. Đủ ngưỡng thì rời bàn tìm bàn khác có cửa sổ cược dài hơn.
+                self._rotate_for_place_failure(note)
         elif kind == "recovered":
             self.recover_busy = False
             ok, note = data
@@ -2458,6 +2566,10 @@ class BaccaratController:
             self.shoe_watch_key = None
             self.shoe_peak_hands = 0
             self.shoe_reset_since = 0.0
+            # Đã sang bàn khác thành công: chuỗi "không đặt được chip" của bàn cũ hết.
+            self.place_fail_streak = 0
+            # Khôi phục thang cược mang từ bàn xáo bài (start/bind vừa xoá nó).
+            self._restore_ladder_carry()
             self.log("Bắt đầu theo dõi %s." % row["label"])
         else:
             self.sweep_note = "Chưa thể bắt đầu: " + note
