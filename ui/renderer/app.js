@@ -16,7 +16,61 @@ const state = {
   sub: { baccarat: 'play' },
   tableSearch: '',
   huntTick: 0,
+  // Mốc đã báo âm thanh: chỉ kêu khi TRẠNG THÁI ĐỔI, không kêu lại mỗi vòng state.
+  kpi: { signature: null },
 };
+
+/* ---------------------------- âm báo theo trạng thái ----------------------------
+   Chỉ kêu khi TRẠNG THÁI ĐỔI, không kêu lại mỗi vòng `state` (2 giây/lần):
+     bình thường → đủ KPI   : chuông thành công (đi lên, nghe tích cực)
+     bình thường → sự cố    : còi hú (hết vốn, mất phiên)
+   Lần render đầu tiên chỉ "chụp" trạng thái làm mốc, không kêu, để mở app lúc phiên
+   đã chốt lời sẵn cũng không giật mình.
+*/
+function kpiStateOf(snapshot) {
+  const money = snapshot.money || {};
+  const table = snapshot.table || {};
+  const blocked = Array.isArray(money.blocked) ? String(money.blocked[0] || '') : '';
+  const note = Array.isArray(money.blocked) ? String(money.blocked[1] || '') : '';
+  if (blocked === 'TAKE_PROFIT' || table.take_profit_done) {
+    return { level: 'success', note: note || 'Đã chốt lời — đủ KPI phiên.' };
+  }
+  if (blocked === 'NO_CAPITAL') {
+    return { level: 'error', note: note || 'Hết vốn — dừng cược.' };
+  }
+  if (snapshot.session_lost) {
+    return { level: 'error', note: 'Mất phiên đăng nhập — dừng cược.' };
+  }
+  return { level: '', note: '' };
+}
+
+function syncKpiAudio(snapshot) {
+  const current = kpiStateOf(snapshot);
+  const signature = current.level;
+  if (state.kpi.signature === signature) return;
+  const previous = state.kpi.signature;
+  state.kpi.signature = signature;
+  if (previous === null) return;   // render đầu tiên: chỉ ghi mốc, không kêu
+  if (signature === 'success') {
+    window.aibcrAlarm?.success?.(current.note);
+    appendLog('baccarat', 'win', current.note);
+  } else if (signature === 'error' && previous !== 'error') {
+    window.aibcrAlarm?.notify?.(current.note, { level: 'error' });
+    appendLog('baccarat', 'error', current.note);
+  }
+}
+
+/* Lỗi từ lệnh/thông điệp cũng phải kêu còi: đây là lỗi thao tác (đặt chip, kết nối).
+   Chặn bão lỗi lặp bằng cửa sổ thời gian thay vì đếm suốt phiên. */
+let lastNoteErrorAt = 0;
+function noteError(game, text) {
+  const message = String(text || '');
+  if (!message) return;
+  const now = Date.now();
+  if (now - lastNoteErrorAt < 4000) return;
+  lastNoteErrorAt = now;
+  window.aibcrAlarm?.notify?.(message, { level: 'error' });
+}
 
 /* ------------------------------- định dạng ------------------------------- */
 const fmtVn2 = (value) => {
@@ -67,6 +121,7 @@ async function call(game, method, params = {}) {
     const text = (reply && reply.error) || payloadError || 'lỗi không rõ';
     appendLog(game, 'error', `${method}: ${text}`);
     toast(text);
+    noteError(game, text);
     return null;
   }
   return reply.result;
@@ -96,6 +151,61 @@ function renderLog(game) {
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+/* ------------------------------ giao diện & menu ------------------------------
+   Giao diện sáng/tối: đổi bằng biến CSS trên :root, nhớ lựa chọn.
+   Panel trái: thu gọn được về dải icon (vẫn đổi được trò chơi) và nhớ trạng thái. */
+const THEME_KEY = 'aibcr.theme';
+const RAIL_KEY = 'aibcr.railCollapsed';
+
+function applyTheme(theme) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem(THEME_KEY, next); } catch (error) {}
+  const toggle = $('#theme-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', String(next === 'light'));
+    toggle.title = next === 'light' ? 'Chuyển sang giao diện tối' : 'Chuyển sang giao diện sáng';
+  }
+}
+
+function initTheme() {
+  let saved = 'dark';
+  try { saved = localStorage.getItem(THEME_KEY) || 'dark'; } catch (error) {}
+  applyTheme(saved);
+  const toggle = $('#theme-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+    });
+  }
+}
+
+function setRailCollapsed(collapsed) {
+  const shell = $('.shell');
+  if (!shell) return;
+  shell.classList.toggle('rail-collapsed', !!collapsed);
+  try { localStorage.setItem(RAIL_KEY, String(!!collapsed)); } catch (error) {}
+  const toggle = $('#sidebar-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.title = collapsed ? 'Mở thanh menu bên trái' : 'Đóng thanh menu bên trái';
+  }
+}
+
+function initRail() {
+  let saved = false;
+  try { saved = localStorage.getItem(RAIL_KEY) === 'true'; } catch (error) {}
+  setRailCollapsed(saved);
+  const toggle = $('#sidebar-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      setRailCollapsed(!$('.shell').classList.contains('rail-collapsed'));
+    });
+  }
+  const collapse = $('#rail-collapse');
+  if (collapse) collapse.addEventListener('click', () => setRailCollapsed(true));
 }
 
 // Nút "Mở Chrome" phải luôn bấm lại được: người dùng có thể đóng cửa sổ Chrome
@@ -382,14 +492,32 @@ function renderTables(rows) {
     .join('');
 }
 
-function renderHistory(history, money) {
+function renderHistory(history, money, stats) {
   const body = $('#ba-history-body');
   const note = $('#ba-history-note');
   if (!body) return;
   const rows = (history || []).slice().reverse();
   if (note) {
-    note.textContent = `${money.hands || 0} tay · ${money.wins || 0} thắng / ${money.losses || 0} thua / `
-      + `${money.pushes || 0} hoà · lãi/lỗ ${fmtSigned(money.profit)} · sụt vốn lớn nhất ${fmtMoney(money.drawdown)}`;
+    note.textContent = `Phiên này: ${money.hands || 0} tay · ${money.wins || 0} thắng / `
+      + `${money.losses || 0} thua / ${money.pushes || 0} hoà · lãi/lỗ `
+      + `${fmtSigned(money.profit)} · sụt vốn lớn nhất ${fmtMoney(money.drawdown)}`;
+  }
+  const statsBox = $('#ba-history-stats');
+  if (statsBox) {
+    if (!stats || !stats.rows) {
+      statsBox.innerHTML = '';
+    } else {
+      const chip = (label, value) => `<div class="history-stat"><span>${label}</span><b>${value}</b></div>`;
+      statsBox.innerHTML = [
+        chip('Tổng tay', fmtUnits(stats.hands)),
+        chip('Thắng', fmtUnits(stats.wins)),
+        chip('Thua', fmtUnits(stats.losses)),
+        chip('Hoà', fmtUnits(stats.pushes)),
+        chip('Tỉ lệ thắng', `${Number(stats.win_rate || 0).toFixed(2)}%`),
+        chip('Tổng cược', fmtMoney(stats.staked)),
+        chip('Lãi/lỗ tích luỹ', fmtSigned(stats.profit)),
+      ].join('');
+    }
   }
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="8" class="empty">Chưa có tay nào được ghi.</td></tr>';
@@ -554,6 +682,7 @@ function renderAiPanel(live) {
 function renderBaccarat(snapshot) {
   if (!snapshot) return;
   state.baccarat = snapshot;
+  syncKpiAudio(snapshot);
   const money = snapshot.money || {};
   const table = snapshot.table || {};
   const plan = snapshot.plan || {};
@@ -750,7 +879,13 @@ function renderBaccarat(snapshot) {
   renderTables(snapshot.tables || []);
   renderBaConfig(config);
   renderAiPanel(snapshot.live);
-  renderHistory(snapshot.history || [], money);
+  renderHistory(snapshot.history || [], money, snapshot.history_stats || null);
+  const fileNote = $('#ba-history-file');
+  if (fileNote) {
+    fileNote.textContent = snapshot.history_file
+      ? `File lưu tích luỹ: ${snapshot.history_file} (cùng thư mục với state phiên).`
+      : '';
+  }
 }
 
 /* ============================== sự kiện chung ============================== */
@@ -771,7 +906,9 @@ api.onEngineEvent(({ game, event, data }) => {
     return;
   }
   if (event === 'log') {
-    appendLog(game, data.level || 'info', data.text || '');
+    const level = data.level || 'info';
+    appendLog(game, level, data.text || '');
+    if (level === 'error') window.aibcrAlarm?.notify?.(data.text || '', { level });
     return;
   }
   if (event === 'ready') {
@@ -1003,25 +1140,40 @@ $('#ba-save-url').addEventListener('click', async () => {
   showDialog('Đã lưu thay đổi', [`Link mở đầu: ${$('#ba-start-url').value.trim()}`]);
 });
 
+/* Lịch sử: xuất theo định dạng chọn (CSV/JSON/TXT) từ file tích luỹ trên engine —
+   không phụ thuộc 200 dòng đang hiển thị, nên lấy được toàn bộ dữ liệu cũ. */
 $('#ba-export').addEventListener('click', async () => {
-  const snap = state.baccarat;
-  const rows = (snap && snap.history) || [];
-  if (!rows.length) {
-    toast('Chưa có dữ liệu để xuất.');
+  const format = ($('#ba-export-format') || {}).value || 'csv';
+  const reply = await call('baccarat', 'history.export', { format });
+  if (!reply) return;
+  const saved = await api.saveText(reply.name, reply.text);
+  if (saved && saved.ok) {
+    toast(`Đã lưu ${reply.rows} dòng: ${saved.path}`);
+  } else if (saved && saved.error) {
+    toast(saved.error);
+  }
+});
+
+$('#ba-history-reset').addEventListener('click', async () => {
+  const stats = (state.baccarat && state.baccarat.history_stats) || {};
+  const total = Number(stats.rows || 0);
+  if (!total) {
+    toast('Lịch sử đang rỗng, không có gì để xoá.');
     return;
   }
-  const head = ['time', 'table', 'hand', 'bet', 'result', 'stake', 'delta', 'outcome', 'balance_after'];
-  const csv = [head.join(',')]
-    .concat(rows.map((row) => head.map((key) => {
-      const value = row[key === 'time' ? 'at' : key];
-      const text = value === null || value === undefined ? '' : String(value);
-      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-    }).join(',')))
-    .join('\n');
-  const name = `aibcr-baccarat-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.csv`;
-  const saved = await api.saveText(name, csv);
-  if (saved && saved.ok) toast(`Đã lưu: ${saved.path}`);
-  else if (saved && saved.error) toast(saved.error);
+  // Xoá dữ liệu đối chiếu là thao tác không lấy lại được trên UI, nên phải xác nhận
+  // và nói rõ bản sao sẽ được lưu trước khi xoá.
+  const ok = window.confirm(
+    `Xoá toàn bộ ${total} dòng lịch sử tích luỹ?\n\n`
+    + 'Một bản sao .jsonl sẽ được giữ lại để bạn đối chiếu.');
+  if (!ok) return;
+  const reply = await call('baccarat', 'history.reset', {});
+  if (!reply) return;
+  toast(reply.note || `Đã xoá ${total} dòng lịch sử.`);
+  showDialog('Đã xoá lịch sử', [
+    `Đã xoá ${fmtUnits(reply.removed)} dòng.`,
+    reply.archive ? `Bản sao lưu: ${reply.archive}` : 'Không có bản sao (lịch sử rỗng).',
+  ]);
 });
 
 $('#ba-clear-log').addEventListener('click', () => {
@@ -1116,6 +1268,9 @@ $('#ba-ai-key-clear').addEventListener('click', async () => {
 
 /* ---------------------------------- khởi động ---------------------------------- */
 (async function boot() {
+  initTheme();
+  initRail();
+  window.aibcrAlarm?.init?.();
   renderLog('baccarat');
   const info = await api.info();
   $('#app-ver').textContent = `v${info.version}`;

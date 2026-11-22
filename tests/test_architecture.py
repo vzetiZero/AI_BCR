@@ -135,6 +135,7 @@ class StructureTests(unittest.TestCase):
     def test_mvc_modules_are_present(self):
         for rel in ("aibcr/config.py", "aibcr/__main__.py",
                     "aibcr/models/money.py", "aibcr/models/live_sim.py",
+                    "aibcr/models/history.py",
                     "aibcr/adapters/browser.py", "aibcr/adapters/lobby_stream.py",
                     "aibcr/adapters/table_bets.py",
                     "aibcr/controllers/baccarat.py",
@@ -150,7 +151,8 @@ class StructureTests(unittest.TestCase):
 
     def test_electron_ui_files_are_present(self):
         for rel in ("ui/package.json", "ui/main.js", "ui/preload.js",
-                    "ui/renderer/index.html", "ui/renderer/app.js", "ui/renderer/styles.css"):
+                    "ui/renderer/index.html", "ui/renderer/app.js",
+                    "ui/renderer/alarm.js", "ui/renderer/styles.css"):
             self.assertTrue((ROOT / rel).exists(), rel)
 
     def test_games_use_a_single_baccarat_profile(self):

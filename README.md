@@ -340,6 +340,26 @@ Hành vi của `bet.place`:
 Sổ vốn, lịch sử và chốt lời vẫn dùng `aibcr/models/money.py`; dữ liệu lưu ở file
 state (không chứa API key).
 
+### Lịch sử cược lưu bền vững (tab Lịch sử)
+
+Mỗi tay đã kết toán được ghi nối thêm (append-only JSONL) vào `aibcr_history.jsonl`
+cạnh file state — xem `aibcr/models/history.py`. Vì vậy:
+
+- Mở lại app **không mất lịch sử**: `session.reset` / `session.new` chỉ tạo sổ vốn mới,
+  file lịch sử giữ nguyên. State file vẫn chỉ có 500 dòng cuối, nhưng file JSONL tích
+  luỹ đủ mọi tay.
+- Ghi trùng được chặn bằng khoá `(armed_at, table_key, hand)` nên gọi lưu nhiều lần
+  (mỗi lần đổi state) không sinh bản ghi trùng, và nạp lại file vẫn giữ đúng khoá vì
+  `armed_at` được lưu cùng dòng.
+- Tab Lịch sử hiển thị **tích luỹ** (tối đa `HISTORY_ROWS_SHOWN` dòng gần nhất) kèm
+  dải thống kê: tổng tay, thắng/thua/hoà, tỉ lệ thắng, tổng cược, lãi/lỗ tích luỹ.
+- **Xuất file** (`history.export`) với `format` = `csv` (có BOM để Excel đọc đúng tiếng
+  Việt), `json`, hoặc `txt` (báo cáo cột cố định kèm phần tổng hợp). Nội dung lấy từ
+  file tích luỹ chứ không phải 200 dòng đang hiển thị.
+- **Reset lịch sử** (`history.reset`) là đường duy nhất xoá dữ liệu, và luôn chép bản
+  sao sang `aibcr-history-<thời điểm>.jsonl` trước khi xoá để còn đối chiếu. UI hỏi xác
+  nhận kèm số dòng sẽ xoá.
+
 ## Lệnh JSON-RPC
 
 ```
@@ -350,7 +370,7 @@ tables, table.enterValid|cancelEnter|open|select|leave,
 tool.start|stop, scan, chips.read,
 live.start|stop|state|analyze, ai.key.set,
 bet.config|bet.place,
-config.get|set, session.new|reset|recover, log.clear, export
+config.get|set, session.new|reset|recover, history.reset|export, log.clear, export
 ```
 
 UI chỉ gọi `table.enterValid` cho thao tác vào bàn; `table.open`/`table.select` giữ

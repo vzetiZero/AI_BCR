@@ -291,13 +291,18 @@ ipcMain.handle('app:info', () => ({
 
 ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
 
-// Lưu file text (CSV lịch sử bàn) qua hộp thoại của Windows.
+// Lưu file text (CSV/JSON/TXT lịch sử) qua hộp thoại của Windows. Bộ lọc lấy theo
+// đuôi file mà renderer gửi lên để người dùng đổi được sang định dạng khác.
 ipcMain.handle('app:saveText', async (_event, { name, text }) => {
   try {
+    const safeName = String(name || 'aibcr-export.csv');
+    const ext = (path.extname(safeName).replace('.', '') || 'csv').toLowerCase();
+    const filterName = { csv: 'CSV', json: 'JSON', txt: 'Văn bản' }[ext] || 'Tất cả';
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Lưu file',
-      defaultPath: path.join(PROJECT_ROOT, name || 'aibcr-export.csv'),
-      filters: [{ name: 'CSV', extensions: ['csv'] }, { name: 'Tất cả', extensions: ['*'] }],
+      defaultPath: path.join(PROJECT_ROOT, safeName),
+      filters: [{ name: filterName, extensions: [ext] },
+                { name: 'Tất cả', extensions: ['*'] }],
     });
     if (result.canceled || !result.filePath) return { ok: false, error: 'Đã huỷ lưu file.' };
     await fs.promises.writeFile(result.filePath, String(text ?? ''), 'utf8');

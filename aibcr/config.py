@@ -43,3 +43,6 @@ SHOE_RESET_CONFIRM_SECONDS = 5.0
 # Số lượt săn tối đa khi đang lọc bàn theo ``min_hands``. Không có bàn nào đủ tay sau
 # ngần này lượt thì nhận bàn nhiều tay nhất (kèm cảnh báo) để tool không kẹt vô hạn.
 MIN_HANDS_HUNT_ROUNDS = 12
+# Tab Lịch sử hiển thị bao nhiêu dòng gần nhất của file lịch sử tích luỹ. Toàn bộ dữ
+# liệu vẫn còn trong aibcr_history.jsonl để xuất/xem lại.
+HISTORY_ROWS_SHOWN = 2000

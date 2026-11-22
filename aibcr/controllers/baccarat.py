@@ -36,6 +36,7 @@ from aibcr.live.wm_reader import WMReader, find_wm_page, find_wm_table
 from aibcr.live import ai as LIVE_AI
 from aibcr.live.predict import road_follow as predict_road_follow
 from aibcr.models import engine as E
+from aibcr.models import history as H
 from aibcr.models import money as M
 from aibcr.models.live_sim import (PROGRESS_FLAT, PROGRESS_MODES, PROGRESS_NAME,
                                    LiveSimulation, compare_chips, progress_stake,
@@ -131,6 +132,10 @@ class BaccaratController:
         self.browser = BR.BrowserSession()
         self.stream = LS.LobbyStream(self.browser, human_mouse=self.config["human_mouse"],
                                      game="baccarat")
+        # Lịch sử tay bền vững: file JSONL riêng cạnh state file, KHÔNG bị xoá khi
+        # reset phiên hay tạo phiên mới — chỉ nút Reset lịch sử mới xoá (có lưu bản sao).
+        self.history_path = self.state_path.with_name("aibcr_history.jsonl")
+        self.history = H.HistoryStore(self.history_path)
         self.sim = self._build_sim()
 
         self.tables = {}
@@ -314,6 +319,53 @@ class BaccaratController:
                 sim.log = list(saved["log"])
         return sim
 
+    def _sync_history(self):
+        """Chép các tay mới trong ``sim.log`` vào file lịch sử bền vững.
+
+        ``HistoryStore.append`` tự dedupe theo (bàn, số tay, mốc chốt lệnh) nên gọi
+        lại nhiều lần không sinh bản ghi trùng. Đây là lý do lịch sử còn nguyên sau khi
+        mở lại app dù state file chỉ giữ 500 dòng cuối.
+
+        Dùng ``self.lock`` (RLock) vì hàm này được gọi từ cả vòng nền (``_save_state``)
+        lẫn ``snapshot()`` khi UI hỏi state — hai thread cùng ghi file JSONL là hỏng dữ
+        liệu.
+        """
+        try:
+            with self.lock:
+                if self.history is not None and self.sim.log:
+                    self.history.append(self.sim.log)
+        except (OSError, ValueError) as exc:
+            self.log("Không ghi được lịch sử (%s)." % type(exc).__name__, "error")
+
+    def history_reset(self):
+        """Xoá lịch sử tích luỹ. Luôn lưu bản sao archive trước khi xoá."""
+        with self.lock:
+            removed, archive = self.history.clear()
+            # Dọn luôn bộ đệm RAM + state để không tự "mọc lại" dữ liệu vừa xoá.
+            self.sim.log = []
+            self._save_state()
+        note = "Đã xoá %d dòng lịch sử." % removed
+        if archive is not None:
+            note += " Bản sao: %s" % archive.name
+        self.log(note, "warn")
+        self._push_state()
+        return {"ok": True, "removed": removed,
+                "archive": (archive.name if archive is not None else ""), "note": note}
+
+    def history_export(self, params=None):
+        """Sinh nội dung file xuất (csv/json/txt) để UI lưu qua hộp thoại."""
+        params = params or {}
+        fmt = str(params.get("format") or "csv").strip().lower()
+        if fmt not in H.EXPORT_FORMATS:
+            return {"ok": False,
+                    "error": "Định dạng phải là csv, json hoặc txt."}
+        rows = self.history.rows()
+        if not rows:
+            return {"ok": False, "error": "Chưa có lịch sử để xuất."}
+        return {"ok": True, "format": fmt, "rows": len(rows),
+                "name": H.export_name(fmt), "text": H.export_text(rows, fmt),
+                "stats": self.history.stats()}
+
     def _save_state(self):
         with self.lock:
             book = self.sim.money
@@ -327,6 +379,7 @@ class BaccaratController:
                            "peak", "max_drawdown", "loss_streak")},
                 "log": self.sim.log[-500:],
             }
+        self._sync_history()
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.state_path.with_suffix(".tmp")
@@ -609,10 +662,14 @@ class BaccaratController:
                 "win_rate": _finite((book.wins / decisive * 100) if decisive else 0.0),
                 "blocked": list(book.blocked) if book.blocked else None,
             }
+            # UI hiển thị lịch sử TÍCH LUỸ (mọi phiên) chứ không chỉ phiên hiện tại, để
+            # người dùng thống kê được sau khi mở lại app. Gọi _sync_history trước để
+            # các tay vừa kết toán trong bộ nhớ cũng có mặt ngay, không chờ _save_state.
+            self._sync_history()
+            stored = self.history.rows(limit=HISTORY_ROWS_SHOWN)
             history = [{
                 "time": _finite(entry.get("time")),
-                "at": time.strftime("%H:%M:%S", time.localtime(_finite(entry.get("time"),
-                                                                      time.time()))),
+                "at": str(entry.get("at") or ""),
                 "table": str(entry.get("table") or ""),
                 "hand": int(_finite(entry.get("hand"))),
                 "bet": str(entry.get("bet") or ""),
@@ -621,7 +678,8 @@ class BaccaratController:
                 "delta": _finite(entry.get("delta")),
                 "outcome": str(entry.get("outcome") or ""),
                 "balance_after": _finite(entry.get("balance_after")),
-            } for entry in sim.log[-200:]]
+            } for entry in stored]
+            history_stats = self.history.stats()
             plan = self._plan()
             chip_check = self.chip_check() if self.sim.table_key else None
             now = time.time()
@@ -707,6 +765,8 @@ class BaccaratController:
                 "live": self.live_snapshot(),
                 "config": json.loads(json.dumps(self.config)),
                 "history": history,
+                "history_stats": history_stats,
+                "history_file": self.history_path.name,
                 "log_tail": list(sim.log[-15:]),
             }
 
@@ -2851,6 +2911,8 @@ class BaccaratController:
             "config.set": self.config_set,
             "session.reset": lambda p: self.session_reset(),
             "session.new": self.session_new,
+            "history.reset": lambda p: self.history_reset(),
+            "history.export": self.history_export,
             "session.recover": lambda p: self.session_recover(),
             "log.clear": lambda p: {"ok": True},
             "export": lambda p: {"log": list(self.sim.log)},

@@ -9,8 +9,17 @@
 </head>
 <body>
   <header class="titlebar">
+    <button id="sidebar-toggle" class="tb-btn" type="button" title="Đóng/mở thanh menu bên trái" aria-expanded="true" aria-controls="rail">
+      <span class="tb-burger" aria-hidden="true"></span>
+    </button>
     <div class="brand"><span class="dot"></span> AI_BCR <em>Desktop</em></div>
     <div class="drag"></div>
+    <div class="tb-actions">
+      <button id="theme-toggle" class="theme-toggle" type="button" title="Chuyển giao diện sáng/tối" aria-label="Chuyển giao diện sáng/tối">
+        <span class="theme-icon theme-icon-dark" aria-hidden="true">&#9790;</span>
+        <span class="theme-icon theme-icon-light" aria-hidden="true">&#9728;</span>
+      </button>
+    </div>
     <div class="winbtns">
       <button data-win="minimize" title="Thu nhỏ">&#8211;</button>
       <button data-win="maximize" title="Phóng to">&#9723;</button>
@@ -19,8 +28,11 @@
   </header>
 
   <div class="shell">
-    <aside class="rail">
-      <div class="rail-title">TRÒ CHƠI</div>
+    <aside class="rail" id="rail">
+      <div class="rail-head">
+        <div class="rail-title">TRÒ CHƠI</div>
+        <button class="rail-collapse" id="rail-collapse" type="button" title="Thu gọn thanh menu" aria-label="Thu gọn thanh menu">&#8249;</button>
+      </div>
       <button class="game active" data-game="baccarat">
         <span class="g-ico">B</span>
         <span class="g-txt"><b>Baccarat</b><small>live + AI</small></span>
@@ -39,6 +51,20 @@
             <h1>BACCARAT</h1>
              </div>
           <div class="head-actions">
+            <div class="alarm-box" id="alarm-sound-box">
+              <button id="alarm-toggle" class="alarm-toggle" type="button" title="Bật/Tắt âm báo" aria-pressed="true">
+                <span id="alarm-sound-icon" class="alarm-icon" aria-hidden="true">&#128266;</span>
+                <span class="alarm-label">Âm báo</span>
+                <span id="alarm-state-text" class="alarm-state">BẬT</span>
+              </button>
+              <label class="alarm-volume">
+                <span>Âm lượng</span>
+                <input id="alarm-volume" type="range" min="0" max="100" step="5" value="80" aria-label="Âm lượng âm báo" />
+                <strong id="alarm-volume-text">80%</strong>
+              </label>
+              <button id="alarm-test" class="alarm-test" type="button" title="Nghe thử còi sự cố">Thử lỗi</button>
+              <button id="alarm-test-success" class="alarm-test ok" type="button" title="Nghe thử chuông đủ KPI">Thử thành công</button>
+            </div>
             <span class="chip" id="ba-chrome-chip" data-state="off">Chrome: chưa kết nối</span>
             <span class="chip" id="ba-tool-chip" data-state="off">Tool: đang dừng</span>
             <button class="btn primary" id="ba-tool">Chạy tool</button>
@@ -321,10 +347,22 @@
         <div class="subview hidden" data-game="baccarat" data-sub="history">
           <div class="card pad">
             <div class="log-head">
-              <h3>Kết quả bàn</h3>
-              <button class="btn tiny" id="ba-export">Xuất CSV</button>
+              <h3>Lịch sử cược (tích luỹ)</h3>
+              <div class="history-actions">
+                <label class="history-format">Định dạng
+                  <select id="ba-export-format">
+                    <option value="csv">CSV (Excel)</option>
+                    <option value="json">JSON</option>
+                    <option value="txt">TXT (báo cáo)</option>
+                  </select>
+                </label>
+                <button class="btn tiny" id="ba-export">Xuất file</button>
+                <button class="btn tiny danger-btn" id="ba-history-reset">Reset lịch sử</button>
+              </div>
             </div>
             <div class="conn-note" id="ba-history-note"></div>
+            <div class="history-stats" id="ba-history-stats"></div>
+            <p class="hint" id="ba-history-file"></p>
             <div class="table-wrap">
               <table class="grid-table">
                 <thead>
@@ -336,6 +374,9 @@
                 <tbody id="ba-history-body"></tbody>
               </table>
             </div>
+            <p class="hint">Mỗi tay được ghi ngay vào <b id="ba-history-filename">aibcr_history.jsonl</b>
+              nên mở lại app vẫn còn. Reset phiên hoặc tạo phiên mới KHÔNG xoá lịch sử;
+              chỉ nút <b>Reset lịch sử</b> mới xoá, và luôn lưu bản sao trước khi xoá.</p>
           </div>
         </div>
 
@@ -365,6 +406,7 @@
     </div>
   </div>
 
+  <script src="alarm.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

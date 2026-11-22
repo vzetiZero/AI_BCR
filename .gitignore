@@ -14,6 +14,9 @@ __pycache__/
 aibcr_state.json
 aibcr_state_baccarat.json
 aibcr-session-*.json
+# Lich su cuoc tich luy (du lieu ca nhan) + ban sao khi reset
+aibcr_history.jsonl
+aibcr-history-*.jsonl
 live_reports.jsonl
 aibcr_trace.jsonl
 aibcr_ws_frames*.jsonl
