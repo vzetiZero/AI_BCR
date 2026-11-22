@@ -40,6 +40,9 @@ PLACE_CONFIRM_TIMEOUT = 60.0
 # tìm bàn còn đủ tay. Số tay tụt phải giữ nguyên ít nhất ngần này giây mới coi là xáo
 # bài thật — tránh nhầm khi bộ đọc live vừa gắn lại và chưa nạp lịch sử.
 SHOE_RESET_CONFIRM_SECONDS = 5.0
+# Số tay tối đa vẫn coi là xáo bài sau khi bàn đã từng có nhiều tay. WM đôi khi còn
+# báo 1 tay (ván đầu shoe mới) thay vì 0, nên ngưỡng này phải cao hơn 0 để không bỏ lỡ.
+SHOE_RESET_MIN_HANDS = 1
 # Số lượt săn tối đa khi đang lọc bàn theo ``min_hands``. Không có bàn nào đủ tay sau
 # ngần này lượt thì nhận bàn nhiều tay nhất (kèm cảnh báo) để tool không kẹt vô hạn.
 MIN_HANDS_HUNT_ROUNDS = 12

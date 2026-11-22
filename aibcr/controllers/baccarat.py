@@ -1464,9 +1464,10 @@ class BaccaratController:
         phòng gần như không có cơ sở (lịch sử cũ của shoe trước không dùng được), nên
         thà về sảnh và vào bàn đang có sẵn >= ``min_hands`` tay.
 
-        Chỉ tính là xáo bài khi số tay **đã từng** > 0 rồi tụt xuống 0 và giữ nguyên
-        như vậy ``SHOE_RESET_CONFIRM_SECONDS`` giây: bộ đọc live vừa gắn lại (nạp lịch
-        sử chưa xong) cũng tạm báo 0 tay, không được nhầm.
+        Chỉ tính là xáo bài khi số tay **đã từng** > ``SHOE_RESET_MIN_HANDS`` rồi tụt xuống
+        ``<= SHOE_RESET_MIN_HANDS`` và giữ nguyên ``SHOE_RESET_CONFIRM_SECONDS`` giây: bộ đọc
+        live vừa gắn lại (nạp lịch sử chưa xong) cũng tạm báo ít tay, không được nhầm. WM đôi
+        khi còn báo 1 tay (ván đầu shoe mới) thay vì 0, nên ngưỡng là <= 1 chứ không phải == 0.
         """
         if not self.tool_running or not self.config.get("leave_on_shoe_reset"):
             self.shoe_watch_key = None
@@ -1485,17 +1486,17 @@ class BaccaratController:
             self.shoe_peak_hands = hands
             self.shoe_reset_since = 0.0
             return
-        if hands > 0:
+        if hands > SHOE_RESET_MIN_HANDS:
             self.shoe_peak_hands = max(self.shoe_peak_hands, hands)
             self.shoe_reset_since = 0.0
             return
-        if self.shoe_peak_hands <= 0:
+        if self.shoe_peak_hands <= SHOE_RESET_MIN_HANDS:
             return
         clock = time.time() if now is None else now
         if not self.shoe_reset_since:
             self.shoe_reset_since = clock
-            self.log("Bàn %s vừa xáo lại bài (0 tay) · chờ xác nhận trước khi rời bàn."
-                     % self.sim.table_name, "warn")
+            self.log("Bàn %s vừa xáo lại bài (<= %d tay) · chờ xác nhận trước khi rời bàn."
+                     % (self.sim.table_name, SHOE_RESET_MIN_HANDS), "warn")
             return
         if clock - self.shoe_reset_since < SHOE_RESET_CONFIRM_SECONDS:
             return
@@ -1556,8 +1557,8 @@ class BaccaratController:
             stale["ws_confirmed_letters"] = ""
             stale["ts"] = 0.0
         self.cycle_table_key = None
-        self.sweep_note = ("Bàn %s vừa xáo bài (0 tay) · dữ liệu shoe mới chưa đủ cho AI "
-                           "· rời bàn, chỉ vào bàn ≥ %d tay." % (name, required))
+        self.sweep_note = ("Bàn %s vừa xáo bài (<= %d tay) · dữ liệu shoe mới chưa đủ cho AI "
+                         "· rời bàn, chỉ vào bàn ≥ %d tay." % (name, SHOE_RESET_MIN_HANDS, required))
         self.log(self.sweep_note, "warn")
         self._push_state()
         self.lobby_back()
