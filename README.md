@@ -109,7 +109,13 @@ Một lần bấm chạy đúng chuỗi:
    DOM lẫn `Network.enable` trên tab mẹ đều không thấy WM. App xử lý bằng
    `aibcr/adapters/wm_targets.py`: `Target.getTargets` → chọn target iframe WM →
    `Target.attachToTarget(flatten)` → chạy `WM_DETECT_JS` và `Network.enable` **trong
-   target đó**. Vì vậy sảnh và WebSocket của WM vẫn đọc được dù bị bọc ngoài.
+   target đó**.
+
+   **Đứng ở trang cổng là quét được luôn** — không phải copy link iframe ra tab mới:
+   `_ensure_wm_page` ưu tiên tab WM trực tiếp, không có thì gắn vào iframe OOPIF trong
+   trang cổng. Target iframe **chết khi iframe reload/đổi trang**, nên `_target_alive`
+   kiểm tra và xoá cache; `_sweep_through_oopif` trả `None` để `sweep()` fallback sang
+   tab trực tiếp thay vì báo lỗi. Đây là nguyên nhân trước đây "lúc quét được lúc không".
 
    WM nhận diện **theo nội dung trước, theo id iframe sau**: `#game_list_box` / ô
    `groupBac_<game>_<group>_<type>` cho sảnh, `#container` có `gameNNN groupNNN` /

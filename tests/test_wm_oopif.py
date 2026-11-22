@@ -302,17 +302,132 @@ class SweepUsesOopifTests(unittest.TestCase):
             return FakeFrameSocket()
 
         original = WT.open_frame_socket
+        # Target phải "còn sống" thì luồng mới đi qua iframe (đây là guard mới).
+        original_alive = LobbyStream._target_alive
         WT.open_frame_socket = fake_open
+        LobbyStream._target_alive = staticmethod(lambda target_id: True)
         try:
             stream._ensure_wm_page = lambda: True
             stream._wait_lobby_context = lambda ws, seconds=25.0: (1, {"tiles": []})
             stream._wm_detect = lambda ws: {"is_wm": True, "kind": "lobby"}
             stream._sweep_wm = lambda ws, ctx, snap, mx, fav: [{"table_id": "101_7"}]
-            rows = stream.sweep(max_seconds=1)
+            rows = stream._sweep_through_oopif(max_seconds=1, favorites_only=False)
         finally:
             WT.open_frame_socket = original
+            LobbyStream._target_alive = original_alive
         self.assertEqual(used.get("target_id"), "F1",
                          "phải gắn đúng target iframe, không phải tab mẹ")
+        self.assertEqual(rows, [{"table_id": "101_7"}])
+        session.stop_wm_watch()
+
+    def test_a_dead_oopif_target_falls_back_instead_of_failing(self):
+        """iframe reload/đóng làm target chết: phải dò lại, không bám socket hỏng.
+
+        Đây là nguyên nhân "lúc quét được lúc không" khi người dùng đứng ở trang cổng.
+        """
+        from aibcr.adapters import browser as BR
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        session = BR.BrowserSession()
+        session.wm_oopif_target = "DEAD"
+        session.wm_oopif_parent = "P1"
+        stream = LobbyStream(session, game="baccarat")
+        opened = []
+
+        original_open = WT.open_frame_socket
+        WT.open_frame_socket = lambda port=9222, target_id=None, timeout=10.0: (
+            opened.append(target_id) or (_ for _ in ()).throw(RuntimeError("gone")))
+        try:
+            result = stream._sweep_through_oopif(max_seconds=1, favorites_only=False)
+        finally:
+            WT.open_frame_socket = original_open
+        self.assertIsNone(result, "phải trả None để lớp gọi fallback sang tab trực tiếp")
+        self.assertEqual(session.wm_oopif_target, "", "cache chết phải bị xoá")
+        session.stop_wm_watch()
+
+    def test_target_alive_reports_missing_ids(self):
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        original = WT.all_targets
+        WT.all_targets = lambda port=9222, timeout=4.0: [{"id": "A1"}, {"id": "A2"}]
+        try:
+            self.assertTrue(LobbyStream._target_alive("A1"))
+            self.assertFalse(LobbyStream._target_alive("DEAD"))
+        finally:
+            WT.all_targets = original
+
+    def test_target_alive_is_false_when_cdp_is_down(self):
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        original = WT.all_targets
+
+        def boom(port=9222, timeout=4.0):
+            raise OSError("cdp down")
+
+        WT.all_targets = boom
+        try:
+            self.assertFalse(LobbyStream._target_alive("A1"))
+        finally:
+            WT.all_targets = original
+
+
+class EnsureWmPageOrderTests(unittest.TestCase):
+    """Ưu tiên tab WM trực tiếp trước iframe (ổn định hơn)."""
+
+    def test_direct_tab_is_preferred_over_oopif(self):
+        from aibcr.adapters import browser as BR
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        session = BR.BrowserSession()
+
+        class FakeSession(BR.BrowserSession):
+            def _cdp_pages(self):
+                return [{"id": "DIRECT", "url": WRAPPER},
+                        {"id": "P2", "url": "https://wmvn.m8810.com/?sid=x&co=wm"}]
+
+        stream = LobbyStream(FakeSession(), game="baccarat")
+        used = []
+        stream._probe_wm = lambda page: (
+            {"is_wm": True, "kind": "lobby"} if page.get("id") == "P2" else {})
+        FakeSession._adopt_oopif_wm = lambda self: used.append("oopif") or True
+        stream._wm_probe_at = 0.0
+        self.assertTrue(stream._ensure_wm_page())
+        self.assertEqual(used, [], "có tab WM trực tiếp thì không cần iframe")
+        self.assertEqual(stream.session.wm_page_id, "P2")
+
+    def test_oopif_is_used_when_only_the_wrapper_exists(self):
+        from aibcr.adapters import browser as BR
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        class OnlyWrapper(BR.BrowserSession):
+            def _cdp_pages(self):
+                return [{"id": "P1", "url": WRAPPER}]
+
+        session = OnlyWrapper()
+        stream = LobbyStream(session, game="baccarat")
+        stream._probe_wm = lambda page: {}
+        OnlyWrapper._adopt_oopif_wm = lambda self: True
+        stream._wm_probe_at = 0.0
+        self.assertTrue(stream._ensure_wm_page())
+        self.assertEqual(stream.lobby_kind, "wm")
+        session.stop_wm_watch()
+
+    def test_the_scan_can_run_from_the_wrapper_without_copying_the_iframe_url(self):
+        """Yêu cầu người dùng: đứng ở trang cổng là quét được, không phải copy link."""
+        from aibcr.adapters import browser as BR
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        class WrapperOnly(BR.BrowserSession):
+            def _cdp_pages(self):
+                return [{"id": "P1", "url": WRAPPER}]
+
+        session = WrapperOnly()
+        stream = LobbyStream(session, game="baccarat")
+        stream._probe_wm = lambda page: {}
+        WrapperOnly._adopt_oopif_wm = lambda self: True
+        stream._wm_probe_at = 0.0
+        stream._sweep_through_oopif = lambda mx, fav: [{"table_id": "101_7"}]
+        rows = stream.sweep(max_seconds=1)
         self.assertEqual(rows, [{"table_id": "101_7"}])
         session.stop_wm_watch()
 

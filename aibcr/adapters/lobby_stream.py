@@ -1031,31 +1031,19 @@ class LobbyStream:
             # WM nhúng trong iframe KHÁC ORIGIN (vd. wm_casino bọc wmvn.m8810.com):
             # iframe sảnh nằm ở target riêng nên socket phải gắn vào target đó, không
             # phải tab mẹ (tab mẹ chỉ có khung bọc, không có game_list_box).
-            oopif = getattr(self.session, "wm_oopif_target", "")
-            if oopif:
-                from aibcr.adapters import wm_targets as WT
-                ws = WT.open_frame_socket(BR.CDP_PORT, target_id=oopif,
-                                          timeout=BR.SCRIPT_TIMEOUT)
-                self.lobby_kind = "wm"
-                self._command(ws, "Network.enable")
-                self._command(ws, "Runtime.enable")
-                wm_state = self._wm_detect(ws)
-                if wm_state.get("is_wm") and wm_state.get("kind") == "table":
-                    ok, note = self._back_to_lobby_wm(ws, wm_state, 20)
-                    if not ok:
-                        self.last_error = note
-                        return []
-                    self.contexts, self.context_frames = [], {}
-                    self._command(ws, "Runtime.enable")
-                context_id, snapshot = self._wait_lobby_context(ws)
-                if context_id is None:
-                    self.last_error = ("Sảnh WM (trong iframe khác origin) chưa hiển thị "
-                                       "danh sách bàn sau 25 giây chờ.")
-                    return []
-                return self._sweep_wm(ws, context_id, snapshot, max_seconds, favorites_only)
+            #
+            # Target iframe CHẾT khi iframe reload hoặc người dùng đổi trang. Trước đây
+            # chỉ bám OOPIF nên "lúc quét được lúc không". Giờ: thử OOPIF, hỏng thì xoá
+            # cache và quay về tab WM trực tiếp.
+            result = self._sweep_through_oopif(max_seconds, favorites_only)
+            if result is not None:
+                return result
             page = self.session._cdp_page()
             if page is None:
-                self.last_error = "Không có tab sảnh Baccarat trong Chrome CDP 9222."
+                self.last_error = (
+                    "Không tìm thấy sảnh WM để quét. Nếu WM đang nằm trong iframe của "
+                    "trang cổng, hãy để trang đó mở (app tự gắn vào iframe), hoặc mở "
+                    "thẳng wmvn.m8810.com trong cửa sổ Chrome của app.")
                 return []
             import websocket
             ws = websocket.create_connection(BR.validated_endpoint(page), suppress_origin=True,
@@ -1657,26 +1645,41 @@ class LobbyStream:
         return True
 
     def _ensure_wm_page(self):
-        """Nhận diện tab WM khi người dùng quét/mở bàn mà chưa bấm “Nhận tab sảnh”."""
-        if self.session.wm_page_id or getattr(self.session, "wm_oopif_target", ""):
+        """Nhận diện tab/sảnh WM khi người dùng quét/mở bàn mà chưa bấm “Nhận tab sảnh”.
+
+        Người dùng thường đứng ở trang cổng (vd. ``9vnv.com/vn/wm_casino``) và WM nằm
+        trong iframe KHÁC ORIGIN bên trong. Yêu cầu: quét luôn từ đó, KHÔNG bắt người
+        dùng copy link iframe ra tab mới. Vì vậy hàm này phải:
+
+        1. Ưu tiên **tab WM trực tiếp** nếu có (đứng thẳng ở ``wmvn.m8810.com``) — bền
+           nhất, không phụ thuộc iframe.
+        2. Nếu không có, gắn vào **iframe OOPIF** của WM trong trang cổng.
+        3. Cache chỉ được tin khi target còn sống; target chết (iframe reload/đổi trang)
+           thì xoá cache và dò lại — đây là lý do trước đây "lúc quét được lúc không".
+        """
+        # Cache sống: target OOPIF còn tồn tại thì dùng lại.
+        cached_oopif = getattr(self.session, "wm_oopif_target", "")
+        if cached_oopif:
+            if self._target_alive(cached_oopif):
+                return True
+            # Target đã chết: xoá cache để dò lại thay vì bám mãi vào socket hỏng.
+            self.session.wm_oopif_target = ""
+            self.session.wm_oopif_parent = ""
+            self.session.wm_oopif_detect = {}
+        if self.session.wm_page_id and self._target_alive(self.session.wm_page_id):
             return True
+        if self.session.wm_page_id:
+            self.session.wm_page_id = None
         # Kết quả âm được nhớ ngắn: mỗi vòng quét không phải mở CDP dò lại tab cổng.
-        if time.time() - getattr(self, "_wm_probe_at", 0.0) < 30.0:
+        if time.time() - getattr(self, "_wm_probe_at", 0.0) < 3.0:
             return False
         self._wm_probe_at = time.time()
-        # WM nhúng trong iframe KHÁC ORIGIN (OOPIF): DOM tab mẹ không thấy gì nên phải
-        # dò ở cấp target trước, nếu không sẽ mãi báo "không thấy sảnh".
-        try:
-            if self.session._adopt_oopif_wm():
-                self.contexts, self.context_frames = [], {}
-                self.lobby_kind = "wm"
-                return True
-        except Exception:
-            pass
+
+        # 1) Tab WM trực tiếp (ưu tiên: ổn định, không phụ thuộc iframe).
         try:
             pages = self.session._cdp_pages()
         except Exception:
-            return False
+            pages = []
         for page in reversed(pages):
             if BR.is_lobby_url(page.get("url")):
                 continue
@@ -1686,9 +1689,81 @@ class LobbyStream:
             self.session.wm_page_id = page.get("id")
             self.session.start_wm_watch()
             self.contexts, self.context_frames = [], {}
+            self.lobby_kind = "wm"
             return True
+
+        # 2) Iframe khác origin (OOPIF) trong trang cổng.
+        try:
+            if self.session._adopt_oopif_wm():
+                self.contexts, self.context_frames = [], {}
+                self.lobby_kind = "wm"
+                return True
+        except Exception:
+            pass
         self.contexts, self.context_frames = [], {}
         return False
+
+    @staticmethod
+    def _target_alive(target_id):
+        """Target CDP còn tồn tại không (dùng để phát hiện cache đã chết)."""
+        from aibcr.adapters import wm_targets as WT
+
+        try:
+            return any(t.get("id") == target_id for t in WT.all_targets(BR.CDP_PORT))
+        except Exception:
+            return False
+
+    def _sweep_through_oopif(self, max_seconds, favorites_only):
+        """Quét qua iframe WM khác origin. ``None`` = không dùng đường này được.
+
+        Trả rows (kể cả list rỗng) khi đã đi hết đường iframe; trả ``None`` để lớp gọi
+        fallback sang tab WM trực tiếp. Nhờ vậy người dùng đứng ở trang cổng vẫn quét
+        được mà không phải copy link iframe ra tab mới.
+        """
+        from aibcr.adapters import wm_targets as WT
+
+        oopif = getattr(self.session, "wm_oopif_target", "")
+        if not oopif:
+            return None
+        if not self._target_alive(oopif):
+            # iframe đã reload/đóng: bỏ cache, để `_ensure_wm_page` dò lại.
+            self.session.wm_oopif_target = ""
+            self.session.wm_oopif_parent = ""
+            self.session.wm_oopif_detect = {}
+            return None
+        ws = None
+        try:
+            ws = WT.open_frame_socket(BR.CDP_PORT, target_id=oopif,
+                                      timeout=BR.SCRIPT_TIMEOUT)
+        except Exception:
+            # Không gắn được socket vào target (target chết giữa chừng): fallback.
+            self.session.wm_oopif_target = ""
+            self.session.wm_oopif_parent = ""
+            return None
+        try:
+            self.lobby_kind = "wm"
+            self._command(ws, "Network.enable")
+            self._command(ws, "Runtime.enable")
+            wm_state = self._wm_detect(ws)
+            if wm_state.get("is_wm") and wm_state.get("kind") == "table":
+                ok, note = self._back_to_lobby_wm(ws, wm_state, 20)
+                if not ok:
+                    self.last_error = note
+                    return []
+                self.contexts, self.context_frames = [], {}
+                self._command(ws, "Runtime.enable")
+            context_id, snapshot = self._wait_lobby_context(ws)
+            if context_id is None:
+                self.last_error = ("Sảnh WM (trong iframe khác origin) chưa hiển thị "
+                                   "danh sách bàn sau 25 giây chờ.")
+                return []
+            return self._sweep_wm(ws, context_id, snapshot, max_seconds, favorites_only)
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
 
     def probe_tabs(self):
         """Báo cáo từng tab Chrome kèm loại sảnh app nhận diện được (chỉ đọc).
