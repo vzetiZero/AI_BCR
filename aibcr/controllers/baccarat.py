@@ -221,6 +221,8 @@ class BaccaratController:
         self.last_order = None
         # (table_key, số tay) đã chốt lệnh — chặn đặt trùng khi nguồn phát lại một ván.
         self.placed_signatures = set()
+        # Lần tạm dừng sim gần nhất đã báo lỗi (tránh lặp log mỗi nhịp khi sim đứng yên).
+        self._last_pause_note = ""
         # Cầu của bộ đọc WebSocket khi AI live đang chạy. Lượt quét CDP có thể trả về
         # bản cũ (bắt đầu trước khi ván mới về); không được để nó ghi đè/đảo cầu live.
         self.live_road = ""
@@ -2290,8 +2292,11 @@ class BaccaratController:
             if self._auth_blame():
                 self._session_lost(error)
                 return
+            note = "Mất kết nối/đọc cầu lỗi. Hãy đối chiếu lại trước khi tiếp tục."
             with self.lock:
-                self.sim.pause("Mất kết nối/đọc cầu lỗi. Hãy đối chiếu lại trước khi tiếp tục.")
+                self.sim.pause(note)
+            # Phải ghi log mức error: UI phát còi theo mức log, không đọc `sim.note`.
+            self.log(note + " (" + error + ")", "error")
             return
         self.session_lost = False
         self._sync_wallet(reports)
@@ -2459,6 +2464,9 @@ class BaccaratController:
                 self._auto_bet_tick()
                 self._tool_retry_enter(now)
                 self._resume_cycle_hunt(now)
+                # Sim có thể vừa bị tạm dừng vì sự cố dữ liệu (process trả False nên
+                # không đi qua nhánh `changed`) — kiểm tra mỗi nhịp, hàm tự dedupe.
+                self._log_sim_pause()
         self._push_state()
 
     def _watch_enter_valid(self, now):
@@ -2642,7 +2650,9 @@ class BaccaratController:
         self.last_order = None
         self.chip_live = None
         self.chip_read_at = 0.0
-        self.log(self.sim.note, "warn")
+        # Rời bàn vì Chrome không còn trong bàn WM: đây là sự cố (mất chỗ đặt), nên ghi
+        # mức error để âm báo kêu, không phải warn.
+        self.log(self.sim.note, "error")
         self._push_state()
 
     def _sync_live_to_sim(self, live):
@@ -2689,7 +2699,29 @@ class BaccaratController:
             changed = self.sim.process(row)
         if changed:
             self._save_state()
+            # `sim.process` có thể tạm dừng vì sự cố (dữ liệu cũ, xung đột, bỏ tay
+            # liên tiếp). Trạng thái đó chỉ nằm trong `sim.note` nên UI không hú còi
+            # được — ghi log mức error để âm báo của renderer bắt được.
+            self._log_sim_pause()
         return bool(changed)
+
+    def _log_sim_pause(self):
+        """Ghi log lỗi khi sim vừa tạm dừng vì sự cố dữ liệu/đặt chip.
+
+        `LiveSimulation.pause` không phân biệt lý do, nên lọc theo nội dung: dừng do
+        người dùng (dừng tool, rời bàn, chốt lời) không phải sự cố. Hàm tự dedupe theo
+        nội dung nên gọi mỗi nhịp cũng không spam log.
+        """
+        if self.sim.running or not self.sim.note:
+            return
+        # Chốt lời có chuông riêng ở renderer; không được hú còi lỗi cho cùng sự kiện.
+        quiet = ("Đã dừng tool", "Đang rời bàn", "Đã chốt lời", "Đã rời bàn",
+                 "Đã tạm dừng", "đã chốt lời", "mục tiêu lãi")
+        if any(marker in self.sim.note for marker in quiet):
+            return
+        if self.sim.note != self._last_pause_note:
+            self._last_pause_note = self.sim.note
+            self.log(self.sim.note, "error")
 
     def _emit_live(self, data=None):
         live = data if isinstance(data, dict) else self.live_snapshot()

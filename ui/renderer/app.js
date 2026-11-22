@@ -61,13 +61,17 @@ function syncKpiAudio(snapshot) {
 }
 
 /* Lỗi từ lệnh/thông điệp cũng phải kêu còi: đây là lỗi thao tác (đặt chip, kết nối).
-   Chặn bão lỗi lặp bằng cửa sổ thời gian thay vì đếm suốt phiên. */
+   Chống bão lỗi bằng cách so NỘI DUNG gần nhất thay vì cửa sổ thời gian: lỗi khác nội
+   dung phải kêu ngay (vd. đọc cầu lỗi ngay sau khi đặt chip lỗi), còn cùng một lỗi lặp
+   lại thì im để không hú liên tục. */
+let lastNoteError = '';
 let lastNoteErrorAt = 0;
 function noteError(game, text) {
-  const message = String(text || '');
+  const message = String(text || '').trim();
   if (!message) return;
   const now = Date.now();
-  if (now - lastNoteErrorAt < 4000) return;
+  if (message === lastNoteError && now - lastNoteErrorAt < 15000) return;
+  lastNoteError = message;
   lastNoteErrorAt = now;
   window.aibcrAlarm?.notify?.(message, { level: 'error' });
 }

@@ -10,20 +10,32 @@
 const ALARM_STORAGE_KEY = 'aibcr.alarm.enabled';
 const ALARM_VOLUME_KEY = 'aibcr.alarm.volume';
 const ALARM_THROTTLE_MS = 2500;
+// Sự cố KHÁC nội dung thì chỉ cần cách nhau ngần này giây là kêu tiếp (không nuốt mất
+// sự cố thứ hai chỉ vì sự cố thứ nhất vừa hú). Cùng nội dung thì chờ đủ
+// ALARM_THROTTLE_MS mới kêu lại.
+const ALARM_DISTINCT_GAP_MS = 800;
 const SUCCESS_THROTTLE_MS = 4000;
 
 // Chỉ những sự cố tài chính/an toàn mới hú còi. Thông báo tiến trình thường
 // (đang chờ ván, đã vào bàn, bỏ qua tay) không được kích hoạt.
+//
+// Danh sách này KHÔNG phải danh sách trắng bắt buộc: backend đã phân loại mức log
+// (`level === "error"`), nên một thông điệp lỗi mới thêm vẫn hú còi dù chưa có mẫu ở
+// đây. Các mẫu dưới chỉ dùng để nhận diện thông điệp mức `info`/`warn` có tính sự cố.
 const ALARM_PATTERNS = [
   'lệch tiền',
   'chênh lệch',
   'cược sai số tiền',
   'lỗi đặt chip',
+  'chưa đặt được chip',
   'từ chối nhận chip',
+  'chip đã treo',
   'vượt quá giới hạn',
   'khác bàn',
   'lệch bàn',
   'không tìm thấy bàn',
+  'không thấy ô cược',
+  'không mở được bàn',
   'chưa nhận bàn',
   'không đồng bộ',
   'dừng cược',
@@ -35,17 +47,42 @@ const ALARM_PATTERNS = [
   'bảo toàn vốn',
   'tự động ngắt tk',
   'không xếp đủ chip',
+  'không đặt được chip',
   'dừng hẳn',
   'mất phiên',
   'hết vốn',
   'không còn gì để đánh',
   'không kết nối',
+  'không còn đọc được bàn',
+  'mất kết nối',
+  'đọc cầu lỗi',
+  'chưa cập nhật',
+  'nhiều cầu khác nhau',
+  'bàn chưa mở cược',
+  'tự phục hồi chưa xong',
+  'chrome đã đóng',
+  'không lưu được',
+  'không ghi được',
 ];
+
+// Dừng phiên do người dùng hoặc do luồng bình thường: KHÔNG hú còi. Danh sách này phải
+// HẸP và cụ thể — mẫu quá rộng (vd. "quá", "tạm dừng") sẽ nuốt mất sự cố thật như
+// "Dữ liệu quá 30 giây chưa cập nhật" hay "Chrome đã đóng · phiên tạm dừng".
+const ALARM_SUPPRESS = [
+  'đã dừng tool',
+  'đang rời bàn',
+  'đã huỷ tìm bàn hợp lệ',
+  'đã chốt lời',
+  'đã reset phiên',
+  'đã tạo phiên mới',
+];
+
 
 let alarmContext = null;
 let alarmEnabled = true;
 let alarmVolume = 0.8;
 let lastAlarmAt = 0;
+let lastAlarmText = '';
 let lastSuccessAt = 0;
 
 function normalizeForAlarm(text) {
@@ -57,6 +94,7 @@ function normalizeForAlarm(text) {
 }
 
 const ALARM_PATTERNS_NORMALIZED = ALARM_PATTERNS.map(normalizeForAlarm);
+const ALARM_SUPPRESS_NORMALIZED = ALARM_SUPPRESS.map(normalizeForAlarm);
 
 function loadAlarmSettings() {
   try {
@@ -233,16 +271,28 @@ function testSuccessSound() {
   playSuccessChime();
 }
 
-// Hú còi nếu thông điệp khớp mẫu sự cố; chống hú lặp trong 2.5 giây.
+// Hú còi nếu thông điệp là sự cố; chống hú lặp trong 2.5 giây.
+//
+// Backend đã gắn mức cho từng log. `level === "error"` là tín hiệu CHÍNH: mọi thông
+// điệp lỗi mới thêm đều hú còi mà không phải sửa danh sách mẫu. Danh sách mẫu chỉ mở
+// rộng cho thông điệp `warn`/`info` mang tính sự cố (ví dụ "Chip đã treo trên bàn").
+// Danh sách chặn loại các lần dừng hợp lệ (dừng tool, rời bàn, chốt lời) để không hú
+// oan mỗi lần người dùng bấm Dừng.
 function alarmForMessage(message, { force = false, level = '' } = {}) {
-  if (!force && String(level || '').toLowerCase() !== 'error') return false;
   const text = normalizeForAlarm(message);
-  if (!force && !ALARM_PATTERNS_NORMALIZED.some((pattern) => text.includes(pattern))) {
-    return false;
+  const suppressed = ALARM_SUPPRESS_NORMALIZED.some((pattern) => text.includes(pattern));
+  if (!force && suppressed) return false;
+  if (!force) {
+    const isError = String(level || '').toLowerCase() === 'error';
+    const matchesPattern = ALARM_PATTERNS_NORMALIZED.some((pattern) => text.includes(pattern));
+    if (!isError && !matchesPattern) return false;
   }
   const now = Date.now();
-  if (now - lastAlarmAt < ALARM_THROTTLE_MS) return false;
+  const sameAsLast = text === lastAlarmText;
+  const gap = sameAsLast ? ALARM_THROTTLE_MS : ALARM_DISTINCT_GAP_MS;
+  if (now - lastAlarmAt < gap) return false;
   lastAlarmAt = now;
+  lastAlarmText = text;
   return playAlarmSiren();
 }
 

@@ -340,6 +340,30 @@ Hành vi của `bet.place`:
 Sổ vốn, lịch sử và chốt lời vẫn dùng `aibcr/models/money.py`; dữ liệu lưu ở file
 state (không chứa API key).
 
+### Âm báo (chuông KPI + còi sự cố)
+
+`ui/renderer/alarm.js` tổng hợp âm thanh bằng Web Audio (không cần file media):
+
+- **Chuông thành công** — hợp âm đi lên C5-E5-G5-C6 (sine + harmonic nhẹ) khi **đủ KPI**:
+  `money.blocked[0] == "TAKE_PROFIT"` hoặc `table.take_profit_done`.
+- **Còi sự cố** — 4 xung quét 850↔1300Hz khi có lỗi thật (lệch tiền, không đặt được
+  chip, mất kết nối/đọc cầu, hết vốn, xung đột cầu, mất phiên…).
+
+Quy tắc phát:
+
+- Chỉ kêu khi **trạng thái đổi**; render đầu tiên sau khi mở app chỉ ghi mốc, nên mở app
+  lúc phiên đã chốt lời sẵn không bị giật mình.
+- `level === "error"` là tín hiệu **chính** — lỗi mới thêm ở backend tự hú còi mà không
+  phải sửa danh sách mẫu. Danh sách `ALARM_PATTERNS` chỉ mở rộng cho thông điệp
+  `warn`/`info` mang tính sự cố.
+- `ALARM_SUPPRESS` chặn các lần dừng **hợp lệ** (dừng tool, rời bàn, chốt lời) để không
+  hú oan; danh sách này cố tình hẹp để không nuốt mất sự cố thật.
+- Cùng nội dung lỗi: chờ `ALARM_THROTTLE_MS` (2,5s) mới kêu lại. Lỗi **khác** nội dung
+  chỉ cần cách `ALARM_DISTINCT_GAP_MS` (0,8s), nên sự cố thứ hai không bị nuốt.
+- Backend ghi log `error` cho mọi trạng thái tạm dừng do sự cố (`_log_sim_pause`), vì
+  `sim.note` không đi qua event — nếu chỉ đặt note thì UI im lặng.
+- Bật/tắt và âm lượng nhớ trong `localStorage`; có nút **Thử lỗi** và **Thử thành công**.
+
 ### Lịch sử cược lưu bền vững (tab Lịch sử)
 
 Mỗi tay đã kết toán được ghi nối thêm (append-only JSONL) vào `aibcr_history.jsonl`

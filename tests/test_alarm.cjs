@@ -66,13 +66,34 @@ test('critical incidents are recognised without diacritics', () => {
 });
 
 test('ordinary info messages stay silent', () => {
-  assert.match(source, /level \|\| ''\)\.toLowerCase\(\) !== 'error'/);
+  // Lỗi (mức error) là tín hiệu chính; mẫu chỉ mở rộng cho warn/info có tính sự cố.
+  assert.match(source, /const isError = String\(level \|\| ''\)\.toLowerCase\(\) === 'error'/);
+  assert.match(source, /if \(!isError && !matchesPattern\) return false/);
 });
 
 test('repeat sirens are throttled', () => {
   assert.match(source, /ALARM_THROTTLE_MS = 2500/);
-  assert.match(source, /now - lastAlarmAt < ALARM_THROTTLE_MS/);
+  assert.match(source, /sameAsLast \? ALARM_THROTTLE_MS : ALARM_DISTINCT_GAP_MS/);
   assert.match(source, /SUCCESS_THROTTLE_MS/);
+});
+
+test('a different incident is not swallowed by the previous siren', () => {
+  assert.match(source, /ALARM_DISTINCT_GAP_MS = 800/);
+});
+
+test('legal stops (dừng tool / rời bàn / chốt lời) are suppressed', () => {
+  assert.match(source, /const ALARM_SUPPRESS = \[/);
+  for (const phrase of ['đã dừng tool', 'đang rời bàn', 'đã chốt lời']) {
+    assert.ok(source.includes(phrase), `missing suppress: ${phrase}`);
+  }
+});
+
+test('the suppress list stays narrow so real faults are not muted', () => {
+  const block = source.slice(source.indexOf('const ALARM_SUPPRESS = ['),
+    source.indexOf('];', source.indexOf('const ALARM_SUPPRESS = [')) + 2);
+  // Mẫu quá rộng từng nuốt sự cố thật ("quá ... chưa cập nhật", "tạm dừng").
+  assert.doesNotMatch(block, /'quá'/);
+  assert.doesNotMatch(block, /'tạm dừng'/);
 });
 
 test('enable state and volume persist in localStorage', () => {
