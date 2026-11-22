@@ -306,12 +306,14 @@
               <label class="switch"><input type="checkbox" id="ba-human-mouse" /><span>Chuột người thật khi bấm sảnh/ô bàn</span></label>
               <label class="switch danger"><input type="checkbox" id="ba-auto-place" /><span>TỰ ĐẶT CHIP THẬT theo lệnh UI</span></label>
               <label class="switch"><input type="checkbox" id="ba-leave-reset" /><span>Bàn xáo bài (0 tay) thì rời bàn tìm bàn khác</span></label>
-              <label class="field">Số tay tối thiểu của bàn khi vào lại
+              <label class="field">Số tay tối thiểu của bàn để vào
                 <input id="ba-min-hands" type="number" min="0" max="400" step="1" />
               </label>
-              <p class="hint">Bàn vừa xáo lại bài có quá ít ván, dữ liệu chưa đủ để AI
-                dự đoán. Tool sẽ về sảnh và chỉ vào bàn đang có ít nhất số tay này
-                (0 = tắt, vẫn ngồi lại bàn xáo bài).</p>
+              <p class="hint">Bàn mới xáo bài có quá ít ván nên dữ liệu chưa đủ để AI
+                dự đoán. Tool chỉ vào bàn đang có ít nhất số tay này, ở <b>mọi lần vào
+                bàn</b> (không chỉ sau khi xáo bài), và luôn chọn bàn nhiều tay nhất.
+                Nếu sau 12 lượt quét không có bàn nào đủ, tool vào bàn nhiều tay nhất kèm
+                cảnh báo để không kẹt. 0 = tắt lọc.</p>
               <label class="field">Số bàn muốn chơi
                 <input id="ba-tables-target" type="number" min="1" step="1" />
               </label>

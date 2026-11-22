@@ -1511,9 +1511,16 @@ class BaccaratController:
         self.shoe_reset_left_key = left_key
         self.cycle_waiting = True
         self.cycle_attempts = 0
-        self.cycle_retry_at = 0.0
-        # Không loại trừ bàn vừa rời: ``min_hands_hunt`` đã lọc theo số tay nên bàn 0 tay
-        # tự bị bỏ; nếu sau này nó đủ tay thì vẫn có thể vào lại.
+        # Phải khác 0 thì ``_resume_cycle_hunt`` mới chạy; trước đây để 0.0 nên sau khi
+        # xáo bài tool đứng im cho tới khi người dùng bấm lại.
+        self.cycle_retry_at = time.time()
+        # XOÁ cầu cũ của bàn vừa rời: nếu không, ``_min_hands_ready`` đọc số tay cũ (ví dụ
+        # 40) và cho vào lại chính bàn chỉ còn 1-2 tay — đúng lỗi người dùng gặp.
+        stale = self.tables.get(left_key)
+        if stale is not None:
+            stale["letters"] = ""
+            stale["ws_confirmed_letters"] = ""
+            stale["ts"] = 0.0
         self.cycle_table_key = None
         self.sweep_note = ("Bàn %s vừa xáo bài (0 tay) · dữ liệu shoe mới chưa đủ cho AI "
                            "· rời bàn, chỉ vào bàn ≥ %d tay." % (name, required))
@@ -2130,7 +2137,9 @@ class BaccaratController:
             return
         self.session_lost = False
         self._ingest(rows, observed_at)
-        if self.min_hands_hunt:
+        # Đếm lượt quét khi đang cần lọc số tay — dùng cho cả chế độ săn sau xáo bài lẫn
+        # vào bàn thường, để ngưỡng "hết lượt thì nhận bàn nhiều tay nhất" hoạt động.
+        if max(0, _as_int(self.config.get("min_hands"), 0)):
             self.min_hands_rounds = (self.min_hands_rounds or 0) + 1
         if self.config["favorites_only"]:
             allowed = {"id:" + row["table_id"] for row in rows if row.get("table_id")}
@@ -2316,11 +2325,13 @@ class BaccaratController:
 
     # ------------------------------------------------------------ tự săn bàn
     def auto_open_table(self, allow_sweep=False, exclude_key=None):
-        """Mở bàn đầu tiên có mã bàn — không còn điều kiện lọc cầu.
+        """Mở bàn có nhiều tay nhất, ưu tiên bàn đủ ``min_hands`` tay.
 
-        Ngoại lệ duy nhất: vừa rời bàn vì xáo bài (``min_hands_hunt``) thì chỉ vào bàn
-        đang có ít nhất ``min_hands`` tay; không có bàn nào đủ sau
-        ``MIN_HANDS_HUNT_ROUNDS`` lượt thì nhận bàn nhiều tay nhất kèm cảnh báo.
+        ``min_hands`` (0 = tắt) áp cho **mọi** lần vào bàn, không chỉ sau khi xáo bài:
+        bàn mới xáo có 1-2 ván thì dữ liệu không đủ cho ``predict``, nên không vào dù
+        người dùng bấm “VÀO BÀN HỢP LỆ” hay tool tự tìm. Nếu sau
+        ``MIN_HANDS_HUNT_ROUNDS`` lượt quét vẫn không có bàn nào đủ tay thì nhận bàn
+        nhiều tay nhất kèm cảnh báo, để tool không kẹt vô hạn.
         """
         if self._busy_chrome() or not (self.tool_running or self.enter_valid):
             return
@@ -2328,8 +2339,7 @@ class BaccaratController:
             return
         candidates = [row for row in self.tables.values()
                       if row.get("table_id") and row["key"] != exclude_key]
-        required = max(0, _as_int(self.config.get("min_hands"), 0)) \
-            if self.min_hands_hunt else 0
+        required = max(0, _as_int(self.config.get("min_hands"), 0))
         fallback_note = ""
         if candidates and required:
             enough = [row for row in candidates if self._min_hands_ready(row)]
@@ -2344,8 +2354,8 @@ class BaccaratController:
                                     len(best.get("letters") or "")))
                 self.log(fallback_note, "warn")
             else:
-                self.sweep_note = ("Đang tìm bàn ≥ %d tay sau khi xáo bài · bàn nhiều nhất "
-                                   "hiện có %d tay (lượt %d/%d)." % (
+                self.sweep_note = ("Đang tìm bàn ≥ %d tay · bàn nhiều nhất hiện có %d tay "
+                                   "(lượt %d/%d)." % (
                                        required, len(best.get("letters") or ""),
                                        (self.min_hands_rounds or 0) + 1,
                                        MIN_HANDS_HUNT_ROUNDS))
@@ -2364,6 +2374,10 @@ class BaccaratController:
                 return
             self.lobby_sweep()
             return
+        # Chọn bàn NHIỀU TAY NHẤT trong nhóm hợp lệ: dữ liệu shoe càng dài thì xác suất
+        # của ``predict`` càng có cơ sở. Trước đây lấy ``candidates[0]`` theo thứ tự dict
+        # nên có thể vào bàn mới xáo dù có bàn khác đã 40 tay.
+        candidates.sort(key=lambda row: len(row.get("letters") or ""), reverse=True)
         row = candidates[0]
         info = table_stats(list(row.get("letters") or ""))
         self.sweep_note = "Đang mở %s (%d tay, bên mạnh %s)…" % (
@@ -2385,6 +2399,24 @@ class BaccaratController:
                 self._cycle_search(key)
             return
         info = table_stats(list(row.get("letters") or ""))
+        # Chốt an toàn: bàn vừa mở có thể ít tay hơn ``min_hands`` (shoe vừa xáo, hoặc
+        # lịch sử chưa nạp). Không giữ lại — rời và tìm bàn khác, thay vì vào bàn 1-2
+        # tay rồi phân tích bằng dữ liệu không đủ.
+        required = max(0, _as_int(self.config.get("min_hands"), 0))
+        # Chờ vài giây cho lịch sử nạp xong rồi mới kết luận thiếu tay — WM có thể báo
+        # 0 tay trong 1-2 nhịp đầu dù bàn đã có 40 ván.
+        started_at = (self.auto_start_deadline or 0.0) - ENTRY_WAIT
+        settled = time.time() - started_at >= 8.0
+        if required and settled and info["hands"] < required:
+            self.sweep_note = ("Bàn %s chỉ có %d/%d tay · bỏ qua, tìm bàn đủ tay."
+                               % (row["label"], info["hands"], required))
+            self.log(self.sweep_note, "warn")
+            self.auto_start_key = None
+            self.cycle_waiting = True
+            self.cycle_retry_at = time.time()
+            self.min_hands_hunt = True
+            self._cycle_search(key)
+            return
         if self.enter_valid and not self.tool_running:
             # Nút “VÀO BÀN HỢP LỆ”: đã vào bàn → chỉ báo rồi đứng chờ người dùng bật
             # tool; tuyệt đối không arm/đặt chip ở đây.

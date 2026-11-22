@@ -188,6 +188,13 @@ shoe trước không dùng lại được. Vì vậy tool theo dõi số tay c�
   chỉ vào bàn đang có **≥ `min_hands` tay** (mặc định 15). Số lượt quét tối đa
   `MIN_HANDS_HUNT_ROUNDS` (12); quá số đó mà không có bàn đủ tay thì vào bàn nhiều tay
   nhất kèm cảnh báo để không kẹt vô hạn.
+- **`min_hands` áp cho MỌI lần vào bàn**, không chỉ sau xáo bài: bấm “VÀO BÀN HỢP LỆ”
+  hay tool tự tìm đều bỏ bàn chưa đủ tay. Trong nhóm hợp lệ, app chọn bàn **nhiều tay
+  nhất**. Có chốt an toàn sau khi mở: nếu bàn vừa mở vẫn ít tay hơn `min_hands` (sau 8
+  giây cho lịch sử nạp) thì bỏ và tìm bàn khác.
+- Khi rời bàn vì xáo bài, **cầu cũ của bàn đó bị xoá khỏi danh sách** — trước đây cầu
+  40 tay còn sót lại khiến bộ lọc tưởng bàn vẫn đủ tay và vào lại chính bàn chỉ còn 1-2
+  tay.
 - Trong lúc săn lại, `_follow_open_table` không bám lại bàn vừa rời và
   `_tool_retry_enter` không mở bàn bất kể số tay.
 - Tắt bằng `leave_on_shoe_reset = false`; `min_hands = 0` thì không lọc số tay.

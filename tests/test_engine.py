@@ -584,6 +584,103 @@ class ShoeResetTests(unittest.TestCase):
         self.assertEqual(opened, ["id:mid"], "hết lượt thì vào bàn nhiều tay nhất")
         self.assertIn("nhiều tay nhất", service.sweep_note)
 
+    def test_leaving_clears_the_stale_road_of_the_left_table(self):
+        """Lỗi thật: cầu cũ (40 tay) còn trong ``tables`` nên vào lại bàn 1-2 tay."""
+        service = self.service()
+        self.track(service)
+        service.lobby_back = lambda: {"ok": True}
+        self.assertEqual(len(service.tables["id:t1"]["letters"]), 14)
+        service._watch_shoe_reset(now=900.0)
+        service.tables["id:t1"]["letters"] = ""
+        service._watch_shoe_reset(now=1000.0)
+        service._watch_shoe_reset(now=1000.0 + BA.SHOE_RESET_CONFIRM_SECONDS + 0.1)
+        self.assertEqual(service.tables["id:t1"]["letters"], "",
+                         "phải xoá cầu cũ để không dùng số tay cũ khi lọc")
+        self.assertTrue(service.cycle_retry_at,
+                        "phải đặt mốc để vòng săn tự chạy lại")
+
+    def test_the_same_table_with_one_hand_is_not_reentered(self):
+        """Đúng kịch bản người dùng: xáo bài xong bàn còn 1-2 tay nhưng vẫn vào lại."""
+        service = self.service()
+        self.track(service)
+        service.lobby_back = lambda: {"ok": True}
+        service._watch_shoe_reset(now=900.0)
+        service.tables["id:t1"]["letters"] = ""
+        service._watch_shoe_reset(now=1000.0)
+        service._watch_shoe_reset(now=1000.0 + BA.SHOE_RESET_CONFIRM_SECONDS + 0.1)
+
+        stamp = time.time()
+        service.tables = {
+            "id:t1": {"key": "id:t1", "label": "Bàn vừa xáo", "letters": "B",
+                      "ts": stamp, "table_id": "t1", "read_error": "",
+                      "conflict": False, "source": "live-ws", "stable": 1},
+            "id:good": {"key": "id:good", "label": "Bàn đủ tay", "letters": self.road(20),
+                        "ts": stamp, "table_id": "good", "read_error": "",
+                        "conflict": False, "source": "live-ws", "stable": 3},
+        }
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service.auto_open_table()
+        self.assertEqual(opened, ["id:good"],
+                         "không được vào lại bàn chỉ còn 1 tay")
+
+    def test_min_hands_applies_even_outside_the_shoe_reset_hunt(self):
+        """Người dùng cấu hình 15 tay: mọi lần vào bàn đều phải lọc, không chỉ sau xáo."""
+        service = self.service()
+        self.assertFalse(service.min_hands_hunt)
+        stamp = time.time()
+        service.tables = {
+            "id:tiny": {"key": "id:tiny", "label": "Bàn mới", "letters": "BP",
+                        "ts": stamp, "table_id": "tiny", "read_error": "",
+                        "conflict": False, "source": "live-ws", "stable": 1},
+            "id:full": {"key": "id:full", "label": "Bàn đủ", "letters": self.road(30),
+                        "ts": stamp, "table_id": "full", "read_error": "",
+                        "conflict": False, "source": "live-ws", "stable": 3},
+        }
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service.auto_open_table()
+        self.assertEqual(opened, ["id:full"])
+
+    def test_the_table_with_the_most_hands_is_chosen(self):
+        service = self.service()
+        stamp = time.time()
+        service.tables = {
+            "id:a": {"key": "id:a", "label": "A", "letters": self.road(16),
+                     "ts": stamp, "table_id": "a", "read_error": "",
+                     "conflict": False, "source": "live-ws", "stable": 3},
+            "id:b": {"key": "id:b", "label": "B", "letters": self.road(40),
+                     "ts": stamp, "table_id": "b", "read_error": "",
+                     "conflict": False, "source": "live-ws", "stable": 3},
+        }
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service.auto_open_table()
+        self.assertEqual(opened, ["id:b"], "chọn bàn nhiều tay nhất")
+
+    def test_a_table_that_opened_short_is_dropped(self):
+        """Chốt an toàn: bàn vừa mở có ít tay hơn ``min_hands`` thì bỏ, tìm bàn khác."""
+        service = self.service()
+        self.track(service)
+        stamp = time.time()
+        service.tables = {
+            "id:t1": {"key": "id:t1", "label": "Bàn 1", "letters": "BP",
+                      "ts": stamp, "table_id": "t1", "read_error": "",
+                      "conflict": False, "source": "live-ws", "stable": 1},
+        }
+        service.enter_valid = True
+        service.tool_running = False
+        service.auto_start_key = "id:t1"
+        # Đã qua thời gian chờ nạp lịch sử (8 giây) → đủ căn cứ kết luận thiếu tay.
+        service.auto_start_deadline = time.time() - BA.ENTRY_WAIT + 20.0
+        opened = []
+        service.open_table = lambda key: opened.append(key) or {"ok": True}
+        service._auto_start_verified_table()
+        self.assertFalse(service.valid_check_done)
+        self.assertIsNone(service.auto_start_key)
+        self.assertEqual(service.tables["id:t1"]["letters"], "BP",
+                         "không đụng dữ liệu bàn, chỉ bỏ không vào")
+
     def test_disabled_option_keeps_watching_the_same_table(self):
         service = self.service()
         service.config["leave_on_shoe_reset"] = False
