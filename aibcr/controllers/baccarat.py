@@ -78,6 +78,9 @@ DEFAULT_CONFIG = {
     # cầu 1:1/bệt của bàn) | hybrid (cầu rõ thì theo cầu, không rõ thì theo xác suất).
     "auto_side_source": "probability",
     "start_url": BR.START_URL,
+    # Trang cổng đã dùng trước khi biết URL WM thật; dùng làm đường lùi khi token của
+    # URL WM hết hạn. Rỗng = chưa có.
+    "portal_url": "",
     "chrome_window": {"width": 1280, "height": 800, "percent": 100, "fullscreen": False},
     # AI live (site Petalive): off | local | api. Key AI CHỈ đọc từ env BCR_AI_KEY.
     "ai_mode": "api",
@@ -223,6 +226,8 @@ class BaccaratController:
         self.placed_signatures = set()
         # Lần tạm dừng sim gần nhất đã báo lỗi (tránh lặp log mỗi nhịp khi sim đứng yên).
         self._last_pause_note = ""
+        # Lần cuối tự quay về trang cổng vì URL WM hết hạn (chống nhảy qua nhảy lại).
+        self.portal_fallback_at = 0.0
         # Cầu của bộ đọc WebSocket khi AI live đang chạy. Lượt quét CDP có thể trả về
         # bản cũ (bắt đầu trước khi ván mới về); không được để nó ghi đè/đảo cầu live.
         self.live_road = ""
@@ -292,6 +297,11 @@ class BaccaratController:
         url = config.get("start_url")
         config["start_url"] = url if isinstance(url, str) and BR.valid_site_url(url.strip()) \
             else BR.START_URL
+        # Trang cổng đã dùng trước khi biết URL WM thật; giữ lại làm đường lùi khi token
+        # của URL WM hết hạn.
+        portal = config.get("portal_url")
+        config["portal_url"] = (portal.strip() if isinstance(portal, str)
+                                and BR.valid_site_url(portal.strip()) else "")
         window = config.get("chrome_window")
         if not isinstance(window, dict):
             window = dict(DEFAULT_CONFIG["chrome_window"])
@@ -435,7 +445,14 @@ class BaccaratController:
         except AttributeError:
             return False
         except Exception as exc:
-            return not BR.cdp_port_closed(exc)
+            # Cổng đóng: URLError/ConnectionRefusedError đều nghĩa là không có Chrome do
+            # app mở. Chỉ lỗi khác mới coi là "có thể dùng được".
+            if BR.cdp_port_closed(exc):
+                return False
+            import urllib.error
+            if isinstance(exc, urllib.error.URLError):
+                return False
+            return True
 
     def _auth_blame(self):
         if getattr(self.stream, "session_lost", False):
@@ -918,6 +935,58 @@ class BaccaratController:
         self._push_state()
         return {"ok": True, "note": self.sweep_note}
 
+    def _remember_wm_url(self, note=""):
+        """Ghi nhớ URL WM thật để lần sau mở Chrome đi thẳng vào WM.
+
+        Người dùng không muốn đứng ở trang cổng (``9vnv.com/vn/wm_casino``) nữa: sau
+        lần đầu lấy được URL trong iframe (``wmvn.m8810.com/?sid=…&co=wm``), lưu nó làm
+        ``start_url``. Giữ URL cổng cũ trong ``portal_url`` để còn đường lùi khi token
+        của URL WM hết hạn.
+        """
+        url = str(getattr(self.browser, "wm_lifted_url", "") or "").strip()
+        if not url or url == self.config.get("start_url"):
+            return
+        current = str(self.config.get("start_url") or "").strip()
+        if current and current != url:
+            self.config["portal_url"] = current
+        self.config["start_url"] = url
+        self._save_state()
+        self.log("Đã ghi nhớ URL WM: lần sau mở Chrome sẽ vào thẳng %s" % url, "win")
+
+    def _restore_portal_url(self):
+        """URL WM hết hạn/không mở được: quay lại trang cổng đã lưu để lấy URL mới."""
+        portal = str(self.config.get("portal_url") or "").strip()
+        if not portal or portal == self.config.get("start_url"):
+            return False
+        self.config["start_url"] = portal
+        self._save_state()
+        self.log("URL WM không mở được · quay lại trang cổng %s" % portal, "warn")
+        return True
+
+    def _fallback_to_portal(self, reason=""):
+        """Điều hướng tab hiện tại về trang cổng khi URL WM đã hết hạn.
+
+        Chỉ chạy MỘT lần cho mỗi lần vào bàn để không nhảy qua nhảy lại: sau khi về
+        cổng, lần quét sau sẽ lấy URL iframe mới và ghi nhớ lại.
+        """
+        if self.portal_fallback_at and time.time() - self.portal_fallback_at < 60.0:
+            return False
+        portal = str(self.config.get("portal_url") or "").strip()
+        if not portal:
+            return False
+        current = str(self.config.get("start_url") or "").strip()
+        from aibcr.adapters import wm_targets as WT
+        if not WT.looks_like_wm(current):
+            return False
+        self.portal_fallback_at = time.time()
+        ok, note = self.browser.navigate_current(portal)
+        if ok:
+            self._restore_portal_url()
+            self.sweep_note = ("URL WM đã hết hạn (%s) · đã quay lại trang cổng để lấy "
+                               "URL mới." % (reason or "không mở được"))
+            self.log(self.sweep_note, "warn")
+        return ok
+
     def lobby_diagnose(self):
         """Báo cáo app thấy gì trong Chrome: từng tab là loại sảnh nào (hoặc không).
 
@@ -1106,7 +1175,14 @@ class BaccaratController:
                             True, "Đang ở trong bàn %s · theo dõi tiếp." % row["label"], key)))
                         return
                 ok, note = self.stream.find_lobby_tab()
+                if ok:
+                    self._remember_wm_url(note)
                 if not ok:
+                    # URL WM đã lưu có thể hết hạn (sid dùng một lần): quay về trang cổng
+                    # một lần để lấy URL mới thay vì báo lỗi rồi đứng im.
+                    if self._fallback_to_portal(note):
+                        self.events.put(("valid_lobby", (True, self.sweep_note)))
+                        return
                     self.events.put(("valid_fail", note))
                     return
                 # Đang ở SẢNH WM: tải lại tab một lần ngay tại đây để hook bắt được
@@ -1687,6 +1763,12 @@ class BaccaratController:
             if "start_url" in params:
                 config["start_url"] = params["start_url"]
                 changed.append("start_url")
+                typed = str(params["start_url"] or "").strip()
+                # Người dùng tự dán link: nếu đó là trang cổng (không phải WM) thì ghi
+                # luôn làm đường lùi; nếu là URL WM thì giữ portal cũ.
+                from aibcr.adapters import wm_targets as WT
+                if typed and not WT.looks_like_wm(typed):
+                    config["portal_url"] = typed
             for key in ("ai_mode", "ai_url", "ai_model"):
                 if key in params:
                     config[key] = params[key]
@@ -1903,6 +1985,10 @@ class BaccaratController:
         elif kind == "sweep":
             self.sweep_busy = False
             rows, error, observed_at = data
+            if rows:
+                # Quét thành công nghĩa là app đã gắn được WM (có thể vừa đưa iframe ra
+                # tab thật) → nhớ URL WM để lần sau mở Chrome đi thẳng, không qua cổng.
+                self._remember_wm_url()
             self._on_sweep(rows, error, observed_at)
         elif kind == "table_opened":
             self.open_table_busy = False

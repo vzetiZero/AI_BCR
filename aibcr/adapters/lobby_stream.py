@@ -1973,8 +1973,17 @@ class LobbyStream:
                                 if isinstance(self.session._last_cdp_targets, list) else [])):
                 return False, self._health_note({"status": "auth", "entry": True})
             # Trang cổng (vd. 9vnv.com/vn/wm_casino) chỉ là khung bọc: DOM tab mẹ không
-            # có gì. WM thật nằm trong iframe KHÁC ORIGIN, nên phải dò ở cấp target —
-            # đó chính là đường người dùng đang đứng, không bắt họ copy link iframe.
+            # có gì. Ưu tiên ĐƯA IFRAME RA TAB THẬT (URL cuối cùng là wmvn.m8810.com),
+            # nhờ vậy mọi thao tác sau đó chạy trên tab WM bình thường.
+            try:
+                lifted, note = self.session.lift_wm_iframe_to_tab()
+            except Exception:
+                lifted, note = False, ""
+            if lifted:
+                self.lobby_kind = "wm"
+                self.note = note
+                return True, note
+            # Dự phòng: gắn thẳng vào target iframe (khi không đổi được URL tab).
             try:
                 if self.session._adopt_oopif_wm():
                     self.lobby_kind = "wm"

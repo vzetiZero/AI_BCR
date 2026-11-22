@@ -404,6 +404,9 @@ class BrowserSession:
         # Socket CDP gắn vào iframe WM, giữ lại để khỏi attach lại mỗi lần đọc bàn
         # (``read`` được gọi vài lần mỗi giây). None = chưa có/hỏng.
         self._wm_frame_socket = None
+        # URL WM thật lấy được từ iframe của trang cổng (đã đưa ra tab). Dùng để mở
+        # thẳng WM ở lần sau, không phải đi qua trang cổng nữa.
+        self.wm_lifted_url = ""
         self._wm_watch = None
         self._wm_watch_stop = threading.Event()
         # Kiểm tra "Chrome còn sống" có cache: tránh gọi HTTP mỗi lần UI hỏi state
@@ -1502,6 +1505,57 @@ class BrowserSession:
                     pass
         return False
 
+    def navigate_current(self, url, wait_seconds=15.0):
+        """Điều hướng tab hiện tại sang ``url`` (không mở tab mới). Trả ``(ok, note)``."""
+        if not valid_site_url(url):
+            return False, "URL không hợp lệ."
+        page = self._cdp_page()
+        if page is None:
+            return False, "Không có tab nào để điều hướng."
+        import websocket
+
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                validated_endpoint(page), suppress_origin=True, timeout=SCRIPT_TIMEOUT,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            state = {"seq": 0}
+
+            def command(method, params=None, timeout=SCRIPT_TIMEOUT):
+                state["seq"] += 1
+                request_id = state["seq"]
+                ws.settimeout(timeout)
+                ws.send(json.dumps({"id": request_id, "method": method,
+                                    "params": params or {}}))
+                deadline = time.monotonic() + timeout
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(method)
+                    message = json.loads(ws.recv())
+                    if message.get("id") != request_id:
+                        continue
+                    if message.get("error"):
+                        raise RuntimeError(str(message["error"])[:120])
+                    return message.get("result", {})
+
+            command("Page.enable")
+            command("Page.navigate", {"url": url})
+        except Exception as exc:
+            return False, "Không điều hướng được (%s)." % type(exc).__name__
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        deadline = time.monotonic() + max(3.0, float(wait_seconds))
+        while time.monotonic() < deadline:
+            time.sleep(0.8)
+            current = self._cdp_page()
+            if current is not None and str(current.get("url") or "") == url:
+                return True, "Đã mở %s" % _safe_url(url)
+        return True, "Đã gửi điều hướng tới %s" % _safe_url(url)
+
     def lift_wm_iframe_to_tab(self, wait_seconds=20.0):
         """Đưa WM từ iframe ra tab thật: điều hướng tab cổng sang chính URL của iframe.
 
@@ -1584,6 +1638,7 @@ class BrowserSession:
                 self.wm_oopif_target = ""
                 self.wm_oopif_parent = ""
                 self.wm_oopif_detect = {}
+                self.wm_lifted_url = url
                 self.start_wm_watch()
                 return True, "Đã mở WM từ iframe ra tab: %s" % _safe_url(url)
         return False, "Đã đổi URL nhưng WM chưa hiện ra (có thể phiên đã hết hạn)."

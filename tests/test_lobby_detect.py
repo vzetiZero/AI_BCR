@@ -95,7 +95,9 @@ class DiagnoseTests(unittest.TestCase):
             self.assertIn("tabs", reply)
             self.assertIsInstance(reply["tabs"], list)
         else:
-            self.assertIn("CDP", reply["error"])
+            # Không có Chrome: phải nói rõ là chưa gắn được CDP (không phải lỗi mơ hồ).
+            self.assertTrue("CDP" in reply["error"] or "danh sách tab" in reply["error"],
+                            reply["error"])
 
     def test_probe_tabs_classifies_each_kind(self):
         from aibcr.adapters.lobby_stream import LobbyStream

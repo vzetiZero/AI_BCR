@@ -116,10 +116,14 @@ Một lần bấm chạy đúng chuỗi:
    ngay trong tab đó (`BrowserSession.lift_wm_iframe_to_tab`). Sau bước này tab là WM
    "thật" nên đọc cầu, đọc **số dư ví** và bấm chip chạy nguyên logic cũ, không cần nhánh
    iframe nào. Chỉ đổi URL của tab đang mở (không mở tab mới, không đóng gì), chỉ khi URL
-   iframe là HTTPS công khai và trông giống WM. Nếu không đổi được URL thì mới dự phòng
-   gắn vào target iframe (`_adopt_oopif_wm`), kèm `_target_alive` kiểm tra target còn
-   sống — target iframe **chết khi iframe reload/đổi trang**, đây là nguyên nhân trước
-   đây "lúc quét được lúc không".
+   iframe là HTTPS công khai và trông giống WM.
+
+   **URL cuối cùng là WM, không còn đứng ở trang cổng.** Sau lần chuyển đầu tiên, app ghi
+   nhớ URL WM làm `start_url` (`_remember_wm_url`) nên **mở Chrome lần sau đi thẳng vào
+   `wmvn.m8810.com/...`**, không qua `9vnv.com/vn/wm_casino` nữa. Trang cổng được giữ
+   trong `portal_url`; nếu token của URL WM hết hạn (`sid` dùng một lần), app tự điều
+   hướng tab về cổng **một lần** (`_fallback_to_portal`, chống lặp 60 giây) để lấy URL
+   mới rồi ghi nhớ lại. Gõ tay link cổng vào ô “Link mở đầu” cũng tự ghi `portal_url`.
 
    **Đọc cầu khi tab mở sẵn:** CDP chỉ phát khung WebSocket của socket được tạo **sau**
    `Network.enable`. Vì vậy `WMReader` nạp lại riêng `iframe_109` (sảnh) sau 6 giây nếu
