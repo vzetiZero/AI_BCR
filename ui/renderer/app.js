@@ -423,6 +423,16 @@ function renderBaConfig(config) {
   setValue('#ba-bet-side', config.bet_side);
   setValue('#ba-bet-stake', config.bet_stake);
   setValue('#ba-bet-progression', config.bet_progression || 'flat');
+  setValue('#ba-auto-source', config.auto_side_source || 'probability');
+  const sourceHint = $('#ba-auto-source-hint');
+  if (sourceHint) {
+    const source = $('#ba-auto-source').value;
+    sourceHint.textContent = source === 'road'
+      ? 'Đánh theo nhịp bàn: bệt thì nối cửa, 1:1 thì đảo cửa. Không đọc được nhịp rõ thì giữ theo xác suất.'
+      : source === 'hybrid'
+        ? 'Cầu 1:1/bệt rõ thì theo cầu; nhịp lộn xộn thì quay về cửa có xác suất cao nhất.'
+        : 'Cửa có xác suất ra cao nhất. Banker thắng ~46% và Player ~44% trên shoe đầy nên chế độ này chọn Banker ở phần lớn tay.';
+  }
   setValue('#ba-bet-max-stake', config.bet_max_stake ?? 0);
   const stakeValue = Number(config.bet_stake);
   // Bản nháp đang sửa thì giữ đúng chip người dùng vừa bấm, không bị engine ghi đè.
@@ -662,7 +672,9 @@ function renderBaccarat(snapshot) {
     } else if (plan.action === 'bet') {
       planState.textContent = plan.armed ? 'ĐÃ CHỐT' : 'SẴN SÀNG';
       planState.className = 'hero-state bet';
-      const source = plan.source === 'AUTO' ? 'AI/predict' : (SIDE_NAME[plan.source] || plan.source || 'UI');
+      const source = plan.source === 'AUTO'
+        ? (plan.auto_source === 'road' ? `cầu ${plan.road_pattern || 'nhịp bàn'}` : 'AI/predict')
+        : (SIDE_NAME[plan.source] || plan.source || 'UI');
       const base = Number(plan.base_stake || 0);
       const stake = Number(plan.stake || 0);
       const doubled = plan.progression === 'win_repeat_loss_double' && base
@@ -846,7 +858,7 @@ $('#ba-reset-session').addEventListener('click', async () => {
 });
 
 const BET_FIELDS = ['#ba-bet-side', '#ba-bet-stake', '#ba-bet-progression',
-  '#ba-bet-max-stake'];
+  '#ba-bet-max-stake', '#ba-auto-source'];
 
 function betFormParams() {
   const params = {
@@ -854,15 +866,23 @@ function betFormParams() {
     stake: Number($('#ba-bet-stake').value),
     progression: $('#ba-bet-progression').value,
     max_stake: Number($('#ba-bet-max-stake').value || 0),
+    auto_side_source: $('#ba-auto-source').value,
   };
   return params;
 }
+
+const AUTO_SOURCE_NAME = {
+  probability: 'Xác suất cao nhất',
+  road: 'Nhịp cầu 1:1 / bệt',
+  hybrid: 'Cầu rõ theo cầu, còn lại theo xác suất',
+};
 
 function describeBetReply(reply) {
   const progression = reply.progression === 'win_repeat_loss_double'
     ? 'Thắng về mức gốc · thua gấp đôi' : 'Cược cố định mỗi tay';
   const sideText = reply.side === 'AUTO'
-    ? 'Theo AI (AUTO — cửa có xác suất cao nhất)' : (SIDE_NAME[reply.side] || reply.side);
+    ? `Theo AI (AUTO — ${AUTO_SOURCE_NAME[reply.auto_side_source] || 'xác suất cao nhất'})`
+    : (SIDE_NAME[reply.side] || reply.side);
   const lines = [
     `Cửa: ${sideText}`,
     `Mức gốc mỗi tay: ${fmtUnits(reply.stake)} đv (= ${fmtVnd(Number(reply.stake) * 1000)})`,
@@ -939,6 +959,7 @@ $('#ba-save-options').addEventListener('click', async () => {
 [
   '#ba-capital-input', '#ba-tp-input', '#ba-tables-target',
   '#ba-bet-side', '#ba-bet-stake', '#ba-bet-progression', '#ba-bet-max-stake',
+  '#ba-auto-source',
   '#ba-start-url',
   '#ba-ai-mode', '#ba-ai-url', '#ba-ai-model', '#ba-ai-every', '#ba-ai-timeout',
   '#ba-live-trials', '#ba-live-markov',

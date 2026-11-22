@@ -125,6 +125,14 @@
                     <option value="win_repeat_loss_double">Thắng về mức gốc · thua gấp đôi</option>
                   </select>
                 </label>
+                <label class="field">Khi cửa là AUTO, lấy cửa theo
+                  <select id="ba-auto-source">
+                    <option value="probability">Xác suất cao nhất (mặc định)</option>
+                    <option value="road">Nhịp cầu 1:1 / bệt</option>
+                    <option value="hybrid">Cầu rõ theo cầu, còn lại theo xác suất</option>
+                  </select>
+                </label>
+                <p class="hint" id="ba-auto-source-hint"></p>
                 <label class="field">Mức cược tối đa (đv, 0 = không giới hạn)
                   <input id="ba-bet-max-stake" type="number" min="0" max="1000000" step="10" />
                 </label>

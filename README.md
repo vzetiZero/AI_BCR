@@ -205,6 +205,21 @@ Cửa **AUTO** đánh đúng **cửa có xác suất ra cao nhất** do `predict
 thì chọn cố định P/B/T. Số tiền: **1 đơn vị = 1.000đ** (WM in khay chip theo nghìn
 đồng), mặc định `10` = 10.000đ, đổi ngay bằng các nút chip nhanh `10/20/50/100/500/1k`.
 
+### Nguồn chọn cửa khi để AUTO
+
+`auto_side_source` quyết định cửa cho lệnh AUTO:
+
+| Giá trị | Cách chọn cửa |
+|---|---|
+| `probability` (mặc định) | Cửa có xác suất ra cao nhất. Trên shoe 8 bộ, Banker thắng ~46% và Player ~44%, nên chế độ này chọn **Banker ở phần lớn tay** — đây là toán, không phải lỗi. |
+| `road` | Bám nhịp cầu đang ra: tay cuối **bệt** ≥ 3 tay → đánh tiếp cửa đó; **1:1** (3 chuỗi gần nhất đều 1 tay và đảo cửa) → đánh cửa ngược tay cuối. |
+| `hybrid` | Cầu đọc được rõ thì theo cầu, nhịp lộn xộn thì quay về xác suất. |
+
+`predict` trả thêm `road_follow` (side/pattern/reason) nhưng **không trộn** nó vào
+`probabilities`: baccarat là trò độc lập nên "cầu" không tạo lợi thế thật, đây chỉ là
+cách bám nhịp khi người dùng chủ động chọn. Chọn ở tab **Bàn chơi → TAY KẾ TIẾP →
+Khi cửa là AUTO, lấy cửa theo**.
+
 Mức cược mỗi tay đi qua **cơ chế mức cược** (mục “Lệnh cược từng tay”): `flat` giữ
 nguyên mức gốc, `win_repeat_loss_double` thắng quay về mức gốc · thua gấp đôi, có trần
 `bet_max_stake` và luôn bị chặn bởi số dư phiên.
@@ -280,9 +295,9 @@ Nếu từng dán key vào code/chat/bug report thì coi như key đã lộ: **x
 nhà cung cấp. Không dán giá trị key vào README, test, log hay issue.
 
 **AI không tham gia quyết định đặt cược**: AI chỉ viết nhận định/giải thích; controller
-chỉ lấy cửa từ số liệu `predict` (`top_side` = xác suất cao nhất) — không đọc
-`analysis.focus_side` do AI viết. AI cũng không được trả số liệu mới; mọi con số trên
-UI đều lấy từ `predict.predict()`.
+chỉ lấy cửa từ số liệu `predict` (`top_side` = xác suất cao nhất, hoặc `road_follow` khi
+`auto_side_source` là `road`/`hybrid`) — không đọc `analysis.focus_side` do AI viết. AI
+cũng không được trả số liệu mới; mọi con số trên UI đều lấy từ `predict.predict()`.
 
 ## Lệnh cược từng tay + tự đặt chip thật
 
@@ -310,9 +325,10 @@ Hành vi của `bet.place`:
 
 1. Từ chối nếu chưa vào bàn, chưa chạy tool, đang chờ tay hiện tại kết thúc, đang
    bấm lượt khác, hoặc đang tắt `auto_place`.
-2. `AUTO`: lấy `top_side` (cửa có xác suất ra cao nhất) từ `predict`; nếu bản
-   snapshot cũ không có `top_side` thì tự tính từ `probabilities`. Chỉ từ chối khi
-   chưa đọc được xác suất nào. AI có nói gì cũng không đổi cửa.
+2. `AUTO`: lấy cửa theo `auto_side_source` (mặc định `top_side` = cửa có xác suất ra
+   cao nhất; `road`/`hybrid` dùng nhịp cầu). Nếu snapshot cũ không có `top_side` thì tự
+   tính từ `probabilities`. Chỉ từ chối khi không có cửa nào. AI có nói gì cũng không
+   đổi cửa.
 3. Chốt lệnh vào `sim.pending`, chờ gate `table_is_clear()` (cả 3 cửa về 0) rồi gọi
    `TB.place_bet(...)` — bấm chip thật trên site, có tuỳ chọn chuột người thật.
 4. Chỉ tính lãi/lỗ khi có xác nhận đã bấm chip trong cửa sổ đúng. Tay nào không đặt

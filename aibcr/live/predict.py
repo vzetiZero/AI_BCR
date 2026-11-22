@@ -27,6 +27,12 @@ DEFAULT_MARKOV_WEIGHT = 0.15
 # bệt" hay "1-1" lặp lại, nên số này KHÔNG bao giờ được trộn vào xác suất đặt cược.
 PATTERN_MIN_SAMPLES = 8
 PATTERN_MAX_RUN = 6
+# Đọc "dạng cầu" để CHỌN CỬA (chế độ người dùng bật). Không trộn vào xác suất: nó chỉ
+# quyết định đánh theo nhịp gần đây (1:1 đảo cửa / bệt nối cửa) hay theo xác suất.
+ROAD_WINDOW = 24
+ROAD_MIN_LETTERS = 5
+ROAD_MIN_FLIP_RUNS = 3
+ROAD_BET_RUN = 3
 
 
 def pattern_stats(history):
@@ -78,6 +84,50 @@ def pattern_stats(history):
     if samples >= PATTERN_MIN_SAMPLES:
         result["probabilities"] = {side: tally[side] / samples for side in SIDES}
     return result
+
+
+def road_follow(history, window=ROAD_WINDOW, bet_run=ROAD_BET_RUN,
+                min_letters=ROAD_MIN_LETTERS, flip_runs=ROAD_MIN_FLIP_RUNS):
+    """Cửa cần đánh nếu đi theo nhịp cầu đang ra, đọc như Big Road.
+
+    Chế độ này **người dùng chủ động bật**, tách hẳn khỏi xác suất: baccarat là trò độc
+    lập nên "cầu" không cho lợi thế thật, nhưng nhiều người muốn bám nhịp bàn. Cách đọc
+    đúng thứ tự người chơi vẫn đọc:
+
+    1. Tay cuối đang **bệt** từ ``bet_run`` tay cùng cửa trở lên → đánh tiếp cửa đó.
+    2. ``flip_runs`` chuỗi gần nhất đều dài đúng 1 tay và đảo cửa (cầu 1:1) → đánh cửa
+       ngược tay cuối.
+    3. Nhịp lộn xộn → ``None`` để controller giữ cửa theo xác suất.
+
+    Hoà (T) không tạo chuỗi mới, đúng như Big Road.
+    """
+    letters = [ch for ch in str(history or "") if ch in ("P", "B")]
+    if len(letters) < min_letters:
+        return {"side": None, "pattern": None, "rate": None, "samples": 0,
+                "run": 0, "reason": ""}
+    tail = letters[-(window + 1):]
+    runs = []
+    for ch in tail:
+        if runs and runs[-1][0] == ch:
+            runs[-1][1] += 1
+        else:
+            runs.append([ch, 1])
+    last_side, last_run = runs[-1]
+    other = "P" if last_side == "B" else "B"
+    if last_run >= bet_run:
+        return {"side": last_side, "pattern": "bệt", "rate": None,
+                "samples": len(runs), "run": last_run,
+                "reason": "Cầu bệt %s %d tay · đánh tiếp %s."
+                          % (last_side, last_run, last_side)}
+    recent = runs[-flip_runs:]
+    alternates = len(recent) >= flip_runs and all(length == 1 for _, length in recent) \
+        and all(recent[i][0] != recent[i + 1][0] for i in range(len(recent) - 1))
+    if alternates:
+        return {"side": other, "pattern": "1:1", "rate": 1.0,
+                "samples": len(recent), "run": last_run,
+                "reason": "Cầu 1:1 %d tay gần nhất · đánh %s." % (flip_runs, other)}
+    return {"side": None, "pattern": None, "rate": None, "samples": len(runs),
+            "run": last_run, "reason": ""}
 
 
 def _as_probabilities(values):
@@ -330,6 +380,7 @@ def predict(shoe, history="", trials=DEFAULT_TRIALS, markov_weight=DEFAULT_MARKO
     playable = ev[ranked] > 2.0 * max(uncertainty.values())
     # Cửa có xác suất ra cao nhất (khác với cửa EV tốt nhất khi Banker ăn 0,95).
     top_side = max(SIDES, key=lambda side: fused[PROB_KEY[side]])
+    follow = road_follow(history)
     return {
         "ok": True,
         "trials": mc["trials"],
@@ -342,6 +393,7 @@ def predict(shoe, history="", trials=DEFAULT_TRIALS, markov_weight=DEFAULT_MARKO
         "ev_uncertainty": uncertainty,
         "top_side": top_side,
         "top_probability": fused[PROB_KEY[top_side]],
+        "road_follow": follow,
         "pattern_note": pattern_note(patterns, top_side),
         "best_side": ranked if playable else None,
         "least_bad_side": ranked,

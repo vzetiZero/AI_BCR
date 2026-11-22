@@ -34,11 +34,23 @@ from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
 from aibcr.live.wm_reader import WMReader, find_wm_page, find_wm_table
 from aibcr.live import ai as LIVE_AI
+from aibcr.live.predict import road_follow as predict_road_follow
 from aibcr.models import engine as E
 from aibcr.models import money as M
 from aibcr.models.live_sim import (PROGRESS_FLAT, PROGRESS_MODES, PROGRESS_NAME,
                                    LiveSimulation, compare_chips, progress_stake,
                                    table_is_clear, table_stats)
+
+# Nguồn chọn cửa cho lệnh AUTO.
+AUTO_SIDE_PROBABILITY = "probability"
+AUTO_SIDE_ROAD = "road"
+AUTO_SIDE_HYBRID = "hybrid"
+AUTO_SIDE_SOURCES = (AUTO_SIDE_PROBABILITY, AUTO_SIDE_ROAD, AUTO_SIDE_HYBRID)
+AUTO_SIDE_NAME = {
+    AUTO_SIDE_PROBABILITY: "Theo xác suất (cao nhất)",
+    AUTO_SIDE_ROAD: "Theo nhịp cầu (1:1 / bệt)",
+    AUTO_SIDE_HYBRID: "Cầu rõ theo cầu, còn lại theo xác suất",
+}
 
 # Cấu hình mặc định của tab Baccarat (đơn vị VN2 như hiển thị trên sàn).
 DEFAULT_CONFIG = {
@@ -61,6 +73,9 @@ DEFAULT_CONFIG = {
     # bàn đang có ít nhất ``min_hands`` tay. 0 = tắt (vẫn ngồi lại bàn xáo bài).
     "min_hands": 15,
     "leave_on_shoe_reset": True,
+    # Cửa AUTO lấy từ đâu: probability (xác suất cao nhất, mặc định) | road (theo nhịp
+    # cầu 1:1/bệt của bàn) | hybrid (cầu rõ thì theo cầu, không rõ thì theo xác suất).
+    "auto_side_source": "probability",
     "start_url": BR.START_URL,
     "chrome_window": {"width": 1280, "height": 800, "percent": 100, "fullscreen": False},
     # AI live (site Petalive): off | local | api. Key AI CHỈ đọc từ env BCR_AI_KEY.
@@ -251,6 +266,9 @@ class BaccaratController:
                                                       DEFAULT_CONFIG["min_hands"])))
         config["leave_on_shoe_reset"] = bool(config.get(
             "leave_on_shoe_reset", DEFAULT_CONFIG["leave_on_shoe_reset"]))
+        source = str(config.get("auto_side_source") or "probability").strip().lower()
+        config["auto_side_source"] = (source if source in AUTO_SIDE_SOURCES
+                                     else "probability")
         config["tables_to_play"] = max(1, _as_int(config.get("tables_to_play"), 1))
         mode = str(config.get("ai_mode") or "off").strip().lower()
         config["ai_mode"] = mode if mode in ("off", "local", "api") else "off"
@@ -433,16 +451,25 @@ class BaccaratController:
         return rows
 
     def _ai_suggestion(self):
-        """Cửa để đặt tiền: cửa có xác suất ra cao nhất do ``predict`` tính.
+        """Cửa để đặt tiền khi ``bet_side = AUTO``.
+
+        Nguồn do ``auto_side_source`` quyết định:
+
+        - ``probability`` (mặc định): cửa có xác suất ra cao nhất do ``predict`` tính.
+          Lưu ý Banker thắng nhiều hơn Player ~46% so với 44% trên shoe đầy, nên chế độ
+          này chọn Banker ở phần lớn tay — đó là toán, không phải lỗi.
+        - ``road``: bám nhịp cầu đang ra (bệt → nối cửa; 1:1 → đảo cửa).
+        - ``hybrid``: cầu đọc được rõ thì theo cầu, còn lại theo xác suất.
 
         ``analysis.focus_side`` là văn bản do AI trả về nên KHÔNG được dùng để chọn
-        cửa; AI chỉ giải thích. Thứ tự lấy: ``top_side`` (xác suất cao nhất) →
-        tự tính lại từ ``probabilities`` → ``best_side`` nếu bản predict cũ không có.
+        cửa; AI chỉ giải thích.
         """
         live = self.live_session.snapshot() if self.live_session is not None else None
         result = {"side": None, "verdict": "", "playable": False, "confidence": "",
                   "explanation": "", "model": "", "round": None,
-                  "probability": None, "top_side": None, "pattern": ""}
+                  "probability": None, "top_side": None, "pattern": "",
+                  "road_side": None, "road_pattern": None, "road_reason": "",
+                  "source": "probability"}
         if not live:
             return result
         analysis = live.get("analysis") or {}
@@ -464,12 +491,28 @@ class BaccaratController:
             ranked.sort(reverse=True)
             side = ranked[0][1] if ranked and ranked[0][0] > 0 else None
         if side in key_of:
-            result["side"] = side
             result["top_side"] = side
             result["probability"] = probabilities.get(key_of[side])
         elif prediction.get("best_side") in key_of:
-            result["side"] = prediction["best_side"]
-            result["top_side"] = result["side"]
+            side = prediction["best_side"]
+            result["top_side"] = side
+
+        road = prediction.get("road_follow") or predict_road_follow(live.get("history"))
+        if road:
+            result["road_pattern"] = road.get("pattern")
+            result["road_reason"] = str(road.get("reason") or "")
+            if road.get("side") in key_of:
+                result["road_side"] = road["side"]
+
+        choice = str(self.config.get("auto_side_source") or AUTO_SIDE_PROBABILITY)
+        if choice == AUTO_SIDE_ROAD and result["road_side"]:
+            side = result["road_side"]
+            result["source"] = "road"
+        elif choice == AUTO_SIDE_HYBRID and result["road_side"]:
+            side = result["road_side"]
+            result["source"] = "road"
+        if side in key_of:
+            result["side"] = side
         return result
 
     def _resolve_order(self, params=None):
@@ -503,9 +546,14 @@ class BaccaratController:
         if side == "AUTO":
             side = suggestion["side"]
             bits = []
-            if suggestion.get("top_side"):
-                bits.append("%s %.1f%%" % (suggestion["top_side"],
-                                           float(suggestion.get("probability") or 0) * 100))
+            if suggestion.get("source") == "road" and suggestion.get("road_pattern"):
+                bits.append("cầu %s" % suggestion["road_pattern"])
+                if suggestion.get("road_side"):
+                    bits.append("đánh %s" % suggestion["road_side"])
+            elif suggestion.get("top_side"):
+                bits.append("xác suất %s %.1f%%" % (
+                    suggestion["top_side"],
+                    float(suggestion.get("probability") or 0) * 100))
             if suggestion["verdict"]:
                 bits.append(suggestion["verdict"])
             reason = ("Theo AI · " + " · ".join(bits)) if bits else "Theo AI"
@@ -513,6 +561,8 @@ class BaccaratController:
                 "stake": min(1000000.0, max(1.0, stake)),
                 "base_stake": configured,
                 "progression": mode,
+                "auto_source": suggestion.get("source", ""),
+                "road_pattern": suggestion.get("road_pattern"),
                 "reason": reason, "suggestion": suggestion}
 
     def _plan(self):
@@ -526,6 +576,8 @@ class BaccaratController:
             "stake": order["stake"],
             "base_stake": order["base_stake"],
             "progression": order["progression"],
+            "auto_source": order.get("auto_source", ""),
+            "road_pattern": order.get("road_pattern"),
             "last_outcome": self.sim.last_outcome,
             "progress_stake": (None if self.sim.progress_stake is None
                                else _finite(self.sim.progress_stake)),
@@ -631,6 +683,10 @@ class BaccaratController:
                     "next_stake": _finite(plan["stake"]),
                     "base_stake": _finite(plan.get("base_stake") or self.bet_config["stake"]),
                     "max_stake": _finite(self.config.get("bet_max_stake") or 0.0),
+                    "auto_side_source": self.config.get("auto_side_source",
+                                                       AUTO_SIDE_PROBABILITY),
+                    "auto_side_sources": list(AUTO_SIDE_SOURCES),
+                    "auto_side_names": dict(AUTO_SIDE_NAME),
                     "progress_stake": (None if self.sim.progress_stake is None
                                        else _finite(self.sim.progress_stake)),
                     "last_outcome": self.sim.last_outcome,
@@ -1510,7 +1566,7 @@ class BaccaratController:
                     config[key] = bool(params[key])
                     changed.append(key)
             for key in ("bet_side", "bet_stake", "bet_progression", "bet_max_stake",
-                        "min_hands"):
+                        "min_hands", "auto_side_source"):
                 if key in params:
                     config[key] = params[key]
                     changed.append(key)
@@ -2704,11 +2760,18 @@ class BaccaratController:
                 return {"ok": False,
                         "error": "Mức cược tối đa (%s) nhỏ hơn mức gốc (%s)."
                                  % (M.fmt_money(max_stake), M.fmt_money(stake))}
+            source = str(params.get("auto_side_source")
+                         or self.config.get("auto_side_source") or AUTO_SIDE_PROBABILITY)
+            source = source.strip().lower()
+            if source not in AUTO_SIDE_SOURCES:
+                return {"ok": False,
+                        "error": "Nguồn cửa AUTO phải là probability, road hoặc hybrid."}
             self.bet_config = {"side": side, "stake": stake}
             self.config["bet_side"] = side
             self.config["bet_stake"] = stake
             self.config["bet_progression"] = progression
             self.config["bet_max_stake"] = max_stake
+            self.config["auto_side_source"] = source
             if (abs(stake - float(self.sim.progress_stake or stake)) >= 0.005
                     or progression != self._last_progression):
                 # Đổi mức gốc/cơ chế giữa phiên: thang cược bắt đầu lại từ mức mới,
@@ -2723,8 +2786,12 @@ class BaccaratController:
             PROGRESS_NAME.get(progression, progression))
         if max_stake:
             note += " · tối đa %s đv" % M.fmt_money(max_stake)
+        if side == "AUTO":
+            note += " · tự chọn cửa theo %s" % AUTO_SIDE_NAME.get(source,
+                                                                 AUTO_SIDE_NAME[AUTO_SIDE_PROBABILITY])
         return {"ok": True, "side": side, "stake": stake,
-                "progression": progression, "max_stake": max_stake, "note": note}
+                "progression": progression, "max_stake": max_stake,
+                "auto_side_source": source, "note": note}
 
     def bet_place(self):
         """Nút “Tự đặt cược”: chốt lệnh rồi bấm chip thật (có gate chờ ván mới)."""

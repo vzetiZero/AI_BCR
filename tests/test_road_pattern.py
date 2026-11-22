@@ -86,6 +86,42 @@ class PatternTests(unittest.TestCase):
                                                   result["top_side"]))
 
 
+class RoadFollowTests(unittest.TestCase):
+    """Đọc nhịp cầu để chọn cửa (chế độ ``auto_side_source = road``)."""
+
+    @staticmethod
+    def alternating(count):
+        return "".join("PB"[index % 2] for index in range(count))
+
+    def test_one_by_one_flips_the_side(self):
+        road = predict.road_follow(self.alternating(30))
+        self.assertEqual(road["pattern"], "1:1")
+        self.assertEqual(road["side"], "P", "tay cuối B → 1:1 đánh P")
+
+    def test_bet_follows_the_same_side(self):
+        # Bệt 6 tay rồi sang 1:1: tay cuối đang là chuỗi 1 nên 1:1 mới là nhịp hiện tại.
+        tail = predict.road_follow("BBBBBB" + self.alternating(20))
+        self.assertEqual(tail["pattern"], "1:1")
+        # Đang trong chuỗi bệt (tay cuối là B thứ 6) thì đánh tiếp B.
+        bet = predict.road_follow("PBPBPBBBBBB")
+        self.assertEqual(bet["pattern"], "bệt")
+        self.assertEqual(bet["side"], "B")
+        self.assertGreaterEqual(bet["run"], 3)
+
+    def test_mixed_road_returns_no_side(self):
+        road = predict.road_follow("PBBPPBBPPBPBBP")
+        self.assertIsNone(road["side"])
+        self.assertIsNone(road["pattern"])
+
+    def test_short_history_is_not_enough(self):
+        self.assertIsNone(predict.road_follow("PBPB")["side"])
+
+    def test_ties_do_not_break_the_road(self):
+        road = predict.road_follow("BBBTBBTB")
+        self.assertEqual(road["pattern"], "bệt")
+        self.assertEqual(road["side"], "B")
+
+
 class LiveSnapshotTests(unittest.TestCase):
     def test_snapshot_has_hand_history_and_road(self):
         session = LiveSession(trials=400)
@@ -339,7 +375,61 @@ class HighestProbabilityBetTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(placed[0]["side"], "B")
         self.assertEqual(placed[0]["stake"], 60.0)
-        self.assertIn("46.0%", placed[0]["reason"])
+        self.assertIn("xác suất B", placed[0]["reason"])
+
+    def test_auto_side_can_follow_the_1_1_road(self):
+        """Bật nguồn cửa ``road``: cầu 1:1 thì đánh ngược tay cuối, không chọn Banker."""
+        controller = self.make_controller()
+        self_outer = self
+
+        class FakeLive:
+            def snapshot(self):
+                view = self_outer.view()
+                view["history"] = "PBPBPBPBPB"
+                view["prediction"]["road_follow"] = {
+                    "side": "P", "pattern": "1:1", "reason": "Cầu 1:1"}
+                return view
+
+        controller.live_session = FakeLive()
+        reply = controller.dispatch("bet.config", {
+            "side": "AUTO", "stake": 10, "auto_side_source": "road"})[0]
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["auto_side_source"], "road")
+        self.ready(controller)
+        placed = []
+        controller._place_armed_bet = lambda order: placed.append(dict(order))
+        self.assertTrue(controller.dispatch("bet.place", {})[0]["ok"])
+        self.assertEqual(placed[0]["side"], "P")
+        self.assertIn("cầu 1:1", placed[0]["reason"])
+        order = controller._resolve_order()
+        self.assertEqual(order["auto_source"], "road")
+        self.assertEqual(order["road_pattern"], "1:1")
+
+    def test_road_source_falls_back_when_no_clear_pattern(self):
+        controller = self.make_controller()
+        self_outer = self
+
+        class FakeLive:
+            def snapshot(self):
+                view = self_outer.view()
+                view["history"] = "PBBPBPPBBP"
+                view["prediction"]["road_follow"] = {
+                    "side": None, "pattern": None, "reason": ""}
+                return view
+
+        controller.live_session = FakeLive()
+        controller.dispatch("bet.config", {
+            "side": "AUTO", "stake": 10, "auto_side_source": "road"})
+        self.ready(controller)
+        self.assertEqual(controller._resolve_order()["side"], "B",
+                         "không rõ cầu thì vẫn theo xác suất")
+
+    def test_invalid_auto_source_is_rejected(self):
+        controller = self.make_controller()
+        reply = controller.dispatch("bet.config", {
+            "side": "AUTO", "stake": 10, "auto_side_source": "cam-xuc"})[0]
+        self.assertFalse(reply["ok"])
+        self.assertIn("probability", reply["error"])
 
     def test_auto_side_falls_back_to_probabilities_when_top_side_missing(self):
         controller = self.make_controller()
