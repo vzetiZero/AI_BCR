@@ -306,14 +306,43 @@ class LiveSimulation:
             order["placed"] = "pending"
             order["placing_at"] = time.time()
 
-    def mark_placed(self, ok, note="", order=None):
+    def mark_placed(self, ok, note="", order=None, placed_stake=None):
+        """Ghi kết quả lượt bấm chip.
+
+        ``placed_stake`` là số đơn vị THẬT đã lên bàn, dùng cho sổ vốn và cho thang
+        cược. Bắt buộc truyền khi sàn xác nhận một số khác lệnh (ví dụ lệnh 200 nhưng
+        trần bàn/ví chỉ cho 100): dùng ``order["stake"]`` (số dự định) sẽ làm thang cược
+        lệch khỏi thực tế và tay sau đặt sai mức.
+        """
         target = self.pending if order is None else order
         if target is None or target is not self.pending or target.get("placed") != "pending":
             return False
         target["placed"] = "ok" if ok else "failed"
         target["place_note"] = note
         target["confirmed_at"] = target.get("placed_at") or time.time()
+        if placed_stake is not None:
+            try:
+                value = float(placed_stake)
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and value > 0:
+                # Số thật đã lên bàn: sổ vốn và thang cược phải theo số này.
+                target["placed_stake"] = value
         return True
+
+    def settled_stake(self, order):
+        """Số đơn vị thực sự đã đặt cho ``order`` (ưu tiên số sàn xác nhận)."""
+        value = (order or {}).get("placed_stake")
+        if value:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+        try:
+            return float((order or {}).get("stake") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
 
     def _skip_unplaced_hand(self, letters, order):
         """Tay có chữ mới nhưng không đặt được chip: chỉ cập nhật cầu, không đụng vốn."""
@@ -321,6 +350,11 @@ class LiveSimulation:
         self.letters = letters
         self.results = list(letters)
         self.place_skips += 1
+        # Tay không đặt được KHÔNG phải thua, nên thang cược phải bắt đầu lại từ mức gốc.
+        # Không reset thì mức đang chờ (có thể đã gấp đôi) bị lặp vô hạn: đặt lại đúng
+        # mức đó, thất bại lại, mãi không quay về mức cố định của người dùng.
+        self.progress_stake = None
+        self.last_outcome = None
         self.log.append(dict(time=time.time(), armed_at=order.get("armed_at"),
                              table=self.table_name, table_key=self.table_key,
                              hand=len(letters), result=letters[-1], bet=order["side"], stake=0,
@@ -427,10 +461,12 @@ class LiveSimulation:
 
         self.place_skips = 0
         result = letters[-1]
-        settled = self.money.settle(order["side"], result, order["stake"], E.PAYOUT)
-        # Nuôi cơ chế mức cược: lần đặt thật + kết quả thật của tay này. Tay hoà
-        # không phải thắng cũng không phải thua nên giữ nguyên mức ở tay kế.
-        self.progress_stake = float(order["stake"])
+        stake = self.settled_stake(order)
+        order["stake"] = stake
+        settled = self.money.settle(order["side"], result, stake, E.PAYOUT)
+        # Nuôi cơ chế mức cược bằng SỐ ĐÃ ĐẶT THẬT và kết quả thật của tay này.
+        # Tay hoà (push) không phải thắng cũng không phải thua → giữ nguyên mức vừa đặt.
+        self.progress_stake = stake
         self.last_outcome = settled["outcome"]
         self.letters = letters
         self.results = list(letters)
@@ -438,7 +474,7 @@ class LiveSimulation:
         self.log.append(dict(time=time.time(), armed_at=order.get("armed_at"),
                              table=self.table_name, table_key=self.table_key,
                              hand=len(letters), result=result, bet=order["side"],
-                             stake=order["stake"], delta=settled["delta"],
+                             stake=stake, delta=settled["delta"],
                              outcome=settled["outcome"], balance_after=self.money.balance,
                              source="live-driver"))
         if self.money.blocked:

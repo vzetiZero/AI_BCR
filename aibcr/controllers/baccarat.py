@@ -1605,7 +1605,11 @@ class BaccaratController:
                                                        wait_seconds=BET_GATE_TIMEOUT)
                     plan["placed_at"] = time.time()
                     note = result.get("note") or result.get("error") or ""
-                    self.events.put(("placed", (bool(result.get("ok")), note, plan)))
+                    # Số tiền THẬT sàn xác nhận. Trần bàn/ví có thể cắt lệnh 200 xuống
+                    # 100; dùng số thật để sổ vốn và thang cược không lệch khỏi thực tế.
+                    actual = _as_float(result.get("total"), stake) or stake
+                    self.events.put(("placed", (bool(result.get("ok")), note, plan,
+                                                actual)))
                     return
 
                 def record_click():
@@ -1615,7 +1619,16 @@ class BaccaratController:
                     self.browser, side, [], unit=TB.DEFAULT_CHIP_UNIT,
                     human_mouse=self.config["human_mouse"], amount=stake,
                     on_bet_click=record_click)
-                self.events.put(("placed", (ok, note, plan)))
+                # `_placed` là {mệnh giá: số chip}; tổng này là số THẬT đã bấm, có thể
+                # khác lệnh khi khay chip thiếu mệnh giá. Chỉ báo "đặt được" khi khớp.
+                actual = 0.0
+                if isinstance(_placed, dict):
+                    try:
+                        actual = float(sum(int(count or 0) * int(denom or 0)
+                                           for denom, count in _placed.items()))
+                    except (TypeError, ValueError):
+                        actual = 0.0
+                self.events.put(("placed", (ok, note, plan, actual or None)))
             except Exception as exc:
                 self.events.put(("placed", (False, "Lỗi khi tự đặt chip (%s)." % type(exc).__name__,
                                             plan)))
@@ -1909,12 +1922,29 @@ class BaccaratController:
             self.chip_live = data
         elif kind == "placed":
             self.place_busy = False
-            ok, note, plan = data
+            ok, note, plan, *extra = data
+            placed_stake = extra[0] if extra else None
+            requested = _as_float(plan.get("stake"), 0.0)
+            # Sàn có thể nhận ÍT hơn lệnh (trần bàn / trần ví / khay chip thiếu mệnh
+            # giá). Ghi nhận số thật để sổ vốn và thang cược không lệch, và nói rõ cho
+            # người dùng biết thay vì im lặng đặt sai mức.
+            short = (bool(ok) and placed_stake and requested
+                     and placed_stake + 0.005 < requested)
+            if short:
+                note = ("%s · sàn chỉ nhận %s/%s đv — đã tính theo %s đv thực tế."
+                        % (note, M.fmt_money(placed_stake), M.fmt_money(requested),
+                           M.fmt_money(placed_stake)))
             with self.lock:
-                self.sim.mark_placed(ok, note, plan)
-            self.place_status = {"ok": bool(ok), "note": note}
-            self.log(("Đặt chip OK: " + note) if ok else ("Chưa đặt được chip: " + note),
-                     "win" if ok else "error")
+                self.sim.mark_placed(ok, note, plan, placed_stake=placed_stake)
+            self.place_status = {"ok": bool(ok), "note": note,
+                                 "placed_stake": placed_stake,
+                                 "requested_stake": requested, "short": bool(short)}
+            if short:
+                self.log(note, "warn")
+            else:
+                self.log(("Đặt chip OK: " + note) if ok
+                         else ("Chưa đặt được chip: " + note),
+                         "win" if ok else "error")
         elif kind == "recovered":
             self.recover_busy = False
             ok, note = data

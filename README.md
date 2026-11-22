@@ -342,14 +342,25 @@ Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, ph�
 - **Mức gốc mỗi tay**: số đơn vị cấu hình cho tay đầu (mặc định 10 đv = 10.000đ).
 - **Cơ chế mức cược** (`bet_progression`):
   - `flat` — **Cược cố định mỗi tay**: luôn đúng mức gốc, không đổi theo thắng/thua.
-  - `win_repeat_loss_double` — **Thắng về mức gốc · thua gấp đôi**: tay trước thắng thì
-    tay sau **quay lại đúng mức gốc đã cấu hình** (cấu hình 20 → thắng ở mức 80 vẫn đặt
-    lại 20, không giữ mức 80); tay trước thua thì gấp đôi mức vừa đặt. Hoà (push) và tay
-    không đặt được chip **không** phải thua nên không nhân đôi, giữ nguyên mức.
+- `win_repeat_loss_double` — **Thắng về mức gốc · thua gấp đôi**: tay trước thắng thì
+  tay sau **quay lại đúng mức gốc đã cấu hình** (cấu hình 20 → thắng ở mức 80 vẫn đặt
+  lại 20, không giữ mức 80); tay trước thua thì gấp đôi mức vừa đặt. Hoà (push) giữ
+  nguyên mức; tay **không đặt được chip** thì **bắt đầu lại từ mức gốc**.
 - **Mức cược tối đa** (`bet_max_stake`, 0 = không giới hạn): chặn trần khi gấp đôi; mức
   cược luôn bị chặn thêm bởi số dư phiên để không gửi lệnh vượt tiền thật.
 - **Lưu lệnh** (`bet.config`): lưu cửa + mức gốc + cơ chế + mức tối đa cho tay kế.
 - **Tự đặt cược** (`bet.place`): lưu form rồi chốt lệnh ngay.
+
+**Thang cược tính theo SỐ TIỀN THẬT đã lên bàn**, không theo số dự định:
+
+- `LiveSimulation.mark_placed(placed_stake=…)` nhận số sàn xác nhận; `settled_stake()`
+  dùng số này cho cả sổ vốn và thang cược. Không có thì mới dùng số trong lệnh.
+- Nhờ vậy lệnh 200 mà trần bàn/ví chỉ nhận 100 thì: lãi/lỗ tính trên **100** (thắng
+  Banker = +95, không phải +190), lịch sử ghi 100, và thắng thì tay sau về đúng mức gốc.
+- Khi sàn nhận ít hơn lệnh, `place.status` có `short = true` cùng `placed_stake` /
+  `requested_stake`, và UI/log nói rõ *“sàn chỉ nhận 100/200 đv — đã tính theo 100 đv
+  thực tế”*.
+
 
 Cơ chế mức cược chỉ đọc **kết quả thật của tay đã đặt được chip** (`LiveSimulation`
 ghi `progress_stake`/`last_outcome` khi kết toán); đổi mức gốc hoặc cơ chế thì thang

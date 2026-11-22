@@ -389,10 +389,13 @@ class WMBet:
             after = read()
             remaining = sum((s or {}).get("my_bet") or 0
                             for s in (after.get("spots") or {}).values())
-            return {"ok": True, "placed": placed, "total": total,
+            # Đường bấm chuột đã kiểm tra ``total`` khớp ``target`` trước khi tới đây,
+            # nên ``total`` chính là số THẬT đã vào bàn. Vẫn trả đúng số đó (thay vì
+            # ``target``) để lớp trên dùng được con số sàn xác nhận.
+            return {"ok": True, "placed": placed, "total": float(total),
                     "denominations": denominations, "confirmed": True,
                     "bet_area": BET_AREA[side], "my_bet_after": remaining,
-                    "note": "Đã đặt %d đv vào %s." % (target, SIDE_NAME[side])}
+                    "note": "Đã đặt %g đv vào %s." % (float(total), SIDE_NAME[side])}
         except Exception as exc:
             self.last_error = "Lỗi khi đặt chip (%s)." % type(exc).__name__
             return {"ok": False, "placed": placed, "error": self.last_error}
