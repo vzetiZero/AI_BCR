@@ -432,5 +432,83 @@ class EnsureWmPageOrderTests(unittest.TestCase):
         session.stop_wm_watch()
 
 
+class CdpAvailableTests(unittest.TestCase):
+    """`_cdp_available` không được đòi driver Selenium.
+
+    Lỗi thật: người dùng đứng ở `9vnv.com/vn/wm_casino` (WM trong iframe khác origin).
+    Đường OOPIF không dùng driver, nhưng `_cdp_available` cũ trả False khi
+    `browser.driver is None` → nút “VÀO BÀN HỢP LỆ” và quét sảnh bị chặn oan dù
+    chẩn đoán đã báo “Sảnh WM — dùng được”.
+    """
+
+    def test_available_without_driver_when_port_is_open(self):
+        import urllib.request
+        import pathlib
+        import tempfile
+
+        from aibcr.controllers.baccarat import BaccaratController
+
+        folder = pathlib.Path(tempfile.mkdtemp())
+        controller = BaccaratController(
+            folder / "s.json", type("E", (), {"event": lambda self, n, d: None})())
+        self.addCleanup(controller.shutdown)
+        controller.browser.driver = None
+        controller.browser.cdp_attached = False
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = lambda *args, **kwargs: FakeResponse()
+        try:
+            self.assertTrue(controller._cdp_available(),
+                            "port mở là đủ cho đường OOPIF, không cần driver")
+        finally:
+            urllib.request.urlopen = original
+
+    def test_unavailable_when_port_is_closed(self):
+        import urllib.request
+        import pathlib
+        import tempfile
+
+        from aibcr.controllers.baccarat import BaccaratController
+
+        folder = pathlib.Path(tempfile.mkdtemp())
+        controller = BaccaratController(
+            folder / "s.json", type("E", (), {"event": lambda self, n, d: None})())
+        self.addCleanup(controller.shutdown)
+        controller.browser.driver = None
+        controller.browser.cdp_attached = False
+
+        def refuse(*args, **kwargs):
+            raise ConnectionRefusedError(10061, "refused")
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = refuse
+        try:
+            self.assertFalse(controller._cdp_available())
+        finally:
+            urllib.request.urlopen = original
+
+    def test_attached_flag_short_circuits(self):
+        import pathlib
+        import tempfile
+
+        from aibcr.controllers.baccarat import BaccaratController
+
+        folder = pathlib.Path(tempfile.mkdtemp())
+        controller = BaccaratController(
+            folder / "s.json", type("E", (), {"event": lambda self, n, d: None})())
+        self.addCleanup(controller.shutdown)
+        controller.browser.cdp_attached = True
+        self.assertTrue(controller._cdp_available())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

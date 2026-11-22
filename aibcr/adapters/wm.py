@@ -363,7 +363,15 @@ WM_TILE_BOX_JS = r"""(() => {
     return {
         x: rect.x + rect.width / 2 + ox, y: rect.y + rect.height / 2 + oy,
         w: rect.width, h: rect.height, top: rect.top, bottom: rect.bottom,
-        inside: false, vh: innerHeight, hits: seen
+        inside: false,
+        // Ô nằm trong khung nhìn nhưng có lớp phủ (nhãn "Xử lý", badge, tooltip) che
+        // tâm → elementFromPoint trả lớp phủ chứ không phải ô. Vẫn bấm được (cú bấm
+        // xuyên qua lớp phủ) nên báo riêng để lớp trên không cuộn vô hạn.
+        center_visible: (rect.x + rect.width / 2 > 0
+                         && rect.y + rect.height / 2 > 0
+                         && rect.x + rect.width / 2 < innerWidth
+                         && rect.y + rect.height / 2 < innerHeight),
+        vh: innerHeight, hits: seen
     };
 })()"""
 
@@ -432,6 +440,33 @@ WM_DETECT_JS = r"""(() => {
     const lobby = frames['109'] || null;
     const table = frames['101'] || null;
 
+    // Khi script chạy TRONG iframe_109 (sảnh), ``document`` là tài liệu của chính sảnh:
+    // iframe_101 là **anh em** của nó trong document cha (cùng origin wmvn), không nằm
+    // bên trong. Không nhìn sang cha thì app không bao giờ thấy "đã vào bàn" và cứ chờ
+    // mãi. Chỉ đọc được khi cùng origin; khác origin thì bỏ qua (try/catch).
+    let siblingTable = null;
+    let parentDoc = null;
+    try { parentDoc = window.parent && window.parent !== window ? window.parent.document : null; }
+    catch (e) { parentDoc = null; }
+    if (parentDoc) {
+        const f101 = parentDoc.getElementById('iframe_101');
+        if (f101) {
+            const st = (window.parent.getComputedStyle ? window.parent.getComputedStyle(f101) : null);
+            const r = f101.getBoundingClientRect ? f101.getBoundingClientRect() : {width: 0, height: 0};
+            siblingTable = {
+                id: 'iframe_101',
+                display: st ? st.display : '',
+                visible: (!st || st.display !== 'none') && r.width > 0 && r.height > 0
+            };
+        }
+        if (parentDoc.getElementById('game_list_box')) {
+            evidence.push('parent:game_list_box');
+        }
+    }
+    if (siblingTable) {
+        evidence.push('parent:iframe_101');
+    }
+
     // --- dự phòng theo nội dung (mirror/mobile không dùng iframe id cũ) ---
     const evidence = [];
     if (lobby) evidence.push('iframe_109');
@@ -474,10 +509,12 @@ WM_DETECT_JS = r"""(() => {
         evidence.push('probe_error');
     }
 
-    const isTable = !!(table && table.visible) || (contentTable && !contentLobby);
+    const siblingTableVisible = !!(siblingTable && siblingTable.visible);
+    const isTable = !!(table && table.visible) || siblingTableVisible
+                    || (contentTable && !contentLobby && !siblingTable);
     const isLobby = !!lobby || contentLobby;
     return {
-        is_wm: !!(table || lobby || contentLobby || contentTable),
+        is_wm: !!(table || lobby || siblingTable || contentLobby || contentTable),
         kind: isTable ? 'table' : (isLobby ? 'lobby' : ''),
         frames,
         evidence,

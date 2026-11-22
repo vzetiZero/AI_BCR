@@ -414,16 +414,28 @@ class BaccaratController:
         return self.chrome_busy or self.sweep_busy or self.open_table_busy
 
     def _cdp_available(self):
+        """CDP 9222 có dùng được không.
+
+        Không được đòi ``browser.driver``: WM nhúng trong iframe khác origin (OOPIF) đọc
+        qua ``Target.attachToTarget`` nên không cần driver Selenium. Đòi driver ở đây là
+        lý do bấm “VÀO BÀN HỢP LỆ”/quét sảnh bị chặn oan dù Chrome đang mở và app đã
+        nhận được sảnh qua iframe.
+        """
         try:
             if self.browser.cdp_attached:
                 return True
-            if self.browser.driver is None:
-                return False
-            return self.browser._cdp_page() is not None
+            if getattr(self.browser, "driver", None) is not None:
+                return self.browser._cdp_page() is not None
+            # Không có driver: kiểm tra thẳng cổng CDP (đủ cho đường OOPIF/iframe).
+            # Thử đọc /json/version; cổng đóng thì Chrome đang mở không phải của app.
+            import urllib.request
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:%d/json/version" % BR.CDP_PORT, timeout=1.5) as resp:
+                return bool(resp.status == 200)
         except AttributeError:
             return False
-        except Exception:
-            return False
+        except Exception as exc:
+            return not BR.cdp_port_closed(exc)
 
     def _auth_blame(self):
         if getattr(self.stream, "session_lost", False):

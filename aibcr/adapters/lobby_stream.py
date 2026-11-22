@@ -1036,6 +1036,20 @@ class LobbyStream:
             # chỉ bám OOPIF nên "lúc quét được lúc không". Giờ: thử OOPIF, hỏng thì xoá
             # cache và quay về tab WM trực tiếp.
             result = self._sweep_through_oopif(max_seconds, favorites_only)
+            if result is None:
+                result = None
+            elif result:
+                return result
+            elif "chưa hiển thị danh sách bàn" in (self.last_error or ""):
+                # Sảnh đang render lại (mở/đóng bàn, hook WS vừa cài): gắn socket mới và
+                # thử lại MỘT lần trước khi báo lỗi. Đây là lý do bấm “VÀO BÀN HỢP LỆ”
+                # thỉnh thoảng báo "chưa hiển thị danh sách bàn" dù sảnh đang mở.
+                time.sleep(1.5)
+                self._reset()
+                self._ensure_wm_page()
+                result = self._sweep_through_oopif(max_seconds, favorites_only)
+                if result:
+                    return result
             if result is not None:
                 return result
             page = self.session._cdp_page()
@@ -1242,6 +1256,10 @@ class LobbyStream:
         self._reset()
         try:
             self._ensure_wm_page()
+            # Sảnh WM nằm trong iframe KHÁC ORIGIN (trang cổng bọc wmvn.m8810.com):
+            # ô bàn chỉ tồn tại trong target iframe, bấm trên tab mẹ không trúng gì.
+            if self._sweep_oopif_ws() is not None:
+                return self._open_table_oopif(table_id, wait_seconds)
             page = self.session._cdp_page()
             if page is None:
                 return False, "Không có tab sảnh Baccarat trong Chrome CDP 9222."
@@ -1330,6 +1348,62 @@ class LobbyStream:
                 return True, "Đã rời bàn · sảnh WM hiển thị lại danh sách bàn."
         return False, "Đã bấm thoát bàn WM nhưng %d giây chưa thấy lại sảnh." % int(wait_seconds)
 
+    def _sweep_oopif_ws(self):
+        """Mở socket tới iframe WM (khác origin) nếu đang dùng đường đó.
+
+        Trả ``ws`` đã ``Runtime.enable`` hoặc ``None`` khi không có/không dùng được.
+        Dùng chung cho ``sweep`` và ``open_table`` để mọi thao tác trên sảnh đều nhắm
+        đúng target iframe, không phải tab cổng bọc ngoài.
+        """
+        from aibcr.adapters import wm_targets as WT
+
+        oopif = getattr(self.session, "wm_oopif_target", "")
+        if not oopif or not self._target_alive(oopif):
+            if oopif:
+                self.session.wm_oopif_target = ""
+                self.session.wm_oopif_parent = ""
+            return None
+        try:
+            ws = WT.open_frame_socket(BR.CDP_PORT, target_id=oopif,
+                                      timeout=BR.SCRIPT_TIMEOUT)
+        except Exception:
+            self.session.wm_oopif_target = ""
+            self.session.wm_oopif_parent = ""
+            return None
+        try:
+            self._command(ws, "Runtime.enable")
+        except Exception:
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return None
+        return ws
+
+    def _open_table_oopif(self, table_id, wait_seconds=25):
+        """Mở bàn khi sảnh WM nằm trong iframe khác origin."""
+        ws = self._sweep_oopif_ws()
+        if ws is None:
+            return False, "Không gắn được vào iframe WM để mở bàn."
+        try:
+            self.lobby_kind = "wm"
+            state = self._wm_detect(ws)
+            if state.get("is_wm") and state.get("kind") == "table":
+                ok, note = self._back_to_lobby_wm(ws, state, 20)
+                if not ok:
+                    return False, note
+                self.contexts, self.context_frames = [], {}
+                self._command(ws, "Runtime.enable")
+            context_id, _ = self._lobby_context(ws)
+            if context_id is None:
+                return False, "Sảnh WM (trong iframe) chưa hiển thị danh sách bàn."
+            return self._open_table_wm(ws, context_id, table_id, wait_seconds)
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
     def _open_table_wm(self, ws, context_id, table_id, wait_seconds):
         """Mở bàn WM bằng chuột thật trên ô bàn của sảnh rồi chờ iframe bàn hiện ra.
 
@@ -1356,7 +1430,7 @@ class LobbyStream:
             if box.get("reason"):
                 time.sleep(0.5)
                 continue
-            if not box.get("inside"):
+            if not box.get("inside") and not box.get("center_visible"):
                 self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix),
                                 context_id)
                 time.sleep(0.5)
@@ -1720,30 +1794,14 @@ class LobbyStream:
         fallback sang tab WM trực tiếp. Nhờ vậy người dùng đứng ở trang cổng vẫn quét
         được mà không phải copy link iframe ra tab mới.
         """
-        from aibcr.adapters import wm_targets as WT
-
-        oopif = getattr(self.session, "wm_oopif_target", "")
-        if not oopif:
+        if not getattr(self.session, "wm_oopif_target", ""):
             return None
-        if not self._target_alive(oopif):
-            # iframe đã reload/đóng: bỏ cache, để `_ensure_wm_page` dò lại.
-            self.session.wm_oopif_target = ""
-            self.session.wm_oopif_parent = ""
-            self.session.wm_oopif_detect = {}
-            return None
-        ws = None
-        try:
-            ws = WT.open_frame_socket(BR.CDP_PORT, target_id=oopif,
-                                      timeout=BR.SCRIPT_TIMEOUT)
-        except Exception:
-            # Không gắn được socket vào target (target chết giữa chừng): fallback.
-            self.session.wm_oopif_target = ""
-            self.session.wm_oopif_parent = ""
+        ws = self._sweep_oopif_ws()
+        if ws is None:
             return None
         try:
             self.lobby_kind = "wm"
             self._command(ws, "Network.enable")
-            self._command(ws, "Runtime.enable")
             wm_state = self._wm_detect(ws)
             if wm_state.get("is_wm") and wm_state.get("kind") == "table":
                 ok, note = self._back_to_lobby_wm(ws, wm_state, 20)
@@ -1759,11 +1817,10 @@ class LobbyStream:
                 return []
             return self._sweep_wm(ws, context_id, snapshot, max_seconds, favorites_only)
         finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+            try:
+                ws.close()
+            except Exception:
+                pass
 
     def probe_tabs(self):
         """Báo cáo từng tab Chrome kèm loại sảnh app nhận diện được (chỉ đọc).
@@ -1902,16 +1959,28 @@ class LobbyStream:
                    for page in (self.session._last_cdp_targets
                                 if isinstance(self.session._last_cdp_targets, list) else [])):
                 return False, self._health_note({"status": "auth", "entry": True})
+            # Trang cổng (vd. 9vnv.com/vn/wm_casino) chỉ là khung bọc: DOM tab mẹ không
+            # có gì. WM thật nằm trong iframe KHÁC ORIGIN, nên phải dò ở cấp target —
+            # đó chính là đường người dùng đang đứng, không bắt họ copy link iframe.
+            try:
+                if self.session._adopt_oopif_wm():
+                    self.lobby_kind = "wm"
+                    self.note = "Đã nhận sảnh WM qua iframe của trang cổng."
+                    return True, ("Đã nhận sảnh WM (iframe khác origin) · %s"
+                                  % BR._safe_url(
+                                      (getattr(self.session, "wm_oopif_detect", {})
+                                       or {}).get("href") or ""))
+            except Exception:
+                pass
             # Nêu ĐÚNG những gì app thấy, để người dùng biết tab của họ có phải sảnh WM
             # hay chỉ là trang cổng/casino shell bọc ngoài (trang bọc không có iframe WM
             # thì không đọc được — phải vào sảnh Baccarat bên trong).
             seen = ", ".join(probe_log) if probe_log else "không thấy dấu hiệu WM"
             return False, (
-                "Chưa thấy tab sảnh Baccarat. Đã dò %d tab: %s. Cần mở đúng SẢNH "
-                "Baccarat bên trong cửa sổ Chrome do app mở (không phải trang casino/"
-                "lobby bọc ngoài). %s"
-                % (len([p for p in pages if isinstance(p, dict)]), seen,
-                   BR.CDP_CLOSED_NOTE.split(".")[0]))
+                "Chưa thấy sảnh Baccarat. Đã dò %d tab: %s. Nếu WM đang hiện trong "
+                "iframe của trang cổng, hãy để trang đó mở (app tự gắn vào iframe); "
+                "hoặc mở thẳng wmvn.m8810.com trong cửa sổ Chrome do app mở."
+                % (len([p for p in pages if isinstance(p, dict)]), seen))
         expired = ""
         # Tab vừa launch thường nằm cuối danh sách; thử tab mới trước, bỏ qua tab cũ đã EV.7.
         for lobby in reversed(lobbies):
