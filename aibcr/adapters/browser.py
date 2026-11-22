@@ -665,7 +665,9 @@ class BrowserSession:
                 kind, why = driver_for()
                 self._start_driver(chrome, url, pos, kind, cdp, window)
                 self.mode = "driver"
-                self.note = why + " · Đăng nhập thủ công; chỉ đọc kết quả, cược chỉ mô phỏng."
+                # Không còn "cược chỉ mô phỏng": luồng hiện tại đọc kết quả và (khi người
+                # dùng bật "Tự đặt chip") bấm chip thật. Nói đúng để không gây hiểu lầm.
+                self.note = why + " · Đăng nhập thủ công; app chỉ đọc kết quả cho tới khi bạn bật đặt cược."
                 self.connection_state = "waiting"
                 return True
             except Exception as exc:

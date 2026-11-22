@@ -1136,6 +1136,39 @@ $('#ba-save-window').addEventListener('click', async () => {
   ]);
 });
 
+$('#ba-diagnose').addEventListener('click', async () => {
+  const reply = await call('baccarat', 'lobby.diagnose', {});
+  if (!reply) return;
+  const list = $('#ba-diagnose-list');
+  const note = $('#ba-diagnose-note');
+  const KIND_NAME = {
+    evo: 'Sảnh EVO — dùng được',
+    petalive: 'Sảnh Petalive — dùng được',
+    'petalive-table': 'Bàn Petalive — dùng được',
+    'wm-lobby': 'Sảnh WM — dùng được',
+    'wm-table': 'Bàn WM — dùng được',
+    entry: 'Trang /entry của EVO — token đã hết hạn, không dùng được',
+    unknown: 'Không phải sảnh/bàn Baccarat — app không đọc được',
+    error: 'Lỗi đọc danh sách tab',
+  };
+  if (note) note.textContent = reply.note || '';
+  if (!list) return;
+  const tabs = reply.tabs || [];
+  list.innerHTML = tabs.length
+    ? tabs.map((tab) => {
+      const ok = ['evo', 'petalive', 'petalive-table', 'wm-lobby', 'wm-table'].includes(tab.kind);
+      const badge = tab.kind === 'unknown' ? 'bad' : tab.kind === 'entry' ? 'warn' : ok ? 'ok' : 'warn';
+      const extra = (tab.evidence && tab.evidence.length)
+        ? ` · thấy: ${escapeHtml(tab.evidence.join(', '))}` : '';
+      return `<div class="table-row">
+        <span><b>${escapeHtml(KIND_NAME[tab.kind] || tab.kind)}</b>${extra}
+          <br /><small>${escapeHtml(tab.url || '(không có URL)')}</small></span>
+        <span class="tag ${badge}">${ok ? 'OK' : 'KHÔNG DÙNG'}</span>
+      </div>`;
+    }).join('')
+    : '<div class="table-row"><span>Không thấy tab HTTPS nào trong Chrome CDP 9222.</span></div>';
+});
+
 $('#ba-save-url').addEventListener('click', async () => {
   const reply = await call('baccarat', 'config.set', { start_url: $('#ba-start-url').value.trim() });
   if (!reply) return;

@@ -1656,6 +1656,41 @@ class LobbyStream:
         self.contexts, self.context_frames = [], {}
         return False
 
+    def probe_tabs(self):
+        """Báo cáo từng tab Chrome kèm loại sảnh app nhận diện được (chỉ đọc).
+
+        Trả list ``{url, kind, evidence, title}`` với ``kind`` là ``evo`` / ``petalive`` /
+        ``wm-lobby`` / ``wm-table`` / ``entry`` / ``unknown``. Dùng cho ``lobby.diagnose``
+        để người dùng thấy vì sao sảnh của họ không được nhận (gắn nhầm tab, trang bọc
+        ngoài, hay iframe chưa render).
+        """
+        reports = []
+        try:
+            pages = self.session._cdp_pages()
+        except Exception as exc:
+            return [{"url": "", "kind": "error", "evidence": [], "title": "",
+                     "error": type(exc).__name__}]
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            url = page.get("url") or ""
+            entry = {"url": BR._safe_url(url), "kind": "unknown", "evidence": [],
+                     "title": ""}
+            if BR.is_lobby_url(url):
+                entry["kind"] = "evo" if "evo" in url else "petalive"
+            elif BR.is_petalive_table_url(url):
+                entry["kind"] = "petalive-table"
+            elif BR.is_evo_entry_url(url):
+                entry["kind"] = "entry"
+            else:
+                state = self._probe_wm(page)
+                if isinstance(state, dict) and state.get("is_wm"):
+                    entry["kind"] = "wm-table" if state.get("kind") == "table" else "wm-lobby"
+                    entry["evidence"] = list(state.get("evidence") or [])
+                    entry["title"] = str(state.get("title") or "")
+            reports.append(entry)
+        return reports
+
     def _probe_wm(self, page):
         """Dò nhanh một tab xem có phải sảnh/bàn WM không (mở CDP, đọc iframe, đóng)."""
         import websocket
@@ -1694,10 +1729,14 @@ class LobbyStream:
                                               or BR.is_petalive_table_url(page.get("url")))]
         # Sảnh WM (M88) chạy trong iframe của một tab có URL bất kỳ: dò cấu trúc
         # iframe_109/iframe_101 trước, vì đây là sảnh người dùng đang dùng.
+        probe_log = []
         for page in reversed(pages):
             if BR.is_lobby_url(page.get("url")):
                 continue
             state = self._probe_wm(page)
+            if isinstance(state, dict) and state.get("evidence"):
+                probe_log.append("%s → %s" % (BR._safe_url(page.get("url")) or "tab",
+                                              ",".join(str(x) for x in state["evidence"])))
             if not state.get("is_wm"):
                 continue
             self.session.wm_page_id = page.get("id")
@@ -1714,8 +1753,16 @@ class LobbyStream:
                    for page in (self.session._last_cdp_targets
                                 if isinstance(self.session._last_cdp_targets, list) else [])):
                 return False, self._health_note({"status": "auth", "entry": True})
-            return False, ("Chưa thấy tab sảnh Baccarat. Hãy tự mở trang cổng của bạn → EVO → Baccarat "
-                           "trong cửa sổ Chrome rồi bấm lại nút này.")
+            # Nêu ĐÚNG những gì app thấy, để người dùng biết tab của họ có phải sảnh WM
+            # hay chỉ là trang cổng/casino shell bọc ngoài (trang bọc không có iframe WM
+            # thì không đọc được — phải vào sảnh Baccarat bên trong).
+            seen = ", ".join(probe_log) if probe_log else "không thấy dấu hiệu WM"
+            return False, (
+                "Chưa thấy tab sảnh Baccarat. Đã dò %d tab: %s. Cần mở đúng SẢNH "
+                "Baccarat bên trong cửa sổ Chrome do app mở (không phải trang casino/"
+                "lobby bọc ngoài). %s"
+                % (len([p for p in pages if isinstance(p, dict)]), seen,
+                   BR.CDP_CLOSED_NOTE.split(".")[0]))
         expired = ""
         # Tab vừa launch thường nằm cuối danh sách; thử tab mới trước, bỏ qua tab cũ đã EV.7.
         for lobby in reversed(lobbies):

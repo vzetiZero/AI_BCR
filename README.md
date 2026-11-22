@@ -96,6 +96,18 @@ Một lần bấm chạy đúng chuỗi:
    Nhận cả sảnh EVO (`/frontend/evo/r3`), sảnh Petalive (`/live-games/lobby/bcr`) và
    sảnh **WM/M88** (tab có `iframe_109`/`iframe_101`); với Petalive, cầu được đọc
    trực tiếp từ ô bàn, còn WM đọc lịch sử + lá bài qua WebSocket nhị phân.
+
+   **Cổng vào không bị giới hạn**: `start_url` chỉ cần là HTTPS công khai, nên dùng được
+   bất kỳ cổng/mirror nào, kể cả bản mobile như
+   `https://m.9vnv.com/vn/wm_casino?from=casino`. Nhưng trang **casino bọc ngoài không
+   phải sảnh** — nó không chứa danh sách bàn. Phải bấm vào **sảnh Baccarat bên trong**
+   (WM đặt sảnh trong `iframe_109`, bàn trong `iframe_101`) rồi mới bấm “VÀO BÀN HỢP LỆ”.
+
+   WM nhận diện **theo nội dung trước, theo id iframe sau**: `#game_list_box` / ô
+   `groupBac_<game>_<group>_<type>` cho sảnh, `#container` có `gameNNN groupNNN` /
+   `#bigRoadContainer` / `#userBalanceBox` cho bàn. Nhờ vậy mirror hoặc bản mobile đổi
+   id iframe vẫn nhận được. `WM_DETECT_JS` trả thêm `evidence` (đã thấy dấu hiệu gì) và
+   `title` để log/diagnose nói rõ thay vì chỉ báo “không thấy”.
 3. Mở **ô bàn đầu tiên có mã bàn**. Không chấm điểm/lọc cầu, không bỏ bàn Siêu
    Tốc Độ, không đối chiếu shoe.
 4. Bấm đúng ô bàn bằng pointer event thật, chờ URL xác nhận bàn: EVO dùng
@@ -104,6 +116,21 @@ Một lần bấm chạy đúng chuỗi:
 5. Xác nhận chỉ cần đọc được cầu trong bàn.
 6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa bấm chip
    (`sim.running = false`, `pending = null`).
+
+### Chẩn đoán “Chưa thấy tab sảnh Baccarat”
+
+Thông báo này nghĩa là app **không tìm thấy sảnh trong Chrome do app mở**, không phải
+lỗi đăng nhập. Ba nguyên nhân thường gặp:
+
+1. Chrome đang xem **trang casino bọc ngoài** (`wm_casino`) chứ chưa bấm vào sảnh
+   Baccarat bên trong.
+2. Sảnh đang mở trong **cửa sổ Chrome khác**, không phải cửa sổ app mở (cổng CDP 9222).
+   Hai cửa sổ cùng tài khoản còn làm site báo “Bạn đã đăng xuất”.
+3. Sảnh còn đang tải, iframe danh sách bàn chưa render.
+
+Dùng **Cấu hình → Kiểm tra tab Chrome** (`lobby.diagnose`): app liệt kê từng tab kèm
+kết luận `Sảnh EVO / Petalive / WM — dùng được` hay `Không phải sảnh/bàn Baccarat` và
+các dấu hiệu đã thấy (`iframe_109`, `game_list_box`, `groupBac_…`).
 
 ### Bàn xáo lại bài (số tay về 0)
 
@@ -389,7 +416,7 @@ cạnh file state — xem `aibcr/models/history.py`. Vì vậy:
 ```
 ping, state,
 chrome.open|attach|close|window|status,
-lobby.enter|sweep|back,
+    lobby.enter|sweep|back, lobby.diagnose,
 tables, table.enterValid|cancelEnter|open|select|leave,
 tool.start|stop, scan, chips.read,
 live.start|stop|state|analyze, ai.key.set,

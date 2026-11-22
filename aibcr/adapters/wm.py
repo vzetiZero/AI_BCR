@@ -402,6 +402,13 @@ WM_SCROLL_TO_JS = r"""(() => {
 
 # Nhận diện tab WM ở khung gốc: hai iframe cố định của site. Không dựa vào tên miền
 # vì mirror đổi liên tục; chỉ dựa vào cấu trúc iframe_109 (sảnh) / iframe_101 (bàn).
+#
+# Dự phòng theo NỘI DUNG: nhiều cổng/mirror (và bản mobile `wm_casino`) không đặt iframe
+# đúng id như bản desktop. Khi đó nhận diện bằng chính dấu hiệu của sảnh/bàn WM:
+#   - sảnh:  ``#game_list_box`` hoặc ô ``groupBac_<game>_<group>_<type>``
+#   - bàn :  ``#container`` mang class ``gameNNN groupNNN``, ``#bigRoadContainer``,
+#            ``#userBalanceBox`` (ví tiền VNDK)
+# ``evidence`` được trả về để UI/log nói rõ app đã thấy gì, thay vì chỉ báo "không thấy".
 WM_DETECT_JS = r"""(() => {
     const frames = {};
     for (const frame of document.querySelectorAll('iframe')) {
@@ -424,10 +431,57 @@ WM_DETECT_JS = r"""(() => {
     }
     const lobby = frames['109'] || null;
     const table = frames['101'] || null;
+
+    // --- dự phòng theo nội dung (mirror/mobile không dùng iframe id cũ) ---
+    const evidence = [];
+    if (lobby) evidence.push('iframe_109');
+    if (table) evidence.push('iframe_101');
+    let contentLobby = false;
+    let contentTable = false;
+    try {
+        if (document.getElementById('game_list_box')) {
+            contentLobby = true; evidence.push('game_list_box');
+        }
+        if (document.querySelector('section.game_list.roomItem, [id^="groupBac_"]')) {
+            contentLobby = true; evidence.push('roomItem');
+        }
+        const box = document.getElementById('container');
+        const cls = box ? (box.className || '').toString() : '';
+        if (box && /(?:^|\s)game\d+/.test(cls) && /(?:^|\s)group\d+/.test(cls)) {
+            contentTable = true; evidence.push('container.game+group');
+        }
+        if (document.getElementById('bigRoadContainer')) {
+            contentTable = true; evidence.push('bigRoadContainer');
+        }
+        // iframe bàn cùng origin: đọc thêm bên trong để không bỏ sót layout lồng nhau.
+        for (const frame of document.querySelectorAll('iframe')) {
+            let doc = null;
+            try { doc = frame.contentDocument; } catch (e) { doc = null; }
+            if (!doc) continue;
+            if (doc.getElementById('game_list_box')) {
+                contentLobby = true; evidence.push('frame:game_list_box');
+            }
+            const inner = doc.getElementById('container');
+            const innerCls = inner ? (inner.className || '').toString() : '';
+            if (inner && /(?:^|\s)game\d+/.test(innerCls) && /(?:^|\s)group\d+/.test(innerCls)) {
+                contentTable = true; evidence.push('frame:container.game+group');
+            }
+            if (doc.getElementById('bigRoadContainer') || doc.getElementById('userBalanceBox')) {
+                contentTable = true; evidence.push('frame:table_dom');
+            }
+        }
+    } catch (e) {
+        evidence.push('probe_error');
+    }
+
+    const isTable = !!(table && table.visible) || (contentTable && !contentLobby);
+    const isLobby = !!lobby || contentLobby;
     return {
-        is_wm: !!(lobby || table),
-        kind: (table && table.visible) ? 'table' : (lobby ? 'lobby' : ''),
+        is_wm: !!(table || lobby || contentLobby || contentTable),
+        kind: isTable ? 'table' : (isLobby ? 'lobby' : ''),
         frames,
+        evidence,
+        title: (document.title || '').slice(0, 120),
         href: location.href
     };
 })()"""

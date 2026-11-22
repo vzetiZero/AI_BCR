@@ -906,6 +906,30 @@ class BaccaratController:
         self._push_state()
         return {"ok": True, "note": self.sweep_note}
 
+    def lobby_diagnose(self):
+        """Báo cáo app thấy gì trong Chrome: từng tab là loại sảnh nào (hoặc không).
+
+        Dùng khi sảnh không được nhận diện (log "Chưa thấy tab sảnh Baccarat") để biết
+        ngay là app đang gắn nhầm tab, tab đó chỉ là trang casino bọc ngoài, hay iframe
+        của sảnh chưa render. Chỉ đọc, không bấm/navigate gì.
+        """
+        if not self._cdp_available():
+            return {"ok": False,
+                    "error": "Chưa gắn Chrome CDP 9222. Bấm “Mở Chrome” rồi mở sảnh trước."}
+        try:
+            pages = self.browser._cdp_pages()
+        except Exception as exc:
+            return {"ok": False, "error": "Không đọc được danh sách tab (%s)."
+                                          % type(exc).__name__}
+        probe = getattr(self.stream, "probe_tabs", None)
+        try:
+            reports = probe() if callable(probe) else []
+        except Exception as exc:
+            reports = [{"error": type(exc).__name__}]
+        return {"ok": True, "tabs": reports, "count": len(reports),
+                "note": "Chỉ tab có dấu hiệu EVO/Petalive/WM mới dùng được. "
+                        "Trang casino/lobby bọc ngoài phải mở vào SẢNH Baccarat bên trong."}
+
     def lobby_sweep(self, params=None):
         params = params or {}
         if self.sweep_busy or self.chrome_busy:
@@ -2342,9 +2366,14 @@ class BaccaratController:
                      if (report.get("page") or {}).get("wallet_balance")), "")
         if not text and getattr(self.browser, "wm_page_id", None):
             # WM: số dư thật nằm trong iframe bàn (#userBalanceBox), không nằm ở trang.
+            # Chỉ đọc được khi ĐANG Ở TRONG BÀN; ở sảnh thì không có ô này, nên phải nói
+            # rõ lý do thay vì để nhãn "chưa đọc được" treo vô nghĩa.
             wallet = self.browser.read_wm_wallet()
             if wallet.get("ok"):
                 self._apply_wallet(wallet["value"], wallet.get("text") or "")
+            elif wallet.get("error") in ("no_tab", "no_wallet"):
+                self.wallet_text = ("Số dư ví: chỉ đọc được khi đang ở trong bàn WM "
+                                    "(vào bàn để thấy số dư thật).")
             return
         if not text:
             return
@@ -2927,6 +2956,7 @@ class BaccaratController:
                                         "note": self.browser.note},
             "lobby.enter": lambda p: self.lobby_enter(),
             "lobby.sweep": self.lobby_sweep,
+            "lobby.diagnose": lambda p: self.lobby_diagnose(),
             "lobby.back": lambda p: self.lobby_back(),
             "tables": lambda p: {"tables": self.table_rows(),
                                  "note": self.sweep_note},
