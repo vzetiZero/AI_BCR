@@ -440,6 +440,25 @@ WM_DETECT_JS = r"""(() => {
     const lobby = frames['109'] || null;
     const table = frames['101'] || null;
 
+    // --- dự phòng theo nội dung (mirror/mobile/layout mới không dùng iframe id cũ) ---
+    // Khai báo TRƯỚC mọi chỗ dùng: trước đây khối "nhìn sang document cha" đẩy vào
+    // ``evidence`` khi biến còn ở vùng chết (TDZ) → ReferenceError → cả phép dò hỏng.
+    const evidence = [];
+    if (lobby) evidence.push('iframe_109');
+    if (table) evidence.push('iframe_101');
+
+    // Trạng thái HIỂN THỊ, không chỉ sự tồn tại: layout một-document giữ
+    // ``#game_list_box`` trong DOM nhưng đặt ``visibility: hidden`` khi đang ở bàn.
+    const shown = (el) => {
+        if (!el) return false;
+        try {
+            const st = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return st.display !== 'none' && st.visibility !== 'hidden'
+                   && r.width > 4 && r.height > 4;
+        } catch (e) { return false; }
+    };
+
     // Khi script chạy TRONG iframe_109 (sảnh), ``document`` là tài liệu của chính sảnh:
     // iframe_101 là **anh em** của nó trong document cha (cùng origin wmvn), không nằm
     // bên trong. Không nhìn sang cha thì app không bao giờ thấy "đã vào bàn" và cứ chờ
@@ -459,22 +478,15 @@ WM_DETECT_JS = r"""(() => {
                 visible: (!st || st.display !== 'none') && r.width > 0 && r.height > 0
             };
         }
-        if (parentDoc.getElementById('game_list_box')) {
-            evidence.push('parent:game_list_box');
-        }
     }
     if (siblingTable) {
         evidence.push('parent:iframe_101');
     }
 
-    // --- dự phòng theo nội dung (mirror/mobile không dùng iframe id cũ) ---
-    const evidence = [];
-    if (lobby) evidence.push('iframe_109');
-    if (table) evidence.push('iframe_101');
     let contentLobby = false;
     let contentTable = false;
     try {
-        if (document.getElementById('game_list_box')) {
+        if (shown(document.getElementById('game_list_box'))) {
             contentLobby = true; evidence.push('game_list_box');
         }
         if (document.querySelector('section.game_list.roomItem, [id^="groupBac_"]')) {
@@ -482,18 +494,27 @@ WM_DETECT_JS = r"""(() => {
         }
         const box = document.getElementById('container');
         const cls = box ? (box.className || '').toString() : '';
-        if (box && /(?:^|\s)game\d+/.test(cls) && /(?:^|\s)group\d+/.test(cls)) {
+        if (box && /(?:^|\s)game\d+/.test(cls) && /(?:|\s)group\d+/.test(cls)
+                && shown(box)) {
             contentTable = true; evidence.push('container.game+group');
         }
-        if (document.getElementById('bigRoadContainer')) {
+        if (shown(document.getElementById('bigRoadContainer'))) {
             contentTable = true; evidence.push('bigRoadContainer');
+        }
+        // Nút thoát bàn + ô số dư chỉ có khi ĐANG Ở TRONG BÀN. Đây là dấu hiệu bền nhất
+        // cho layout một-document (không có iframe_101/109 và không có #container).
+        if (shown(document.getElementById('exit_game_btn'))) {
+            contentTable = true; evidence.push('exit_game_btn');
+        }
+        if (shown(document.getElementById('userBalanceBox'))) {
+            contentTable = true; evidence.push('userBalanceBox');
         }
         // iframe bàn cùng origin: đọc thêm bên trong để không bỏ sót layout lồng nhau.
         for (const frame of document.querySelectorAll('iframe')) {
             let doc = null;
             try { doc = frame.contentDocument; } catch (e) { doc = null; }
             if (!doc) continue;
-            if (doc.getElementById('game_list_box')) {
+            if (shown(doc.getElementById('game_list_box'))) {
                 contentLobby = true; evidence.push('frame:game_list_box');
             }
             const inner = doc.getElementById('container');

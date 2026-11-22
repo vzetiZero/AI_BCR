@@ -30,39 +30,77 @@ def make():
 
 
 class RememberWmUrlTests(unittest.TestCase):
-    def test_after_lifting_the_tab_the_start_url_becomes_the_wm_url(self):
+    """`start_url` phải là CỔNG của người dùng, không phải URL WM dùng một lần."""
+
+    def test_the_learned_start_url_is_the_portal_root(self):
         controller = make()
         self.addCleanup(controller.shutdown)
-        controller.config["start_url"] = PORTAL
+        controller.config["start_url"] = "https://www.neo179.com/gamelobby/live"
+        controller.browser.wm_portal_url = "https://miso88-6.com/w/"
         controller.browser.wm_lifted_url = WM_URL
         controller._remember_wm_url()
-        self.assertEqual(controller.config["start_url"], WM_URL,
-                         "lần mở Chrome sau phải vào thẳng WM")
-        self.assertEqual(controller.config["portal_url"], PORTAL,
-                         "phải giữ trang cổng làm đường lùi")
+        self.assertEqual(controller.config["start_url"], "https://miso88-6.com/w/",
+                         "lần mở Chrome sau phải vào đúng site người dùng")
+        self.assertEqual(controller.config["portal_url"], "https://miso88-6.com/w/")
+        self.assertEqual(controller.config["wm_url"], WM_URL,
+                         "URL WM chỉ để tham khảo, không làm start_url")
 
-    def test_the_saved_state_contains_the_wm_url(self):
+    def test_the_saved_state_contains_the_portal(self):
         import json
         controller = make()
         self.addCleanup(controller.shutdown)
-        controller.config["start_url"] = PORTAL
+        controller.config["start_url"] = "https://www.neo179.com/gamelobby/live"
+        controller.browser.wm_portal_url = "https://miso88-6.com/w/"
         controller.browser.wm_lifted_url = WM_URL
         controller._remember_wm_url()
         saved = json.loads(controller.state_path.read_text(encoding="utf-8"))["settings"]
-        self.assertEqual(saved["start_url"], WM_URL)
-        self.assertEqual(saved["portal_url"], PORTAL)
+        self.assertEqual(saved["start_url"], "https://miso88-6.com/w/")
+        self.assertEqual(saved["portal_url"], "https://miso88-6.com/w/")
+        self.assertEqual(saved["wm_url"], WM_URL)
+
+    def test_a_user_chosen_start_url_is_never_overwritten(self):
+        """Người dùng có thể dùng mirror khác với ``returnurl`` của link WM."""
+        controller = make()
+        self.addCleanup(controller.shutdown)
+        controller.dispatch("config.set", {"start_url": "https://miso88-6.com/w/"})
+        controller.browser.wm_portal_url = "https://miso88-7.com/"
+        controller.browser.wm_lifted_url = WM_URL
+        controller._remember_wm_url()
+        self.assertEqual(controller.config["start_url"], "https://miso88-6.com/w/")
+        self.assertTrue(controller.config["start_url_locked"])
 
     def test_nothing_is_saved_when_no_url_was_lifted(self):
         controller = make()
         self.addCleanup(controller.shutdown)
         controller.config["start_url"] = PORTAL
         controller.browser.wm_lifted_url = ""
+        controller.browser.wm_portal_url = ""
+        controller.browser._cdp_pages = lambda: []
         controller._remember_wm_url()
         self.assertEqual(controller.config["start_url"], PORTAL)
 
     def test_the_wm_url_is_recognised_as_wm_and_the_portal_is_not(self):
         self.assertTrue(WT.looks_like_wm(WM_URL))
         self.assertFalse(WT.looks_like_wm(PORTAL))
+
+    def test_portal_root_keeps_only_the_first_path_segment(self):
+        from aibcr.adapters import browser as BR
+
+        self.assertEqual(BR.portal_root("https://miso88-7.com/w/game-lobby/casino"),
+                         "https://miso88-7.com/w/")
+        self.assertEqual(BR.portal_root("https://miso88-7.com/"),
+                         "https://miso88-7.com/")
+        self.assertEqual(BR.portal_root("https://9vnv.com/vn/wm_casino/?type=fullscreen"),
+                         "https://9vnv.com/vn/")
+
+    def test_portal_is_read_from_the_returnurl_parameter(self):
+        from aibcr.adapters import browser as BR
+
+        url = ("https://wmvn.m8810.com/?sid=62715A9G&ui=7&lang=vi"
+               "&returnurl=https://miso88-7.com&co=wm&fullscreen=true")
+        self.assertEqual(BR.portal_from_wm_url(url), "https://miso88-7.com")
+        self.assertEqual(BR.portal_root(BR.portal_from_wm_url(url)),
+                         "https://miso88-7.com/")
 
 
 class PortalFallbackTests(unittest.TestCase):
@@ -76,8 +114,6 @@ class PortalFallbackTests(unittest.TestCase):
             lambda url, wait_seconds=15.0: navigated.append(url) or (True, "ok"))
         self.assertTrue(controller._fallback_to_portal("hết hạn"))
         self.assertEqual(navigated, [PORTAL])
-        self.assertEqual(controller.config["start_url"], PORTAL,
-                         "sau khi lùi, start_url phải là trang cổng để lấy URL mới")
 
     def test_fallback_does_not_loop(self):
         controller = make()
@@ -92,11 +128,11 @@ class PortalFallbackTests(unittest.TestCase):
                          "không được nhảy về cổng liên tục")
         self.assertEqual(len(calls), 1)
 
-    def test_fallback_is_skipped_when_the_current_url_is_not_wm(self):
+    def test_fallback_is_skipped_without_a_saved_portal(self):
         controller = make()
         self.addCleanup(controller.shutdown)
-        controller.config["start_url"] = PORTAL
-        controller.config["portal_url"] = PORTAL
+        controller.config["start_url"] = WM_URL
+        controller.config["portal_url"] = ""
         calls = []
         controller.browser.navigate_current = (
             lambda url, wait_seconds=15.0: calls.append(url) or (True, "ok"))

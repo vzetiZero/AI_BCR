@@ -118,12 +118,25 @@ Một lần bấm chạy đúng chuỗi:
    iframe nào. Chỉ đổi URL của tab đang mở (không mở tab mới, không đóng gì), chỉ khi URL
    iframe là HTTPS công khai và trông giống WM.
 
-   **URL cuối cùng là WM, không còn đứng ở trang cổng.** Sau lần chuyển đầu tiên, app ghi
-   nhớ URL WM làm `start_url` (`_remember_wm_url`) nên **mở Chrome lần sau đi thẳng vào
-   `wmvn.m8810.com/...`**, không qua `9vnv.com/vn/wm_casino` nữa. Trang cổng được giữ
-   trong `portal_url`; nếu token của URL WM hết hạn (`sid` dùng một lần), app tự điều
-   hướng tab về cổng **một lần** (`_fallback_to_portal`, chống lặp 60 giây) để lấy URL
-   mới rồi ghi nhớ lại. Gõ tay link cổng vào ô “Link mở đầu” cũng tự ghi `portal_url`.
+   **URL cuối cùng là WM, nhưng `start_url` là CỔNG của người dùng.** Sau khi đưa iframe
+   ra tab, app suy ra trang gốc của cổng và ghi vào `start_url`:
+
+   - ưu tiên URL tab mẹ đang mở (`https://miso88-7.com/w/game-lobby/casino` →
+     `https://miso88-7.com/w/`);
+   - nếu không còn tab mẹ thì lấy tham số `returnurl` trong URL WM;
+   - `wm_url` (chứa `sid` dùng một lần) được lưu riêng để tham khảo, **không** dùng làm
+     `start_url` vì mở lại sẽ hỏng;
+   - `start_url_locked = true` khi người dùng tự đặt link → bước tự học **không ghi đè**
+     (họ có thể dùng mirror khác với `returnurl` của link WM).
+
+   Nếu WM không mở được, app điều hướng tab về `portal_url` **một lần** (chống lặp 60
+   giây) để lấy `sid` mới rồi ghi nhớ lại.
+
+   **Nhận diện sảnh/bàn theo TRẠNG THÁI HIỂN THỊ**, không chỉ sự tồn tại: layout
+   một-document (không có `iframe_101/109`) giữ `#game_list_box` trong DOM nhưng đặt
+   `visibility: hidden` khi đang ở bàn. Detector cũ vì thế luôn trả `lobby`, nên app
+   không bao giờ thấy "đã vào bàn". Nay `#exit_game_btn` và `#userBalanceBox` đang hiện
+   là dấu hiệu bàn.
 
    **Đọc cầu khi tab mở sẵn:** CDP chỉ phát khung WebSocket của socket được tạo **sau**
    `Network.enable`. Vì vậy `WMReader` nạp lại riêng `iframe_109` (sảnh) sau 6 giây nếu

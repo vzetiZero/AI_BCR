@@ -636,5 +636,47 @@ class WalletReadTests(unittest.TestCase):
         self.assertEqual(result["error"], "no_wallet")
 
 
+class DetectLayoutTests(unittest.TestCase):
+    """Layout một-document (không iframe_101/109) phải nhận đúng sảnh/bàn.
+
+    Lỗi thật: khi vào bàn, ``#game_list_box`` vẫn tồn tại trong DOM nhưng bị đặt
+    ``visibility: hidden``, còn ``#container``/``#bigRoadContainer`` không có. Detector
+    cũ chỉ kiểm tra SỰ TỒN TẠI nên luôn trả ``lobby`` → app không bao giờ thấy "đã vào
+    bàn" và cứ chờ mãi.
+    """
+
+    def test_the_detector_checks_visibility_not_just_existence(self):
+        from aibcr.adapters import wm as WM
+
+        js = WM.WM_DETECT_JS
+        self.assertIn("const shown = (el)", js)
+        self.assertIn("visibility !== 'hidden'", js)
+        self.assertIn("shown(document.getElementById('game_list_box'))", js)
+
+    def test_table_is_detected_without_any_iframe(self):
+        from aibcr.adapters import wm as WM
+
+        js = WM.WM_DETECT_JS
+        # Nút thoát bàn + ô số dư là dấu hiệu bàn khi không có iframe/container.
+        self.assertIn("shown(document.getElementById('exit_game_btn'))", js)
+        self.assertIn("shown(document.getElementById('userBalanceBox'))", js)
+
+    def test_evidence_is_declared_before_it_is_used(self):
+        """Trước đây khối "nhìn sang document cha" đẩy vào ``evidence`` khi biến còn ở
+        vùng chết (TDZ) → ReferenceError → cả phép dò hỏng."""
+        from aibcr.adapters import wm as WM
+
+        js = WM.WM_DETECT_JS
+        self.assertLess(js.index("const evidence"), js.index("evidence.push"))
+
+    def test_a_hidden_lobby_box_does_not_win_over_the_table(self):
+        from aibcr.adapters import wm as WM
+
+        js = WM.WM_DETECT_JS
+        # isTable ưu tiên dấu hiệu bàn; isLobby chỉ tính khi ``contentLobby`` (đã lọc
+        # theo hiển thị) nên hộp sảnh ẩn không kéo kết luận về lobby.
+        self.assertIn("(contentTable && !contentLobby && !siblingTable)", js)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

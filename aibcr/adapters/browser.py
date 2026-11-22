@@ -366,6 +366,47 @@ def build_flags(pos=None, cdp=False, window=None):
     return flags
 
 
+def portal_root(url):
+    """Suy ra trang gốc của cổng từ một URL bất kỳ.
+
+    Ví dụ: ``https://miso88-7.com/w/game-lobby/casino`` → ``https://miso88-7.com/w/``.
+    Dùng để ghi nhớ ``start_url`` đúng site người dùng, thay vì một cổng mặc định khác.
+    Chỉ lấy origin + đoạn đường dẫn ĐẦU (bỏ phần lobby/casino phía sau) vì URL sâu có
+    thể gắn phiên tạm.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(str(url or "").strip())
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    segments = [seg for seg in (parts.path or "").split("/") if seg]
+    root_path = "/%s/" % segments[0] if segments else "/"
+    return urlunsplit((parts.scheme, parts.netloc, root_path, "", ""))
+
+
+def portal_from_wm_url(url):
+    """Lấy cổng từ tham số ``returnurl`` của URL WM (nếu có).
+
+    URL WM có dạng ``…?sid=…&returnurl=https://miso88-7.com&co=wm``; ``returnurl`` chính
+    là site gốc người dùng dùng. Trả ``""`` khi không có.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    try:
+        query = parse_qs(urlsplit(str(url or "")).query)
+    except ValueError:
+        return ""
+    for key in ("returnurl", "return_url", "backurl"):
+        for value in query.get(key) or []:
+            candidate = str(value or "").strip()
+            if candidate.startswith("http") and valid_site_url(candidate):
+                return candidate
+    return ""
+
+
 class BrowserSession:
     """Quản lý WebDriver riêng hoặc gắn CDP chỉ đọc khi được yêu cầu."""
 
@@ -407,6 +448,9 @@ class BrowserSession:
         # URL WM thật lấy được từ iframe của trang cổng (đã đưa ra tab). Dùng để mở
         # thẳng WM ở lần sau, không phải đi qua trang cổng nữa.
         self.wm_lifted_url = ""
+        # Trang gốc của cổng (vd. ``https://miso88-6.com/w/``) suy ra khi đưa iframe ra
+        # tab. Dùng làm ``start_url`` để lần sau mở Chrome vào đúng site người dùng.
+        self.wm_portal_url = ""
         self._wm_watch = None
         self._wm_watch_stop = threading.Event()
         # Kiểm tra "Chrome còn sống" có cache: tránh gọi HTTP mỗi lần UI hỏi state
@@ -1505,6 +1549,53 @@ class BrowserSession:
                     pass
         return False
 
+    def detect_portal_url(self):
+        """Suy ra trang gốc của cổng người dùng đang dùng (vd. ``https://miso88-6.com/w/``).
+
+        Thứ tự:
+        1. Portal đã ghi nhận khi đưa iframe ra tab (tab mẹ lúc đó).
+        2. Tab đang mở có cùng tên miền với ``returnurl`` trong URL WM → lấy gốc của tab
+           đó. Đây là trường hợp phổ biến: người dùng mở site ở một tab, WM ở tab khác.
+        3. Gốc của chính ``returnurl``.
+
+        Trả ``""`` khi không suy ra được.
+        """
+        from aibcr.adapters import wm_targets as WT
+
+        if self.wm_portal_url:
+            return self.wm_portal_url
+        wm_url = ""
+        try:
+            for page in self._cdp_pages():
+                candidate = str(page.get("url") or "")
+                if WT.looks_like_wm(candidate):
+                    wm_url = candidate
+                    break
+        except Exception:
+            wm_url = ""
+        if not wm_url:
+            return ""
+        referrer = portal_from_wm_url(wm_url)
+        host = ""
+        if referrer:
+            from urllib.parse import urlsplit
+            host = (urlsplit(referrer).hostname or "").lower()
+        if host:
+            try:
+                for page in self._cdp_pages():
+                    candidate = str(page.get("url") or "")
+                    if host in candidate.lower() and not WT.looks_like_wm(candidate):
+                        root = portal_root(candidate)
+                        if root:
+                            self.wm_portal_url = root
+                            return root
+            except Exception:
+                pass
+        root = portal_root(referrer)
+        if root:
+            self.wm_portal_url = root
+        return root
+
     def navigate_current(self, url, wait_seconds=15.0):
         """Điều hướng tab hiện tại sang ``url`` (không mở tab mới). Trả ``(ok, note)``."""
         if not valid_site_url(url):
@@ -1576,6 +1667,16 @@ class BrowserSession:
         url = str(frame.get("url") or "")
         if not valid_site_url(url) or not WT.looks_like_wm(url):
             return False, "URL trong iframe không phải WM hợp lệ."
+        # Ghi nhớ CỔNG của người dùng để lần sau mở Chrome vào đúng site của họ:
+        #  - ưu tiên URL tab mẹ đang mở (đó chính là trang họ dùng);
+        #  - nếu không có, lấy tham số ``returnurl`` trong URL WM.
+        portal = ""
+        if parent and parent.get("url"):
+            portal = portal_root(parent.get("url"))
+        if not portal:
+            portal = portal_root(portal_from_wm_url(url))
+        if portal and valid_site_url(portal):
+            self.wm_portal_url = portal
         page = None
         if parent and parent.get("id"):
             page = next((p for p in self._cdp_pages() if p.get("id") == parent.get("id")), None)
