@@ -17,6 +17,11 @@ aibcr-session-*.json
 # Lich su cuoc tich luy (du lieu ca nhan) + ban sao khi reset
 aibcr_history.jsonl
 aibcr-history-*.jsonl
+# File xuat lich su (CSV/JSON/TXT) - du lieu ca nhan, khong commit
+aibcr-history-*.csv
+aibcr-history-*.txt
+aibcr-history-*.json
+aibcr-baccarat-*.csv
 live_reports.jsonl
 aibcr_trace.jsonl
 aibcr_ws_frames*.jsonl
