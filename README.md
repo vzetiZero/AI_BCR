@@ -111,11 +111,24 @@ Một lần bấm chạy đúng chuỗi:
    `Target.attachToTarget(flatten)` → chạy `WM_DETECT_JS` và `Network.enable` **trong
    target đó**.
 
-   **Đứng ở trang cổng là quét được luôn** — không phải copy link iframe ra tab mới:
-   `_ensure_wm_page` ưu tiên tab WM trực tiếp, không có thì gắn vào iframe OOPIF trong
-   trang cổng. Target iframe **chết khi iframe reload/đổi trang**, nên `_target_alive`
-   kiểm tra và xoá cache; `_sweep_through_oopif` trả `None` để `sweep()` fallback sang
-   tab trực tiếp thay vì báo lỗi. Đây là nguyên nhân trước đây "lúc quét được lúc không".
+   **Đứng ở trang cổng là quét được luôn** — không phải copy link iframe ra tab mới.
+   Cách làm: lấy **chính URL trong iframe** (`wmvn.m8810.com/?sid=…&co=wm`) và mở nó
+   ngay trong tab đó (`BrowserSession.lift_wm_iframe_to_tab`). Sau bước này tab là WM
+   "thật" nên đọc cầu, đọc **số dư ví** và bấm chip chạy nguyên logic cũ, không cần nhánh
+   iframe nào. Chỉ đổi URL của tab đang mở (không mở tab mới, không đóng gì), chỉ khi URL
+   iframe là HTTPS công khai và trông giống WM. Nếu không đổi được URL thì mới dự phòng
+   gắn vào target iframe (`_adopt_oopif_wm`), kèm `_target_alive` kiểm tra target còn
+   sống — target iframe **chết khi iframe reload/đổi trang**, đây là nguyên nhân trước
+   đây "lúc quét được lúc không".
+
+   **Đọc cầu khi tab mở sẵn:** CDP chỉ phát khung WebSocket của socket được tạo **sau**
+   `Network.enable`. Vì vậy `WMReader` nạp lại riêng `iframe_109` (sảnh) sau 6 giây nếu
+   chưa thấy khung nào — khung sảnh mang protocol 25/26 (kết quả + lịch sử), và nạp nó
+   không đụng `iframe_101` nên bàn đang mở vẫn nguyên.
+
+   **Số dư ví:** `WM_WALLET_JS` đọc `#userBalanceBox` lần lượt trong `iframe_101`,
+   `iframe_109`, rồi khung gốc, nên đọc được **cả khi đang ở sảnh** (trước đây chỉ đọc
+   khi ở trong bàn và báo "chưa đọc được").
 
    WM nhận diện **theo nội dung trước, theo id iframe sau**: `#game_list_box` / ô
    `groupBac_<game>_<group>_<type>` cho sảnh, `#container` có `gameNNN groupNNN` /

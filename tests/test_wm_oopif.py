@@ -510,5 +510,131 @@ class CdpAvailableTests(unittest.TestCase):
         self.assertTrue(controller._cdp_available())
 
 
+class LiftIframeToTabTests(unittest.TestCase):
+    """Mở URL của iframe WM thành tab thật: bỏ hẳn nhánh iframe phức tạp.
+
+    Yêu cầu người dùng: đứng ở trang cổng (9vnv) vẫn dùng được; thay vì bắt app xử lý
+    iframe khác origin ở mọi thao tác, lấy chính URL trong iframe (wmvn.m8810.com/?sid=…)
+    và mở nó ngay trong tab đó. Sau bước này tab là WM "thật" nên đọc ví, đọc cầu và bấm
+    chip chạy nguyên logic cũ.
+    """
+
+    def test_navigates_the_wrapper_tab_to_the_iframe_url(self):
+        from aibcr.adapters import browser as BR
+
+        session = BR.BrowserSession()
+        frame = {"id": "F1", "type": "iframe", "url": WM_FRAME, "parentId": "P1"}
+        parent = {"id": "P1", "type": "page", "url": WRAPPER,
+                  "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/P1"}
+        navigated = []
+
+        original_find = WT.find_wm_frame_target
+        WT.find_wm_frame_target = lambda port=9222: (frame, parent)
+        session._cdp_pages = lambda: [parent]
+        session._probe_wm_page = lambda page: {"is_wm": True, "kind": "lobby"}
+
+        class FakeWs:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, payload):
+                import json
+                message = json.loads(payload)
+                self.sent.append(message)
+                if message.get("method") == "Page.navigate":
+                    navigated.append(message["params"]["url"])
+
+            def recv(self):
+                import json
+                return json.dumps({"id": self.sent[-1]["id"], "result": {}})
+
+            def settimeout(self, value):
+                pass
+
+            def close(self):
+                pass
+
+        original_conn = __import__("websocket").create_connection
+        __import__("websocket").create_connection = lambda *a, **k: FakeWs()
+        try:
+            ok, note = session.lift_wm_iframe_to_tab(wait_seconds=1)
+        finally:
+            WT.find_wm_frame_target = original_find
+            __import__("websocket").create_connection = original_conn
+        self.assertTrue(ok, note)
+        self.assertEqual(navigated, [WM_FRAME], "phải mở đúng URL trong iframe")
+        self.assertEqual(session.wm_page_id, "P1")
+        self.assertEqual(session.wm_oopif_target, "", "không còn cần target iframe")
+        session.stop_wm_watch()
+
+    def test_rejects_a_non_wm_iframe_url(self):
+        from aibcr.adapters import browser as BR
+
+        session = BR.BrowserSession()
+        frame = {"id": "F2", "type": "iframe", "url": "https://ads.example.com/x"}
+        original = WT.find_wm_frame_target
+        WT.find_wm_frame_target = lambda port=9222: (frame, None)
+        try:
+            ok, note = session.lift_wm_iframe_to_tab(wait_seconds=1)
+        finally:
+            WT.find_wm_frame_target = original
+        self.assertFalse(ok)
+        self.assertIn("WM", note)
+
+    def test_ensure_wm_page_prefers_lifting_over_oopif(self):
+        from aibcr.adapters import browser as BR
+        from aibcr.adapters.lobby_stream import LobbyStream
+
+        class WrapperOnly(BR.BrowserSession):
+            def _cdp_pages(self):
+                return [{"id": "P1", "url": WRAPPER}]
+
+        session = WrapperOnly()
+        stream = LobbyStream(session, game="baccarat")
+        stream._probe_wm = lambda page: {}
+        order = []
+        WrapperOnly.lift_wm_iframe_to_tab = lambda self, wait_seconds=20.0: (
+            order.append("lift") or (True, "ok"))
+        WrapperOnly._adopt_oopif_wm = lambda self: order.append("oopif") or True
+        stream._wm_probe_at = 0.0
+        self.assertTrue(stream._ensure_wm_page())
+        self.assertEqual(order, ["lift"], "phải ưu tiên đưa iframe ra tab thật")
+        session.stop_wm_watch()
+
+
+class WalletReadTests(unittest.TestCase):
+    """Số dư ví nằm trong `#userBalanceBox` của iframe game — phải đọc được."""
+
+    def test_wallet_js_reads_the_balance_box(self):
+        from aibcr.adapters import wm as WM
+
+        js = WM.WM_WALLET_JS
+        self.assertIn("userBalanceBox", js)
+        self.assertIn("VNDK", js)
+        self.assertIn("iframe_101", js)
+        self.assertIn("iframe_109", js)
+
+    def test_read_wm_wallet_parses_vndk_text(self):
+        from aibcr.adapters import browser as BR
+
+        session = BR.BrowserSession()
+        session.wm_socket = None
+        session._read_wm_wallet_once = lambda timeout=6.0: {
+            "text": "VNDK 1,994.74", "value": "1,994.74"}
+        result = session.read_wm_wallet()
+        self.assertTrue(result["ok"], result)
+        self.assertAlmostEqual(result["value"], 1994.74, places=2)
+
+    def test_read_wm_wallet_reports_missing_box(self):
+        from aibcr.adapters import browser as BR
+
+        session = BR.BrowserSession()
+        session.wm_socket = None
+        session._read_wm_wallet_once = lambda timeout=6.0: {"reason": "no_wallet"}
+        result = session.read_wm_wallet()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "no_wallet")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

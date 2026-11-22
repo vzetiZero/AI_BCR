@@ -1766,7 +1766,20 @@ class LobbyStream:
             self.lobby_kind = "wm"
             return True
 
-        # 2) Iframe khác origin (OOPIF) trong trang cổng.
+        # 2) Trang cổng có WM trong iframe khác origin: đưa iframe ra tab thật.
+        #    Đây là cách bền nhất — sau bước này tab là WM "thật" nên mọi logic đọc cầu,
+        #    đọc ví, bấm chip chạy nguyên vẹn, không cần nhánh iframe nào nữa.
+        try:
+            lifted, note = self.session.lift_wm_iframe_to_tab()
+        except Exception:
+            lifted, note = False, ""
+        if lifted:
+            self.contexts, self.context_frames = [], {}
+            self.lobby_kind = "wm"
+            self.note = note
+            return True
+
+        # 3) Dự phòng: gắn thẳng vào target iframe (khi không đổi được URL tab).
         try:
             if self.session._adopt_oopif_wm():
                 self.contexts, self.context_frames = [], {}

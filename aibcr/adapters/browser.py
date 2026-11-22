@@ -401,6 +401,9 @@ class BrowserSession:
         self.wm_oopif_parent = ""
         self.wm_oopif_detect = {}
         self.wm_oopif_pending_at = 0.0
+        # Socket CDP gắn vào iframe WM, giữ lại để khỏi attach lại mỗi lần đọc bàn
+        # (``read`` được gọi vài lần mỗi giây). None = chưa có/hỏng.
+        self._wm_frame_socket = None
         self._wm_watch = None
         self._wm_watch_stop = threading.Event()
         # Kiểm tra "Chrome còn sống" có cache: tránh gọi HTTP mỗi lần UI hỏi state
@@ -1498,6 +1501,123 @@ class BrowserSession:
                 except Exception:
                     pass
         return False
+
+    def lift_wm_iframe_to_tab(self, wait_seconds=20.0):
+        """Đưa WM từ iframe ra tab thật: điều hướng tab cổng sang chính URL của iframe.
+
+        Vì sao: khi người dùng đứng ở trang cổng (``9vnv.com/vn/wm_casino``) thì WM nằm
+        trong iframe KHÁC ORIGIN. Mọi thao tác (đọc cầu, đọc ví, bấm chip) phải nhắm
+        target iframe, kéo theo rất nhiều nhánh đặc biệt. Thay vào đó, lấy URL của
+        iframe (``wmvn.m8810.com/?sid=…&co=wm``) rồi mở ngay trong tab đó: tab trở
+        thành WM "thật", toàn bộ logic cũ chạy nguyên vẹn.
+
+        An toàn: chỉ đổi URL của tab đang mở (không mở tab mới, không đóng gì), chỉ khi
+        URL iframe là HTTPS công khai và trông giống WM. Trả ``(ok, note)``.
+        """
+        from aibcr.adapters import wm_targets as WT
+
+        frame, parent = WT.find_wm_frame_target(CDP_PORT)
+        if frame is None:
+            return False, "Không thấy iframe WM trong trang cổng."
+        url = str(frame.get("url") or "")
+        if not valid_site_url(url) or not WT.looks_like_wm(url):
+            return False, "URL trong iframe không phải WM hợp lệ."
+        page = None
+        if parent and parent.get("id"):
+            page = next((p for p in self._cdp_pages() if p.get("id") == parent.get("id")), None)
+        page = page or self._cdp_page()
+        if page is None:
+            return False, "Không có tab nào để mở WM."
+        if str(page.get("url") or "").rstrip("/") == url.rstrip("/"):
+            # Đã đứng đúng WM: chỉ cần ghi nhận tab.
+            self.wm_page_id = page.get("id")
+            self.wm_oopif_target = ""
+            self.start_wm_watch()
+            return True, "Tab đang mở chính là WM."
+        import websocket
+
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                validated_endpoint(page), suppress_origin=True, timeout=SCRIPT_TIMEOUT,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            sequence = {"id": 0}
+
+            def command(method, params=None, timeout=SCRIPT_TIMEOUT):
+                sequence["id"] += 1
+                request_id = sequence["id"]
+                ws.settimeout(timeout)
+                ws.send(json.dumps({"id": request_id, "method": method,
+                                    "params": params or {}}))
+                deadline = time.monotonic() + timeout
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(method)
+                    message = json.loads(ws.recv())
+                    if message.get("id") != request_id:
+                        continue
+                    if message.get("error"):
+                        raise RuntimeError(str(message["error"])[:120])
+                    return message.get("result", {})
+
+            command("Page.enable")
+            command("Page.navigate", {"url": url})
+        except Exception as exc:
+            return False, "Không mở được URL của iframe (%s)." % type(exc).__name__
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        # Chờ tab thật sự là WM (iframe_109 xuất hiện) rồi mới ghi nhận.
+        deadline = time.monotonic() + max(5.0, float(wait_seconds))
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            current = next((p for p in self._cdp_pages() if p.get("id") == page.get("id")),
+                           None)
+            if current is None:
+                continue
+            state = self._probe_wm_page(current)
+            if isinstance(state, dict) and state.get("is_wm"):
+                self.wm_page_id = current.get("id")
+                self.wm_oopif_target = ""
+                self.wm_oopif_parent = ""
+                self.wm_oopif_detect = {}
+                self.start_wm_watch()
+                return True, "Đã mở WM từ iframe ra tab: %s" % _safe_url(url)
+        return False, "Đã đổi URL nhưng WM chưa hiện ra (có thể phiên đã hết hạn)."
+
+    def _probe_wm_page(self, page):
+        """Chạy ``WM_DETECT_JS`` trong một tab (dùng cho ``lift_wm_iframe_to_tab``)."""
+        import websocket
+
+        try:
+            ws = websocket.create_connection(
+                validated_endpoint(page), suppress_origin=True, timeout=6,
+                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
+        except Exception:
+            return {}
+        try:
+            ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
+            ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {
+                "expression": WM.WM_DETECT_JS, "returnByValue": True, "silent": True}}))
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                ws.settimeout(6)
+                message = json.loads(ws.recv())
+                if message.get("id") != 2:
+                    continue
+                value = (message.get("result") or {}).get("result", {}).get("value")
+                return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        return {}
 
     def _adopt_oopif_wm(self):
         """Nhận WM nằm trong iframe khác origin; trả True nếu tìm thấy.

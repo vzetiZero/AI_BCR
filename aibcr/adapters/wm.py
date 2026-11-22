@@ -599,16 +599,25 @@ WM_BETS_JS = r"""(() => {
 # Số dư ví thật của bàn WM: nằm trong iframe bàn (``#userBalanceBox`` in ``VNDK 80.84``,
 # tức 80.84 đơn vị = 80.840đ). Đây là con số người dùng thấy trên màn hình.
 WM_WALLET_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101') ||
-        Array.from(document.querySelectorAll('iframe')).find((item) =>
-            /iframe_101(?:\/|$|[?#])/.test(item.getAttribute('src') || ''));
-    let doc = document;
-    try { if (frame && frame.contentDocument) doc = frame.contentDocument; } catch (e) {}
-    const el = doc.getElementById('userBalanceBox');
-    if (!el) return {reason: 'no_wallet'};
-    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-    const m = /([0-9][0-9.,]*)/.exec(text);
-    return {text: text, value: m ? m[1] : '', unit: 'VNDK'};
+    // Số dư thật nằm ở ``#userBalanceBox`` trong khung game. Khung đó có thể là
+    // iframe_101 (bàn) hoặc iframe_109 (sảnh) — ở sảnh, iframe_101 vẫn tồn tại nhưng
+    // ẩn, nên phải thử lần lượt cả hai rồi mới tới khung gốc.
+    const docs = [];
+    for (const id of ['iframe_101', 'iframe_109']) {
+        const frame = document.getElementById(id);
+        if (!frame) continue;
+        try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (e) {}
+    }
+    docs.push(document);
+    for (const doc of docs) {
+        const el = doc.getElementById('userBalanceBox');
+        if (!el) continue;
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        const m = /([0-9][0-9.,]*)/.exec(text);
+        return {text: text, value: m ? m[1] : '', unit: 'VNDK'};
+    }
+    return {reason: 'no_wallet'};
 })()"""
 
 # Nút thoát bàn của WM nằm ở khung gốc (góc phải trên) — đo rồi bấm chuột thật.
