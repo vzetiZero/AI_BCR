@@ -96,7 +96,9 @@ $excludeDirs = @(
     (Join-Path $root 'runtime'),
     (Join-Path $root 'aibcr\chrome_profile'),
     (Join-Path $root 'aibcr\drivers'),
-    (Join-Path $root 'aibcr\__pycache__')
+    (Join-Path $root 'aibcr\__pycache__'),
+    '__pycache__',
+    '.pytest_cache'
 )
 $excludeFiles = @(
     'aibcr_state*.json', 'aibcr-session-*.json', 'aibcr_history.jsonl',
@@ -231,6 +233,14 @@ $guide | Set-Content -LiteralPath (Join-Path $stage 'HUONG_DAN.txt') -Encoding U
 
 # --- 5. Kiem tra goi ------------------------------------------------------
 Step '5/7 Kiem tra goi (import module bang dung Python trong goi)'
+
+# pyc cua may dong goi co the mang duong dan tuyet doi -> bo het cho sach.
+Get-ChildItem $stage -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notlike '*\runtime\python\Lib\site-packages\*' } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $stage -Recurse -File -Include '*.pyc', '*.pyo' -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notlike '*\runtime\python\Lib\site-packages\*' } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 Push-Location $stage
 try {
