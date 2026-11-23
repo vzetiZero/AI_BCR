@@ -745,7 +745,8 @@ class BrowserSession:
                 self._start_driver(chrome, url, pos, kind, cdp, window)
                 self.mode = "driver"
                 # Không còn "cược chỉ mô phỏng": luồng hiện tại đọc kết quả và (khi người
-                # dùng bật "Tự đặt chip") bấm chip thật. Nói đúng để không gây hiểu lầm.
+                # dùng bật "Tự đặt cược") đặt cược qua WebSocket của bàn WM. Nói đúng để
+                # không gây hiểu lầm.
                 self.note = why + " · Đăng nhập thủ công; app chỉ đọc kết quả cho tới khi bạn bật đặt cược."
                 self.connection_state = "waiting"
                 return True
@@ -1668,7 +1669,7 @@ class BrowserSession:
         """Đưa WM từ iframe ra tab thật: điều hướng tab cổng sang chính URL của iframe.
 
         Vì sao: khi người dùng đứng ở trang cổng (``9vnv.com/vn/wm_casino``) thì WM nằm
-        trong iframe KHÁC ORIGIN. Mọi thao tác (đọc cầu, đọc ví, bấm chip) phải nhắm
+        trong iframe KHÁC ORIGIN. Mọi thao tác (đọc cầu, đọc ví, đặt cược) phải nhắm
         target iframe, kéo theo rất nhiều nhánh đặc biệt. Thay vào đó, lấy URL của
         iframe (``wmvn.m8810.com/?sid=…&co=wm``) rồi mở ngay trong tab đó: tab trở
         thành WM "thật", toàn bộ logic cũ chạy nguyên vẹn.

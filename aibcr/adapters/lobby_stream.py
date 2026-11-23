@@ -3,19 +3,17 @@
 
 Chỉ đọc các message lobby.histories / lobby.historyUpdated (mã bàn + lịch sử cầu),
 cuộn danh sách để sảnh tự gửi dữ liệu cho các bàn ngoài màn hình, rồi khôi phục vị trí cuộn.
-Khi cần, bấm ô lọc “Ưa thích” và ô bàn bằng chuột người thật (human_mouse.py) để chỉ quét
-những bàn đã thích. Không gọi API nội bộ, không đọc cookie/token, không bấm nút cược.
+Khi cần, bấm ô lọc “Ưa thích” và ô bàn bằng ``element.click()`` NGAY TRONG TRANG — không
+gửi sự kiện chuột CDP, không di chuyển con trỏ, không chiếm chuột của người dùng. Không gọi
+API nội bộ, không đọc cookie/token, không bấm nút cược.
 """
 
 import json
-import random
 import re
 import time
 from urllib.parse import urlsplit, urlunsplit
 
 from aibcr.adapters import browser as BR
-from aibcr.adapters import human_mouse as HM
-from aibcr.adapters import table_bets as TB
 from aibcr.adapters import wm as WM
 
 HISTORY_TYPES = ("lobby.histories", "lobby.historyUpdated")
@@ -140,7 +138,7 @@ TILES_JS = """(() => {
 # Sảnh Petalive không phát lobby.histories qua WebSocket và không dùng data-role="table-tile".
 # Mỗi ô bàn là một React component với props.id / props.name; cầu được vẽ sẵn trong
 # .live-games-result-grid-board-baccarat__cell.bead-road (chữ B/P/T). Đọc thẳng DOM ô bàn
-# và bấm ô bằng chuột thật — cùng cơ chế với EVO, chỉ khác selector.
+# và mở ô bằng ``element.click()`` trong trang — cùng cơ chế với EVO, chỉ khác selector.
 PETALIVE_ROOM_SELECTOR = ".live-games-lobby-room.live-games-lobby-room-baccarat"
 PETALIVE_SCROLL_SELECTOR = ".wui-live-games-layout__body-container"
 PETALIVE_TILES_JS = """(() => {
@@ -219,23 +217,7 @@ PETALIVE_SCROLL_JS = """(() => {
     return Math.round(n.scrollTop);
 })()"""
 
-PETALIVE_SCROLL_BOX_JS = """(() => {
-    let n = document.querySelector(%s);
-    if (!n || !/(auto|scroll)/.test(getComputedStyle(n).overflowY)) {
-        n = document.querySelector(%s);
-        while (n) {
-            if (/(auto|scroll)/.test(getComputedStyle(n).overflowY)) break;
-            n = n.parentElement;
-        }
-    }
-    if (!n) return null;
-    const r = n.getBoundingClientRect();
-    if (r.width < 10 || r.height < 10) return null;
-    return {x: r.x + r.width / 2, y: r.y + r.height / 2,
-            width: r.width, height: r.height};
-})()"""
-
-PETALIVE_TILE_BOX_JS = """(() => {
+PETALIVE_TILE_CLICK_JS = """(() => {
     const id = %s;
     let found = null;
     for (const room of document.querySelectorAll(%s)) {
@@ -250,14 +232,19 @@ PETALIVE_TILE_BOX_JS = """(() => {
     }
     if (!found) return {reason: 'tile_not_found'};
     const room = found.room;
+    // Ô ngoài khung nhìn chưa chắc đã render đủ; cuộn vào giữa rồi mới bấm.
     room.scrollIntoView({block: 'center'});
     const rect = room.getBoundingClientRect();
     if (rect.width < 20 || rect.height < 20) return {reason: 'tile_hidden'};
     if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
         return {reason: 'tile_offscreen'};
     }
-    return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
-            title: found.props.name || id};
+    // Bấm đúng phần tử nằm dưới tâm ô như cú bấm thật; sự kiện click nổi bọt lên ô nên
+    // handler của React vẫn chạy mà không cần gửi sự kiện chuột CDP.
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    const target = (hit && room.contains(hit)) ? hit : room;
+    try { target.click(); } catch (e) { return {reason: 'tile_click_failed'}; }
+    return {ok: true, title: found.props.name || id};
 })()"""
 
 
@@ -274,20 +261,12 @@ def tiles_js(petalive):
     return PETALIVE_TILES_JS if petalive else TILES_JS
 
 
-def tile_box_js(petalive, table_id):
-    """JS tìm toạ độ ô bàn theo mã; Petalive khớp props.id thay vì data-role."""
+def tile_click_js(petalive, table_id):
+    """JS bấm ô bàn theo mã (không phải đo toạ độ); Petalive khớp props.id."""
     if petalive:
-        return PETALIVE_TILE_BOX_JS % (
+        return PETALIVE_TILE_CLICK_JS % (
             json.dumps(table_id), json.dumps(PETALIVE_ROOM_SELECTOR))
-    return TILE_BOX_JS % json.dumps(table_id)
-
-
-def scroll_box_js(petalive):
-    """JS đo hộp khung cuộn của sảnh EVO hoặc Petalive."""
-    if petalive:
-        return PETALIVE_SCROLL_BOX_JS % (
-            json.dumps(PETALIVE_SCROLL_SELECTOR), json.dumps(PETALIVE_ROOM_SELECTOR))
-    return SCROLL_BOX_JS
+    return TILE_CLICK_JS % json.dumps(table_id)
 
 
 SCROLL_JS = """(() => {
@@ -303,24 +282,36 @@ SCROLL_JS = """(() => {
     return -1;
 })()"""
 
-# Hộp (x, y, width, height) của khung cuộn danh sách bàn, để đặt chuột vào giữa
-# trước khi lăn thật — không lăn tại một điểm cố định ngoài danh sách.
-SCROLL_BOX_JS = """(() => {
-    let n = document.querySelector('[data-role="table-tile"]');
-    while (n) {
-        const st = getComputedStyle(n);
-        if (/(auto|scroll)/.test(st.overflowY) && n.scrollHeight > n.clientHeight + 20) {
-            const r = n.getBoundingClientRect();
-            if (r.width < 10 || r.height < 10) return null;
-            return {x: r.x + r.width / 2, y: r.y + r.height / 2,
-                    width: r.width, height: r.height};
+# Cú bấm NGAY TRONG TRANG: phát đủ chuỗi pointer/mouse rồi click trên chính phần tử,
+# không gửi sự kiện chuột CDP nên không di chuyển hay chiếm con trỏ của người dùng.
+# Gán một lần vào ``window.__aibcrPress`` để nhiều snippet dùng chung mà không bị lỗi
+# "Identifier already declared" khi chạy lại ``Runtime.evaluate`` trong cùng context.
+CLICK_PRELUDE_JS = r"""
+    const press = window.__aibcrPress || (window.__aibcrPress = function (el) {
+        if (!el) return false;
+        let rect = {left: 0, top: 0, width: 0, height: 0};
+        try { rect = el.getBoundingClientRect() || rect; } catch (e) {}
+        const at = {bubbles: true, cancelable: true, composed: true, view: window,
+                    clientX: rect.left + rect.width / 2,
+                    clientY: rect.top + rect.height / 2, button: 0, detail: 1};
+        try {
+            el.dispatchEvent(new PointerEvent('pointerdown', Object.assign(
+                {pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1}, at)));
+            el.dispatchEvent(new MouseEvent('mousedown', Object.assign({buttons: 1}, at)));
+            el.dispatchEvent(new PointerEvent('pointerup', Object.assign(
+                {pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0}, at)));
+            el.dispatchEvent(new MouseEvent('mouseup', Object.assign({buttons: 0}, at)));
+            if (typeof el.focus === 'function') { try { el.focus(); } catch (e) {} }
+            el.dispatchEvent(new MouseEvent('click', Object.assign({buttons: 0}, at)));
+            return true;
+        } catch (e) {
+            try { el.click(); return true; } catch (err) { return false; }
         }
-        n = n.parentElement;
-    }
-    return null;
-})()"""
+    });
+"""
 
-TILE_BOX_JS = """(() => {
+# Bấm ô bàn EVO theo mã bàn, không đo toạ độ: tìm đúng ô trong DOM rồi bấm tại chỗ.
+TILE_CLICK_JS = "(() => {" + CLICK_PRELUDE_JS + r"""
     const id = %s;
     const found = [];
     for (const tile of document.querySelectorAll('[data-role="table-tile"]')) {
@@ -341,11 +332,15 @@ TILE_BOX_JS = """(() => {
     if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
         return {reason: 'tile_offscreen'};
     }
-    return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, title: chosen.title};
+    if (!press(tile)) return {reason: 'tile_click_failed'};
+    return {ok: true, title: chosen.title};
 })()"""
 
 
-EVO_ENTRY_JS = """(() => {
+# Chọn thẻ EVO trên trang vào rồi bấm ngay trong trang. Điều kiện chọn giữ nguyên như
+# trước (ưu tiên alt/data-subprovider Evolution, từ chối khi hai thẻ ngang nhau); khác ở
+# chỗ không còn trả toạ độ để gửi sự kiện chuột CDP nữa.
+EVO_ENTRY_BODY_JS = r"""
     if (window !== window.top) return {reason: 'not_top_frame'};
     // Trang vào đổi markup theo thời gian: bản cũ đánh dấu EVO bằng data-subprovider,
     // bản hiện tại bằng data-gp="evo" / data-id="LIVE-EVO" và nút "Bắt đầu" không có class.
@@ -367,32 +362,37 @@ EVO_ENTRY_JS = """(() => {
     const item = ranked[0].item;
     // Thẻ ở cuối danh sách chỉ render sau khi cuộn tới, nên phải cuộn rồi mới đo.
     item.scrollIntoView({block: 'center'});
-    const inside = (r) => r.width >= 8 && r.height >= 8 && r.x >= 0 && r.y >= 0
-                       && r.bottom <= innerHeight && r.right <= innerWidth;
-    const center = (r) => ({x: r.x + r.width / 2, y: r.y + r.height / 2});
     const btn = item.querySelector('button.btn-main') || item.querySelector('button');
     if (btn && btn.disabled) return {reason: 'evo_button_not_found'};
     if (btn) {
         btn.scrollIntoView({block: 'center'});
         const rect = btn.getBoundingClientRect();
         // Bản markup cũ để nút "Bắt đầu" hiển thị thì bấm thẳng vào nút.
-        if (inside(rect)) return {...center(rect), via: 'button',
-                label: (btn.innerText || btn.getAttribute('title') || '').trim().slice(0, 40)};
+        if (rect.width >= 8 && rect.height >= 8) {
+            const label = (btn.innerText || btn.getAttribute('title') || '').trim().slice(0, 40);
+            if (!press(btn)) return {reason: 'evo_button_click_failed'};
+            return {ok: true, via: 'button', label};
+        }
     }
     const rect = item.getBoundingClientRect();
-    // Cửa sổ bị kéo nhỏ hơn thẻ: bấm vào phần thẻ còn nhìn thấy thay vì bỏ cuộc.
+    // Cửa sổ bị kéo nhỏ hơn thẻ: vẫn bấm được nếu còn một dải đủ lớn trong khung nhìn.
     const left = Math.max(rect.x, 0), right = Math.min(rect.x + rect.width, innerWidth);
     const top = Math.max(rect.y, 0), bottom = Math.min(rect.y + rect.height, innerHeight);
     if (right - left < 24 || bottom - top < 24) return {reason: 'evo_button_pending'};
-    // Bản markup hiện tại ẩn nút (display:none) nên đích bấm là cả thẻ EVO;
-    // góc trên bên phải là ngôi sao yêu thích có onclick riêng nên điểm bấm lệch xuống dưới trái.
-    const point = {x: Math.round(left + (right - left) * 0.4), y: Math.round(top + (bottom - top) * 0.62)};
+    // Bản markup hiện tại ẩn nút (display:none) nên đích bấm là cả thẻ EVO. Ngôi sao
+    // yêu thích ở góc phải có onclick riêng; bấm vào đó sẽ "thích" thay vì vào sảnh.
+    const point = {x: Math.round(left + (right - left) * 0.4),
+                   y: Math.round(top + (bottom - top) * 0.62)};
     const hit = document.elementFromPoint(point.x, point.y);
     if (!hit || !item.contains(hit) || hit.closest('.favorite-game-icon-wrapper')) {
         return {reason: 'evo_card_blocked'};
     }
-    return {...point, via: 'card', label: item.getAttribute('data-id') || 'EVO'};
-})()"""
+    const label = item.getAttribute('data-id') || 'EVO';
+    if (!press(item)) return {reason: 'evo_card_click_failed'};
+    return {ok: true, via: 'card', label};
+"""
+
+EVO_ENTRY_JS = "(() => {" + CLICK_PRELUDE_JS + EVO_ENTRY_BODY_JS + "})()"
 
 FAVORITE_JS = """(() => {
     // Ô lọc "Ưa thích" có hai đời markup: bản cũ <li id="favorite"><input id="favorite"
@@ -435,15 +435,23 @@ FAVORITE_JS = """(() => {
     target.scrollIntoView({block: 'nearest', inline: 'nearest'});
     const rect = target.getBoundingClientRect();
     if (rect.width < 8 || rect.height < 8) return {reason: 'favorite_filter_hidden', active};
-    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
-    if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) {
-        return {reason: 'favorite_filter_offscreen', active};
-    }
-    const hit = document.elementFromPoint(x, y);
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
     if (!hit || !node.contains(hit) || hit.closest('.favorite-game-icon-wrapper')) {
         return {reason: 'favorite_filter_blocked', active};
     }
-    return {x, y, active, label: (node.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40)};
+    window.__aibcrFavoriteTarget = target;
+    return {active, label: (node.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40)};
+})()"""
+
+# Bấm ô lọc “Ưa thích” ngay trong trang (không gửi sự kiện chuột CDP). Dùng lại phần tử
+# mà ``FAVORITE_JS`` vừa xác định là bấm được, nên chạy ngay sau lần đọc trạng thái.
+# ``_set_favorite_filter`` chỉ gọi khi trạng thái đang KHÁC trạng thái đích, nhờ vậy
+# không lật bộ lọc của người dùng qua lại giữa các lượt quét.
+FAVORITE_CLICK_JS = "(() => {" + CLICK_PRELUDE_JS + r"""
+    const target = window.__aibcrFavoriteTarget;
+    if (!target) return {reason: 'favorite_filter_not_found'};
+    if (!press(target)) return {reason: 'favorite_filter_click_failed'};
+    return {ok: true};
 })()"""
 
 LOBBY_HEALTH_JS = """(() => {
@@ -462,38 +470,46 @@ LOBBY_HEALTH_JS = """(() => {
     };
 })()"""
 
-# Nút X đóng màn hình bàn của EVO. Chỉ ĐO vị trí chứ không bấm bằng JS: btn.click()
-# là sự kiện tổng hợp, site có thể phớt lờ (đúng lỗi "nút đóng bàn không click được").
-# Cú bấm thật do _click_close_table gửi qua chuột CDP — cùng đường đã bấm mở ô bàn.
-# Kèm frame_offset giống TARGETS_JS của table_bets: nút có thể nằm trong iframe, toạ
-# độ đo ở khung nào phải cộng lệch khung đó trước khi bấm theo khung gốc của tab.
-CLOSE_TABLE_JS = """(() => {
-    const btn = document.querySelector('[data-role="close-button"]');
-    if (!btn) return null;
+# Nút X đóng màn hình bàn của EVO: tìm rồi bấm NGAY TRONG TRANG. Không còn gửi sự kiện
+# chuột CDP, nên không phải đo khoảng lệch iframe và không chiếm con trỏ người dùng.
+EVO_CLOSE_CLICK_JS = "(() => {" + CLICK_PRELUDE_JS + r"""
+    const btn = document.querySelector('[data-role="close-button"], [data-role="close"], button.close-button');
+    if (!btn) return {reason: 'close_button_missing'};
     const r = btn.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return null;
-    const x = r.x + r.width / 2, y = r.y + r.height / 2;
-    const hit = document.elementFromPoint(x, y);
-    if (!hit || !btn.contains(hit)) return {reason: 'close_button_blocked'};
-    const frameOffset = (() => {
-        let x = 0, y = 0, w = window, depth = 0;
-        while (w !== w.top) {
-            let el = null;
-            try { el = w.frameElement; } catch (e) { return null; }
-            if (!el) return null;
-            const rect = el.getBoundingClientRect();
-            const st = w.parent.getComputedStyle(el);
-            const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
-            x += rect.x + num(st.borderLeftWidth) + num(st.paddingLeft);
-            y += rect.y + num(st.borderTopWidth) + num(st.paddingTop);
-            w = w.parent;
-            depth += 1;
-            if (depth > 8) return null;
-        }
-        return {x: Math.round(x), y: Math.round(y), depth};
-    })();
-    return {x, y, frame_offset: frameOffset};
+    if (r.width <= 0 || r.height <= 0) return {reason: 'close_button_hidden'};
+    if (!press(btn)) return {reason: 'close_button_click_failed'};
+    return {ok: true};
 })()"""
+
+# Bấm nút thoát bàn của WM (khung gốc, góc phải trên) ngay trong trang.
+WM_EXIT_CLICK_JS = "(() => {" + CLICK_PRELUDE_JS + r"""
+    const btn = document.getElementById('exit_game_btn');
+    if (!btn) return {reason: 'exit_missing'};
+    const rect = btn.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) return {reason: 'exit_hidden'};
+    if (!press(btn)) return {reason: 'exit_click_failed'};
+    return {ok: true};
+})()"""
+
+# Bấm ô bàn WM theo tiền tố id (groupBac_<game>_<group>_) ngay trong trang. Ô bị lớp
+# hiệu ứng (chia bài/hover) che cũng không còn là vấn đề: sự kiện phát thẳng trên ô.
+WM_TILE_CLICK_JS = "(() => {" + CLICK_PRELUDE_JS + r"""
+    const prefix = %s;
+    let node = null;
+    for (const item of document.querySelectorAll('section.game_list.roomItem')) {
+        if ((item.id || '').startsWith(prefix)) { node = item; break; }
+    }
+    if (!node) return {reason: 'tile_missing'};
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) return {reason: 'tile_hidden'};
+    // Ô ngoài khung nhìn: cuộn tới rồi mới bấm (sự kiện trên ô ẩn vẫn có thể bị bỏ qua).
+    if (rect.top < 0 || rect.bottom > innerHeight) {
+        node.scrollIntoView({block: 'center', inline: 'nearest'});
+    }
+    if (!press(node)) return {reason: 'tile_click_failed'};
+    return {ok: true};
+})()"""
+
 
 # Đổi hash về danh sách là điều hướng CÙNG document: SPA sảnh tự route về danh sách
 # bàn mà không tải lại trang, nên không bao giờ đụng mục /entry dùng một lần trong
@@ -529,7 +545,7 @@ def lobby_list_url(url, fragment=None):
 class LobbyStream:
     """Đọc luồng message sảnh qua CDP chỉ đọc trên Chrome đang mở."""
 
-    def __init__(self, session=None, human_mouse=True, game="baccarat"):
+    def __init__(self, session=None, game="baccarat"):
         self.session = session or BR.BrowserSession()
         self.profile = game_profile(game)
         self.game = self.profile["key"]
@@ -545,14 +561,6 @@ class LobbyStream:
         self.wm_histories = {}
         self.wm_tables = {}
         self._seq = 0
-        self.human_mouse = bool(human_mouse)
-        self._cursor = None
-        self._cursor_overlay_shown = False
-        # True nếu lần bấm gần nhất phải rơi về cú bấm 3-sự-kiện vì HumanMouse lỗi
-        # giữa chừng (gói ghost-cursor hỏng, mất kết nối CDP tạm thời...). UI có thể
-        # đọc cờ này để biết vì sao chuột ảo không di chuyển cho một cú bấm cụ thể.
-        self.last_mouse_fallback = False
-        self.rng = random.Random()
         self.session_lost = False
         self.favorite_mode = ""
         # "evo" hoặc "petalive"; đặt lại mỗi lần _lobby_context đọc được danh sách bàn.
@@ -684,97 +692,21 @@ class LobbyStream:
                 self.context_frames.pop(context_id, None)
             return None
 
-    def _dispatch_click(self, ws, x, y):
-        """Bấm tối thiểu 3 sự kiện: đường dự phòng khi chuột người thật lỗi."""
-        for event in ("mouseMoved", "mousePressed", "mouseReleased"):
-            params = {"type": event, "x": x, "y": y}
-            if event != "mouseMoved":
-                params.update(button="left", clickCount=1)
-            self._command(ws, "Input.dispatchMouseEvent", params)
+    def _scroll_to(self, ws, context_id, target_top, petalive=False):
+        """Đặt vị trí cuộn danh sách bàn bằng JS trong trang (không gửi sự kiện chuột).
 
-    def _click_at(self, ws, x, y):
-        """Bấm một điểm bằng chuột người thật; lỗi giữa chừng thì vẫn bấm đúng đích."""
-        # Tab ẩn (cửa sổ bị thu nhỏ/che) làm mỗi sự kiện chuột chờ ~5 giây mới trả lời.
-        # Đưa tab lên trước để chuột chạy đúng nhịp; lỗi quyền/không hỗ trợ thì bỏ qua.
-        try:
-            self._command(ws, "Page.bringToFront")
-        except Exception:
-            pass
-        if not self.human_mouse:
-            self._dispatch_click(ws, x, y)
-            self._cursor = (float(x), float(y))
-            return
-        try:
-            command = lambda method, params=None: self._command(ws, method, params)
-            if not self._cursor_overlay_shown:
-                # Lớp con trỏ xanh giống mouse_demo.py: chỉ hiển thị, không chiếm
-                # quyền chuột hệ điều hành và không đổi dữ liệu gửi đi.
-                HM.install_cursor_overlay(command)
-                self._cursor_overlay_shown = True
-            mouse = HM.HumanMouse(command)
-            if self._cursor is not None:
-                mouse.last = self._cursor
-            mouse.click(x, y)
-            self._cursor = (float(x), float(y))
-            self.last_mouse_fallback = False
-        except Exception:
-            # Không để một cú lướt chuột hỏng chặn việc vào bàn. Ghi lại để biết
-            # chuột người thật đã tạm rơi về cú bấm 3-sự-kiện cho lượt này — nếu
-            # không, "không thấy chuột ảo di chuyển" sẽ không có dấu vết nào để tra.
-            self.last_mouse_fallback = True
-            self._dispatch_click(ws, x, y)
-            self._cursor = (float(x), float(y))
-
-    def _wheel_scroll_to(self, ws, context_id, target_top, box, petalive=False):
-        """Cuộn danh sách bàn bằng chuột lăn thật, thay vì gán ``scrollTop`` bằng JS.
-
-        Di chuột (ghost-cursor) tới giữa khung danh sách rồi gửi nhiều cú lăn nhỏ
-        qua ``Input.dispatchMouseWheelEvent`` cho tới khi đạt ``target_top`` hoặc hết
-        kiên nhẫn — mô phỏng người dùng lăn chuột, không nhảy thẳng một bước lớn.
         Trả vị trí cuộn đọc được cuối cùng (``int``) hoặc ``-1`` nếu hỏng.
         ``petalive=True`` dùng bộ selector cuộn của sảnh Petalive.
         """
-        set_js = scroll_js(petalive, target_top)
-        if not self.human_mouse or box is None:
-            result = self._evaluate(ws, set_js, context_id)
-            return result.get("result", {}).get("value", -1)
-        command = lambda method, params=None: self._command(ws, method, params)
-        if not self._cursor_overlay_shown:
-            HM.install_cursor_overlay(command)
-            self._cursor_overlay_shown = True
-        mouse = HM.HumanMouse(command)
-        if self._cursor is not None:
-            mouse.last = self._cursor
-        px = box["x"] + box["width"] * 0.5
-        py = box["y"] + box["height"] * 0.5
+        result = self._try_value(ws, scroll_js(petalive, int(target_top)), context_id)
+        return result if isinstance(result, (int, float)) else -1
+
+    def _run_js(self, ws, context_id, expression):
+        """Chạy một snippet bấm trong trang; lỗi CDP trả None thay vì ném ra."""
         try:
-            mouse.move_to(px, py)
-            self._cursor = (px, py)
+            return self._value(ws, expression, context_id)
         except Exception:
-            pass
-        current = self._try_value(ws, scroll_js(petalive, -1), context_id)
-        current = current if isinstance(current, (int, float)) else 0
-        remaining = float(target_top) - float(current)
-        attempts = 0
-        # Mỗi cú lăn chỉ đi một đoạn nhỏ (như bàn di chuột thật), tối đa 14 cú mỗi lượt
-        # gọi để không treo lâu nếu trang không phản hồi scroll.
-        while abs(remaining) > 4 and attempts < 14:
-            step = max(-220.0, min(220.0, remaining)) * self.rng.uniform(0.55, 0.95)
-            try:
-                self._command(ws, "Input.dispatchMouseWheelEvent", {
-                    "x": px, "y": py, "deltaX": 0, "deltaY": step})
-            except Exception:
-                break
-            time.sleep(0.03 + 0.03 * random.random())
-            current = self._try_value(ws, SCROLL_JS % -1, context_id)
-            if not isinstance(current, (int, float)):
-                break
-            remaining = float(target_top) - float(current)
-            attempts += 1
-        # Chốt đúng vị trí đích bằng JS: lăn chuột có thể bị trình duyệt làm tròn/giới
-        # hạn tốc độ nên không khớp pixel tuyệt đối; việc đọc bảng cầu cần đúng vị trí.
-        result = self._evaluate(ws, SCROLL_JS % int(target_top), context_id)
-        return result.get("result", {}).get("value", -1)
+            return None
 
     @staticmethod
     def _star_favorites(snapshot):
@@ -809,9 +741,8 @@ class LobbyStream:
             return True, True, ""
         if reason:
             return False, True, "Không bấm được ô lọc “Ưa thích” (%s)." % reason
-        try:
-            self._click_at(ws, float(state["x"]), float(state["y"]))
-        except Exception:
+        clicked = self._run_js(ws, context_id, FAVORITE_CLICK_JS)
+        if not isinstance(clicked, dict) or not clicked.get("ok"):
             return False, True, "Không bấm được ô lọc “Ưa thích” trên sảnh."
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
@@ -865,19 +796,17 @@ class LobbyStream:
         """Quét sảnh Petalive: cầu nằm sẵn trong ô bàn, không có WebSocket lobby.histories.
 
         Khác EVO ở ba điểm: selector ô bàn, nguồn cầu (DOM thay vì WS) và cờ Ưa thích
-        (sảnh này không có). Phần còn lại — cuộn chuột thật, gom mọi vị trí cuộn, khôi
-        phục vị trí — giữ nguyên để không lỡ bàn ngoài khung nhìn.
+        (sảnh này không có). Phần còn lại — cuộn danh sách bằng JS trong trang, gom mọi
+        vị trí cuộn, khôi phục vị trí — giữ nguyên để không lỡ bàn ngoài khung nhìn.
         """
         if favorites_only:
             self.favorite_mode = "unsupported"
         deadline = time.monotonic() + max_seconds
         start_top = snapshot["scroll"]["top"]
-        scroll_box = self._try_value(ws, scroll_box_js(True), context_id)
-        scroll_box = scroll_box if isinstance(scroll_box, dict) else None
         steps, position, stagnant = 0, 0, 0
         seen, tiles = set(), {}
         while time.monotonic() < deadline and steps < MAX_SCROLL_STEPS:
-            self._wheel_scroll_to(ws, context_id, position, scroll_box, petalive=True)
+            self._scroll_to(ws, context_id, position, petalive=True)
             time.sleep(SCROLL_SETTLE)
             result = self._evaluate(ws, PETALIVE_TILES_JS, context_id)
             snapshot = result.get("result", {}).get("value") or snapshot
@@ -892,7 +821,7 @@ class LobbyStream:
                 break
             position = min(position + SCROLL_STEP, bottom)
             steps += 1
-        self._wheel_scroll_to(ws, context_id, start_top, scroll_box, petalive=True)
+        self._scroll_to(ws, context_id, start_top, petalive=True)
         if not tiles:
             self.diag = {"tiles_in_dom": 0, "scroll_steps": steps,
                          "favorites_only": bool(favorites_only), "lobby": "petalive"}
@@ -1103,16 +1032,13 @@ class LobbyStream:
                     snapshot = fresh
             deadline = time.monotonic() + max_seconds
             start_top = snapshot["scroll"]["top"]
-            scroll_box = self._try_value(ws, SCROLL_BOX_JS, context_id)
-            if not isinstance(scroll_box, dict):
-                scroll_box = None
             steps = 0
             seen = set()
             tiles = {}
             stagnant = 0
             position = 0
             while time.monotonic() < deadline and steps < MAX_SCROLL_STEPS:
-                self._wheel_scroll_to(ws, context_id, position, scroll_box)
+                self._scroll_to(ws, context_id, position)
                 time.sleep(SCROLL_SETTLE)
                 result = self._evaluate(ws, TILES_JS, context_id)
                 snapshot = result.get("result", {}).get("value") or snapshot
@@ -1133,7 +1059,7 @@ class LobbyStream:
                     break
                 position = min(position + SCROLL_STEP, bottom)
                 steps += 1
-            self._wheel_scroll_to(ws, context_id, start_top, scroll_box)
+            self._scroll_to(ws, context_id, start_top)
             favorite_ids = None
             if favorites_only:
                 if self.favorite_mode == "stars":
@@ -1210,46 +1136,43 @@ class LobbyStream:
                     pass
 
     def _find_tile_box(self, ws, context_id, table_id, timeout=15.0):
-        """Tìm toạ độ ô bàn, cuộn danh sách nếu ô chưa được render.
+        """Bấm ô bàn theo mã (EVO/Petalive), cuộn danh sách nếu ô chưa được render.
 
         Sảnh chỉ render các ô đang nằm trong khung nhìn; lượt quét gom ô ở mọi vị trí
         cuộn rồi trả con trỏ về đầu danh sách. Vì vậy bàn vừa chọn có thể không còn
-        trong DOM lúc mở — phải lăn tới đúng chỗ rồi mới đo, thay vì báo tile_not_found
-        rồi bỏ bàn oan (4 lần liên tiếp trong aibcr_trace.jsonl).
+        trong DOM lúc mở — phải cuộn tới đúng chỗ rồi mới bấm, thay vì báo
+        tile_not_found rồi bỏ bàn oan (4 lần liên tiếp trong aibcr_trace.jsonl).
+
+        Trả dict kết quả của snippet bấm (``ok``/``reason``/``title``).
         """
         deadline = time.monotonic() + max(0.0, float(timeout))
         petalive = self.lobby_kind == "petalive"
-        box = self._try_value(ws, tile_box_js(petalive, table_id), context_id)
-        if isinstance(box, dict) and "x" in box:
-            return box
+        result = self._run_js(ws, context_id, tile_click_js(petalive, table_id))
+        if isinstance(result, dict) and result.get("ok"):
+            return result
         snapshot = self._try_value(ws, tiles_js(petalive), context_id)
         if not isinstance(snapshot, dict):
-            return box
+            return result
         scroll = snapshot.get("scroll") or {}
         try:
             bottom = max(int(scroll.get("max") or 0) - int(scroll.get("client") or 0), 0)
         except (TypeError, ValueError):
             bottom = 0
-        scroll_box = self._try_value(ws, scroll_box_js(petalive), context_id)
-        scroll_box = scroll_box if isinstance(scroll_box, dict) else None
         position, steps = 0, 0
         while time.monotonic() < deadline and steps < MAX_SCROLL_STEPS:
-            try:
-                self._wheel_scroll_to(ws, context_id, position, scroll_box, petalive=petalive)
-                time.sleep(SCROLL_SETTLE)
-                box = self._try_value(ws, tile_box_js(petalive, table_id), context_id)
-            except Exception:
-                break
-            if isinstance(box, dict) and "x" in box:
-                return box
+            self._scroll_to(ws, context_id, position, petalive=petalive)
+            time.sleep(SCROLL_SETTLE)
+            result = self._run_js(ws, context_id, tile_click_js(petalive, table_id))
+            if isinstance(result, dict) and result.get("ok"):
+                return result
             if position >= bottom:
                 break
             position = min(position + SCROLL_STEP, bottom)
             steps += 1
-        return box
+        return result
 
     def open_table(self, table_id, wait_seconds=25):
-        """Mở bàn bằng pointer event thật trên ô bàn của sảnh; không chạm khu vực cược."""
+        """Mở bàn bằng cú bấm NGAY TRONG TRANG trên ô bàn của sảnh; không chạm khu vực cược."""
         if not BR.valid_table_id(table_id):
             return False, "Mã bàn không hợp lệ."
         ws = None
@@ -1286,10 +1209,10 @@ class LobbyStream:
             # Ô bàn ngoài khung nhìn chưa chắc đã render: dành riêng một cửa sổ để lăn
             # danh sách tìm ô, rồi vẫn giữ trọn thời gian chờ điều hướng sau cú bấm.
             find_timeout = min(15.0, max(3.0, float(wait_seconds) - 8.0))
-            box = self._find_tile_box(ws, context_id, table_id, timeout=find_timeout)
-            if not isinstance(box, dict) or "x" not in box:
-                return False, "Không tìm thấy ô bàn để mở (%s)." % (box or {}).get("reason", "tile_missing")
-            self._click_at(ws, box["x"], box["y"])
+            clicked = self._find_tile_box(ws, context_id, table_id, timeout=find_timeout)
+            if not isinstance(clicked, dict) or not clicked.get("ok"):
+                return False, "Không tìm thấy ô bàn để mở (%s)." % (
+                    clicked or {}).get("reason", "tile_missing")
             deadline = time.monotonic() + max(5.0, float(wait_seconds))
             if self.lobby_kind == "petalive":
                 pattern = re.compile(r"/live-games/bcr/%s(?:/|[?#]|$)" % re.escape(table_id))
@@ -1299,13 +1222,13 @@ class LobbyStream:
                 time.sleep(1.5)
                 now_url = (self.session._cdp_page() or {}).get("url", "")
                 if pattern.search(now_url):
-                    return True, "Đã mở bàn %s qua ô bàn của sảnh." % box.get("title", table_id)
+                    return True, "Đã mở bàn %s qua ô bàn của sảnh." % clicked.get("title", table_id)
                 # Bấm ô Petalive có thể mở tab mới thay vì đổi tab hiện tại.
                 if self.lobby_kind == "petalive" and any(
                         BR.is_petalive_table_url((page or {}).get("url"))
                         and pattern.search((page or {}).get("url", ""))
                         for page in self.session._cdp_pages()):
-                    return True, "Đã mở bàn %s trong tab mới." % box.get("title", table_id)
+                    return True, "Đã mở bàn %s trong tab mới." % clicked.get("title", table_id)
             return False, "Đã bấm ô bàn nhưng chưa chuyển vào bàn %s." % table_id
         except Exception as exc:
             return False, "Không mở được bàn (%s)." % type(exc).__name__
@@ -1335,11 +1258,10 @@ class LobbyStream:
         if state.get("kind") != "table":
             self.note = "Đã ở sảnh WM."
             return True, "Đã ở sảnh WM · không cần rời bàn."
-        box = self._wm_eval(ws, WM.WM_EXIT_JS)
-        if not box or "x" not in box:
+        clicked = self._wm_eval(ws, WM_EXIT_CLICK_JS)
+        if not isinstance(clicked, dict) or not clicked.get("ok"):
             return False, "Không thấy nút thoát bàn của WM (%s)." % (
-                (box or {}).get("reason", "exit_missing"))
-        self._click_at(ws, float(box["x"]), float(box["y"]))
+                (clicked or {}).get("reason", "exit_missing"))
         deadline = time.monotonic() + max(5.0, float(wait_seconds))
         while time.monotonic() < deadline:
             time.sleep(1.0)
@@ -1405,38 +1327,32 @@ class LobbyStream:
                 pass
 
     def _open_table_wm(self, ws, context_id, table_id, wait_seconds):
-        """Mở bàn WM bằng chuột thật trên ô bàn của sảnh rồi chờ iframe bàn hiện ra.
+        """Mở bàn WM bằng cú bấm ngay trong trang trên ô bàn của sảnh.
 
-        Ô bàn WM nằm trong iframe_109; iframe này phủ đúng khung nhìn nên toạ độ đo
-        trong khung được cộng thêm lệch iframe (JS trả kèm ``x``/``y`` đã cộng lệch).
+        Ô bàn WM nằm trong iframe_109 và bấm bằng ``element.click()`` nên không cần
+        toạ độ, không cộng lệch iframe, không gửi sự kiện chuột CDP.
         """
         parts = WM.parse_table_key(table_id)
         if not parts:
             return False, "Mã bàn WM không hợp lệ."
         prefix = "groupBac_%d_%d_" % parts
-        # Sảnh vẽ lại danh sách và gắn lớp hiệu ứng lên ô, nên phải đo → cuộn → bấm
-        # theo vòng: bấm xong chưa thấy bàn thì cuộn lại và bấm tiếp, thay vì bỏ cuộc.
+        # Sảnh vẽ lại danh sách và gắn lớp hiệu ứng lên ô, nên phải cuộn → bấm theo vòng:
+        # bấm xong chưa thấy bàn thì cuộn lại và bấm tiếp, thay vì bỏ cuộc.
         deadline = time.monotonic() + max(8.0, float(wait_seconds))
-        box = None
+        result = None
         attempts = 0
         while time.monotonic() < deadline:
-            box = self._try_value(ws, WM.WM_TILE_BOX_JS % json.dumps(prefix), context_id)
-            if not isinstance(box, dict) or box.get("reason") == "tile_missing":
+            result = self._run_js(ws, context_id, WM_TILE_CLICK_JS % json.dumps(prefix))
+            if not isinstance(result, dict) or result.get("reason") == "tile_missing":
                 fresh, _ = self._lobby_context(ws)
                 if fresh is not None:
                     context_id = fresh
                 time.sleep(0.5)
                 continue
-            if box.get("reason"):
-                time.sleep(0.5)
-                continue
-            if not box.get("inside") and not box.get("center_visible"):
-                self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix),
-                                context_id)
+            if result.get("reason") in ("tile_hidden",):
                 time.sleep(0.5)
                 continue
             attempts += 1
-            self._click_at(ws, float(box["x"]), float(box["y"]))
             # Chờ bàn hiện ra trong vài giây; chưa lên thì thử lại (tối đa 4 lần).
             settle = time.monotonic() + min(5.0, max(2.0, deadline - time.monotonic()))
             while time.monotonic() < settle:
@@ -1448,39 +1364,24 @@ class LobbyStream:
                 break
             self._try_value(ws, WM.WM_SCROLL_TO_TILE_JS % json.dumps(prefix), context_id)
             time.sleep(0.4)
-        if not isinstance(box, dict) or box.get("reason"):
+        if not isinstance(result, dict) or result.get("reason"):
             return False, "Không tìm thấy ô bàn WM để mở (%s)." % (
-                (box or {}).get("reason", "tile_missing"))
+                (result or {}).get("reason", "tile_missing"))
         return False, "Đã bấm ô bàn WM %d lần nhưng chưa thấy màn hình bàn %s." % (
             attempts, table_id)
 
     def _click_close_table(self, ws):
-        """Bấm nút X đóng bàn bằng chuột thật ở khung đang vẽ màn hình bàn; True nếu đã bấm.
+        """Bấm nút X đóng bàn EVO ngay trong trang; True nếu đã phát cú bấm.
 
-        Toạ độ đo trong khung nào phải cộng lệch khung đó (bàn có thể nằm trong iframe);
-        không đo được lệch thì không bấm liều, đường về URL sảnh tổng phía sau sẽ xử lý.
-        Lỗi CDP giữa cú bấm coi như đã bấm: điều hướng thường phá context đang chạy lệnh,
-        vòng chờ phía sau xác nhận lại bằng danh sách bàn thật.
+        Không cần toạ độ hay lệch iframe: sự kiện phát thẳng trên phần tử trong khung
+        đang vẽ màn hình bàn. Lỗi CDP giữa cú bấm coi như đã bấm: điều hướng thường phá
+        context đang chạy lệnh, vòng chờ phía sau xác nhận lại bằng danh sách bàn thật.
         """
-        clicked = False
         for context_id in list(self.contexts):
-            box = self._try_value(ws, CLOSE_TABLE_JS, context_id)
-            if not isinstance(box, dict) or "x" not in box:
-                continue
-            offset = box.get("frame_offset")
-            if offset is None:
-                offset = TB.frame_offset_via_cdp(
-                    lambda method, params=None: self._command(ws, method, params),
-                    self.context_frames.get(context_id))
-            point = TB.page_point(box, offset)
-            if point is None:
-                continue
-            try:
-                self._click_at(ws, point["x"], point["y"])
-                clicked = True
-            except Exception:
-                clicked = True
-        return clicked
+            result = self._try_value(ws, EVO_CLOSE_CLICK_JS, context_id)
+            if isinstance(result, dict) and result.get("ok"):
+                return True
+        return False
 
     def _assign_list_hash(self, ws, fragment):
         """Đổi hash tab về danh sách bàn (cùng document, không tải lại trang).
@@ -1528,8 +1429,8 @@ class LobbyStream:
     def back_to_lobby(self, wait_seconds=25):
         """Rời màn hình bàn về URL sảnh tổng để chọn lại bàn.
 
-        Thứ tự: nút X của EVO (chuột thật) → đổi hash về danh sách (SPA tự route,
-        không tải lại trang) → mở thẳng URL sảnh tổng (bỏ table_id). Không dùng
+        Thứ tự: nút X của EVO (element.click() trong trang) → đổi hash về danh sách (SPA
+        tự route, không tải lại trang) → mở thẳng URL sảnh tổng (bỏ table_id). Không dùng
         history.back(): mục lịch sử đầu của tab launch là /entry dùng một lần, lùi
         tới đó là EVO trả "User authentication failed (EV.7)".
         """
@@ -1768,7 +1669,7 @@ class LobbyStream:
 
         # 2) Trang cổng có WM trong iframe khác origin: đưa iframe ra tab thật.
         #    Đây là cách bền nhất — sau bước này tab là WM "thật" nên mọi logic đọc cầu,
-        #    đọc ví, bấm chip chạy nguyên vẹn, không cần nhánh iframe nào nữa.
+        #    đọc ví, đặt cược chạy nguyên vẹn, không cần nhánh iframe nào nữa.
         try:
             lifted, note = self.session.lift_wm_iframe_to_tab()
         except Exception:
@@ -2100,27 +2001,26 @@ class LobbyStream:
                                "cổng của bạn, đăng nhập, rồi bấm lại nút này.")
             ws = connect(portal)
             self._command(ws, "Runtime.enable")
-            box, reason, deadline = None, "evo_item_not_found", time.monotonic() + wait_seconds
-            while box is None:
+            result, reason, deadline = None, "evo_item_not_found", time.monotonic() + wait_seconds
+            while result is None:
                 # iframe luôn trả not_top_frame; chỉ lý do từ khung chính đáng tin nên vòng
                 # retry phải chạy tiếp tới hạn chót, không bỏ cuộc vì một iframe.
                 for context_id in list(self.contexts):
                     value = self._try_value(ws, EVO_ENTRY_JS, context_id)
                     if not isinstance(value, dict):
                         continue
-                    if "x" in value:
-                        box = value
+                    if value.get("ok"):
+                        result = value
                         break
                     if value.get("reason") != "not_top_frame":
                         reason = value.get("reason", reason)
-                if box is not None or time.monotonic() >= deadline:
+                if result is not None or time.monotonic() >= deadline:
                     break
                 # Trang vào render trễ: thẻ EVO nằm ngoài màn hình nên cần cuộn rồi chờ thêm lượt.
                 time.sleep(1.2)
-            if box is None:
+            if result is None:
                 return False, "Không bấm được nút “Chơi game” của Evolution (%s)." % reason
-            self.diag["evo_click"] = box
-            self._click_at(ws, box["x"], box["y"])
+            self.diag["evo_click"] = result
             lobby, embedded, failure = self._wait_lobby_page(ws, wait_seconds)
             ws.close()
             ws = None

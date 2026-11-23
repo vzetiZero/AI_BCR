@@ -26,15 +26,14 @@ trên UI (cửa + số chip cố định) hoặc lấy cửa từ kết quả `p
 ```
 AI_BCR/
 ├─ aibcr/                    backend Python (MVC)
-│  ├─ config.py              hằng số chung (nhịp quét, gate đặt chip, CDP…)
-│  ├─ adapters/              Chrome/Selenium/CDP: đọc DOM, bấm chuột, đặt chip
+│  ├─ config.py              hằng số chung (nhịp quét, gate đặt cược, CDP…)
+│  ├─ adapters/              Chrome/Selenium/CDP: đọc DOM, bấm trong trang, đặt cược
 │  │  ├─ browser.py          mở/gắn Chrome CDP 9222, đọc bàn, đọc số dư
-│  │  ├─ lobby_stream.py     đọc sảnh, quét ô bàn, bấm mở bàn bằng chuột thật
+│  │  ├─ lobby_stream.py     đọc sảnh, quét ô bàn, mở bàn bằng element.click()
 │  │  ├─ reader.js           logic đọc Big Road / bead road trong trang
-│  │  ├─ table_bets.py       bấm chip, đọc chip đang đặt
-│  │  ├─ human_mouse.py      chuyển động chuột "người thật" qua CDP
-│  │  ├─ mouse_chromedriver.py  fallback ChromeDriver
-│  │  └─ ghost_mouse.py      con trỏ ảo vẽ trong trang
+│  │  ├─ table_bets.py       đọc chip đang đặt (chỉ đọc, không bấm)
+│  │  ├─ wm_bet.py           đặt cược WM qua WebSocket (protocol 22)
+│  │  ├─ wm_ws.py            giữ socket của bàn WM, gửi lệnh cược
 │  ├─ live/                  bộ đọc WebSocket Petalive + dự đoán + AI
 │  │  ├─ cards.py            id lá 1..52 → điểm, đếm bài còn lại
 │  │  ├─ decode.py           tách khung `onGetGameResult`
@@ -136,9 +135,9 @@ Một lần bấm chạy đúng chuỗi:
    **Đứng ở trang cổng là quét được luôn** — không phải copy link iframe ra tab mới.
    Cách làm: lấy **chính URL trong iframe** (`wmvn.m8810.com/?sid=…&co=wm`) và mở nó
    ngay trong tab đó (`BrowserSession.lift_wm_iframe_to_tab`). Sau bước này tab là WM
-   "thật" nên đọc cầu, đọc **số dư ví** và bấm chip chạy nguyên logic cũ, không cần nhánh
-   iframe nào. Chỉ đổi URL của tab đang mở (không mở tab mới, không đóng gì), chỉ khi URL
-   iframe là HTTPS công khai và trông giống WM.
+   "thật" nên đọc cầu, đọc **số dư ví** và đặt cược qua WebSocket chạy nguyên logic cũ,
+   không cần nhánh iframe nào. Chỉ đổi URL của tab đang mở (không mở tab mới, không đóng
+   gì), chỉ khi URL iframe là HTTPS công khai và trông giống WM.
 
    **URL cuối cùng là WM, nhưng `start_url` là CỔNG của người dùng.** Sau khi đưa iframe
    ra tab, app suy ra trang gốc của cổng và ghi vào `start_url`:
@@ -176,11 +175,12 @@ Một lần bấm chạy đúng chuỗi:
    `title` để log/diagnose nói rõ thay vì chỉ báo “không thấy”.
 3. Mở **ô bàn đầu tiên có mã bàn**. Không chấm điểm/lọc cầu, không bỏ bàn Siêu
    Tốc Độ, không đối chiếu shoe.
-4. Bấm đúng ô bàn bằng pointer event thật, chờ URL xác nhận bàn: EVO dùng
+4. Bấm đúng ô bàn bằng `element.click()` **ngay trong trang** (không gửi sự kiện chuột
+   CDP), chờ URL xác nhận bàn: EVO dùng
    `table_id`, Petalive dùng đường dẫn `/live-games/bcr/<id>`, WM chờ
    `iframe_101` (khung bàn) hiện ra.
 5. Xác nhận chỉ cần đọc được cầu trong bàn.
-6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa bấm chip
+6. **Dừng ở đây**: bàn đã vào nhưng **chưa có lệnh cược**, chưa đặt cược
    (`sim.running = false`, `pending = null`).
 
 ### Chẩn đoán “Chưa thấy tab sảnh Baccarat”
@@ -256,33 +256,34 @@ khác) thì xoá cầu cũ, số tay đếm lại từ đầu.
 
 Khi AI live đang chạy, cầu WebSocket là nguồn chuẩn cho bàn đang theo dõi: lượt CDP
 bắt đầu trước khi ván mới về (cầu ngắn hơn) bị bỏ qua thay vì ghi đè, tránh báo
-“Cầu đổi nguồn” oan và huỷ lệnh đang chờ chip.
+“Cầu đổi nguồn” oan và huỷ lệnh đang chờ đặt cược.
 
-WM đặt chip theo cấu hình (mục “Đặt cược WM” bên dưới); app không tự bấm khi chưa bật
-tool.
+WM đặt cược theo cấu hình (mục “Đặt cược WM” bên dưới) qua WebSocket; app không tự đặt
+khi chưa bật tool.
 
 ### Đặt cược WM (`wm_bet.py`, `wm_ws.py`)
 
-Port nguyên tắc an toàn từ dự án LONG-LONG cũ (`bcr/adapters/longlong_table.py`) sang bàn
-WM:
+Đặt cược WM đi **100% qua WebSocket** — app không mô phỏng chuột ở bất kỳ đâu:
 
 1. **Chia tiền theo mệnh giá khay** (`models/chips.decompose`, quy hoạch động): khay WM
    in `10 / 20 / 50 / 100 / 500 / 1k` theo nghìn đồng nên **1 đơn vị sảnh = 1.000đ**
-   (chip `10` = 10.000đ). Không chia khít được thì **không đặt** (không bao giờ đặt thiếu).
-2. **Đường chính — bấm chuột thật** (`wm_bet.py`): chờ khay chip hết bị lớp kết quả che,
-   chọn mệnh giá, bấm chip → bấm ô → **đọc lại số tiền đang treo sau từng chip**; lệch thì
-   bấm nút huỷ toàn bộ và báo lỗi; đủ tiền mới bấm xác nhận.
-3. **Đường phụ — WebSocket `protocol 22`** (`wm_ws.py`), dùng khi hook đã bắt được socket
-   của **iframe bàn**: `{"betSerialNumber", "gameNo", "gameNoRound",
+   (chip `10` = 10.000đ). Không chia khít được thì **không đặt** (không bao giờ đặt thiếu),
+   trừ chế độ ALL-IN được bật rõ ràng.
+2. **Gửi lệnh — WebSocket `protocol 22`** (`wm_ws.py`), dùng hook đã bắt được socket của
+   **iframe bàn**: `{"betSerialNumber", "gameNo", "gameNoRound",
    "betArr": [{"betArea", "addBetMoney"}], "commission": 0, "remark": "1,0"}` với
    `betArea` 1 = Banker, 2 = Player, 3 = Hoà. Server trả `{"protocol": 22, "bOk": true}` là
-   lệnh đã vào; `bOk: false` thì tự rơi về bấm chuột.
+   lệnh đã vào; `bOk: false` thì báo lỗi — **không rơi về bấm chuột**.
    Hook được cài bằng `Page.addScriptToEvaluateOnNewDocument`, **không bao giờ tải lại
    tab** (tải lại sẽ đẩy Chrome về sảnh và mất bàn đang đứng). Socket chọn theo `groupID`
    khớp bàn đang mở **và** phải thuộc iframe bàn — socket khung gốc nhận được dữ liệu bàn
    nhưng server từ chối lệnh cược gửi từ đó.
+3. **Xác minh** bằng số chip thật đang treo trên bàn (`mybet_money`): lệch là huỷ ngay và
+   báo lỗi, không giữ lệnh sai.
 4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng
    `table_bets.read` nên `compare_chips` / `table_is_clear` dùng lại được.
+5. **EVO chỉ đọc**: bảng cầu và số chip đang trên bàn vẫn đọc bình thường, nhưng đặt cược
+   EVO bị khoá (báo “Đặt cược EVO đã khoá — chỉ hỗ trợ đặt qua WebSocket (WM)”).
 
 Không có bàn nào có mã bàn thì tool tự quét lại (lượt đầu ngay, sau đó mỗi 15 giây)
 tới khi hết `ENTER_VALID_TIMEOUT = 240` giây thì báo lỗi. Nút **Dừng tự quét** huỷ
@@ -361,7 +362,7 @@ Tab **AI dự đoán** bật/tắt luồng live mà không cần terminal:
    `https://api.vilao.ai/v1/chat/completions` và `chib/deepseek-v4.1-flash`.
 2. Bấm **Lưu cấu hình AI**, rồi **Bật AI live**. Engine gắn CDP 9222, đọc WebSocket
    bàn Petalive, cập nhật shoe và gọi AI mỗi N ván (mặc định 5) trong **thread riêng**
-   — không chặn vòng quét/đặt chip.
+   — không chặn vòng quét/đặt cược.
 3. Panel hiện: xác suất P/B/T, EV tốt nhất ± sai số, % shoe đã chia, verdict
    (`BỎ TAY` / `Cân nhắc` / `Đánh`), mức tin cậy, rủi ro và giải thích. Nút
    **Phân tích ngay** gọi AI ngay cho ván kế.
@@ -399,7 +400,7 @@ chỉ lấy cửa từ số liệu `predict` (`top_side` = xác suất cao nhấ
 `auto_side_source` là `road`/`hybrid`) — không đọc `analysis.focus_side` do AI viết. AI
 cũng không được trả số liệu mới; mọi con số trên UI đều lấy từ `predict.predict()`.
 
-## Lệnh cược từng tay + tự đặt chip thật
+## Lệnh cược từng tay + tự đặt cược
 
 Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, phần **TAY KẾ TIẾP**:
 
@@ -410,7 +411,7 @@ Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, ph�
 - `win_repeat_loss_double` — **Thắng về mức gốc · thua gấp đôi**: tay trước thắng thì
   tay sau **quay lại đúng mức gốc đã cấu hình** (cấu hình 20 → thắng ở mức 80 vẫn đặt
   lại 20, không giữ mức 80); tay trước thua thì gấp đôi mức vừa đặt. Hoà (push) giữ
-  nguyên mức; tay **không đặt được chip** thì **bắt đầu lại từ mức gốc**.
+  nguyên mức; tay **không đặt được cược** thì **bắt đầu lại từ mức gốc**.
   - **Mức cược tối đa** (`bet_max_stake`, 0 = không giới hạn): chặn trần khi gấp đôi; mức
   cược luôn bị chặn thêm bởi số dư phiên để không gửi lệnh vượt tiền thật.
   - **All-in khi số dư cuối không chia khít chip**: ví còn 636 đv mà lệnh cần 640 thì
@@ -431,7 +432,7 @@ Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, ph�
   thực tế”*.
 
 
-Cơ chế mức cược chỉ đọc **kết quả thật của tay đã đặt được chip** (`LiveSimulation`
+Cơ chế mức cược chỉ đọc **kết quả thật của tay đã đặt được cược** (`LiveSimulation`
 ghi `progress_stake`/`last_outcome` khi kết toán); đổi mức gốc hoặc cơ chế thì thang
 cược bắt đầu lại từ mức mới. Mỗi tay chỉ arm một lần, công thức thuần nằm ở
 `models/live_sim.py::progress_stake`.
@@ -439,16 +440,17 @@ cược bắt đầu lại từ mức mới. Mỗi tay chỉ arm một lần, c�
 Hành vi của `bet.place`:
 
 1. Từ chối nếu chưa vào bàn, chưa chạy tool, đang chờ tay hiện tại kết thúc, đang
-   bấm lượt khác, hoặc đang tắt `auto_place`.
+   đặt lượt khác, hoặc đang tắt `auto_place`.
 2. `AUTO`: lấy cửa theo `auto_side_source` (mặc định `top_side` = cửa có xác suất ra
    cao nhất; `road`/`hybrid` dùng nhịp cầu). Nếu snapshot cũ không có `top_side` thì tự
    tính từ `probabilities`. Chỉ từ chối khi không có cửa nào. AI có nói gì cũng không
    đổi cửa.
 3. Chốt lệnh vào `sim.pending`, chờ gate `table_is_clear()` (cả 3 cửa về 0) rồi gọi
-   `TB.place_bet(...)` — bấm chip thật trên site, có tuỳ chọn chuột người thật.
-4. Chỉ tính lãi/lỗ khi có xác nhận đã bấm chip trong cửa sổ đúng. Tay nào không đặt
+   `WMBet(...).place(...)` — gửi lệnh cược qua WebSocket (protocol 22). EVO chỉ đọc:
+   bấm đặt cược EVO sẽ báo “Đặt cược EVO đã khoá — chỉ hỗ trợ đặt qua WebSocket (WM)”.
+4. Chỉ tính lãi/lỗ khi có xác nhận chip đã lên bàn trong cửa sổ đúng. Tay nào không đặt
    được thì ghi `not_placed`, không đụng vốn; sau `PLACE_SKIP_LIMIT` tay liên tiếp thì
-   dừng để người dùng kiểm tra khay chip.
+   dừng để người dùng kiểm tra bàn.
 5. `PLACE_CONFIRM_TIMEOUT` / `PLACE_*` trong `aibcr/config.py` giới hạn thời gian gate
    và xác nhận, tránh thread chết làm treo phiên.
 

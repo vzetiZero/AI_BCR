@@ -67,22 +67,21 @@ class FakeStream(LS.LobbyStream):
     """Chỉ thay phần nói chuyện với CDP; giữ nguyên logic gom ô bàn."""
 
     def __init__(self, tiles, scroll=None):
-        super().__init__(human_mouse=False)
+        super().__init__()
         self.tiles = tiles
         self.scroll = scroll or {"top": 0, "max": 1000, "client": 500}
         self.calls = []
 
     def _try_value(self, ws, expression, context_id):
-        if "wui-live-games-layout__body-container" in expression:
-            return {"x": 100, "y": 100, "width": 400, "height": 300}
         return None
 
     def _evaluate(self, ws, expression, context_id):
         self.calls.append(expression)
         return {"result": {"value": {"tiles": self.tiles, "scroll": self.scroll}}}
 
-    def _wheel_scroll_to(self, ws, context_id, target_top, box, petalive=False):
+    def _scroll_to(self, ws, context_id, target_top, petalive=False):
         self.calls.append(("scroll", target_top, petalive))
+        return target_top
 
 
 class PetaliveSweepTests(unittest.TestCase):

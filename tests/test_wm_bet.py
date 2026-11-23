@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Đặt chip WM: mệnh giá khay, khung lệnh cược, chọn socket và điều kiện bấm.
+"""Đặt cược WM: mệnh giá khay, khung lệnh cược, chọn socket và điều kiện cửa sổ cược.
 
 Các giá trị dưới đây lấy từ bàn thật: khay chip WM in ``10/20/50/100/500/1k`` (nghìn
 đồng), lệnh cược đi qua WebSocket ``protocol 22`` với ``betArea`` 1/2/3 = B/P/T.
@@ -120,12 +120,12 @@ class ClickableTests(unittest.TestCase):
         self.assertFalse(wm_bet.box_clickable({"w": 0, "h": 38}))
         self.assertFalse(wm_bet.box_clickable(None))
 
-    def test_hovered_detects_overlay(self):
-        self.assertTrue(wm_bet.hovered({"hit": "chip_item mouse_pointer chip_b_10"}))
-        self.assertTrue(wm_bet.hovered({"hit": "playbetboxPlayer|playerbet_box"}))
-        # Lớp phủ chia bài che khay chip: không bấm.
-        self.assertFalse(wm_bet.hovered({"hit": "front bg poker_item"}))
-        self.assertFalse(wm_bet.hovered({}))
+    def test_uncovered_detects_overlay(self):
+        self.assertTrue(wm_bet.uncovered({"hit": "chip_item mouse_pointer chip_b_10"}))
+        self.assertTrue(wm_bet.uncovered({"hit": "playbetboxPlayer|playerbet_box"}))
+        # Lớp phủ chia bài che khay chip: chưa phải lúc đặt cược.
+        self.assertFalse(wm_bet.uncovered({"hit": "front bg poker_item"}))
+        self.assertFalse(wm_bet.uncovered({}))
 
 
 class ReadBetsFormatTests(unittest.TestCase):
@@ -135,6 +135,62 @@ class ReadBetsFormatTests(unittest.TestCase):
         from aibcr.models.live_sim import table_is_clear
         self.assertFalse(table_is_clear(live))
         self.assertTrue(table_is_clear({"ok": True, "spots": {}}))
+
+
+class _FakeSocket:
+    def __init__(self, ready):
+        self._ready = ready
+        self.calls = []
+
+    def is_alive(self):
+        return True
+
+    def ready(self):
+        return self._ready
+
+    def place(self, side, amount):
+        self.calls.append((side, amount))
+        return {"ok": True}
+
+
+class _FakeSession:
+    def __init__(self, socket):
+        self.wm_socket = socket
+
+
+class PlaceIsWebSocketOnlyTests(unittest.TestCase):
+    """Không còn đường chuột: thiếu socket thì báo lỗi rõ ràng, không âm thầm bấm chip."""
+
+    PHASE = {"ok": True, "chips": [{"key": "10", "w": 38, "h": 38,
+                                    "hit": "chip_item chip_b_10"}]}
+
+    def _bettor(self, socket):
+        bettor = wm_bet.WMBet(_FakeSession(socket))
+        bettor.wait_phase = lambda *a, **k: self.PHASE
+        bettor.read_bets = lambda: {"ok": True, "spots": {}, "total": 0.0,
+                                    "denominations": [10]}
+        return bettor
+
+    def test_missing_socket_is_an_explicit_error(self):
+        result = self._bettor(_FakeSocket(ready=False)).place("P", 10, wait_seconds=1)
+        self.assertFalse(result["ok"])
+        self.assertIn("WebSocket", result["error"])
+        self.assertEqual(result["via"], "ws")
+
+    def test_confirm_false_reports_that_only_websocket_exists(self):
+        result = self._bettor(_FakeSocket(ready=True)).place("P", 10, confirm=False,
+                                                             wait_seconds=1)
+        self.assertFalse(result["ok"])
+        self.assertIn("WebSocket", result["error"])
+
+    def test_unreachable_amount_never_goes_to_the_site(self):
+        socket = _FakeSocket(ready=True)
+        bettor = self._bettor(socket)
+        bettor.wait_phase = lambda *a, **k: {"ok": True, "chips": [{"key": "100", "w": 38,
+                                                                  "h": 38}]}
+        result = bettor.place("P", 25, wait_seconds=1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(socket.calls, [])
 
 
 if __name__ == "__main__":

@@ -126,9 +126,15 @@ class NoTkinterAnymoreTests(unittest.TestCase):
 
     def test_root_has_no_compatibility_shims(self):
         for shim in ("browser.py", "engine.py", "lobby_stream.py", "method.py",
-                     "money.py", "table_bets.py", "human_mouse.py", "ghost_mouse.py",
-                     "mouse_chromedriver.py"):
+                     "money.py", "table_bets.py"):
             self.assertFalse((ROOT / shim).exists(), "%s phải dùng aibcr.* trực tiếp" % shim)
+
+    def test_mouse_simulation_modules_are_gone(self):
+        # Không còn mô phỏng chuột: vào bàn bằng element.click() trong trang, đặt cược
+        # bằng WebSocket. Ba module chuột ảo cũ phải biến mất hẳn.
+        for gone in ("human_mouse.py", "ghost_mouse.py", "mouse_chromedriver.py"):
+            self.assertFalse((PKG / "adapters" / gone).exists(),
+                             "%s phải bị xoá (không mô phỏng chuột)" % gone)
 
 
 class StructureTests(unittest.TestCase):
@@ -239,6 +245,44 @@ class NoHorseRacingLeftoversTests(unittest.TestCase):
             for pattern in self.PATTERNS:
                 self.assertIsNone(re.search(pattern, text),
                                   "%s còn sót %r" % (path.relative_to(ROOT), pattern))
+
+
+class NoMouseSimulationTests(unittest.TestCase):
+    """Không còn mô phỏng chuột: vào bàn bằng element.click() trong trang, cược qua WS."""
+
+    PATTERNS = (
+        r"Input\.dispatchMouseEvent",
+        r"dispatchMouseWheelEvent",
+        r"\bhuman_mouse\b",
+        r"\bHumanMouse\b",
+        r"ghost_cursor",
+        r"python_ghost_cursor",
+        r"\bclick_at\b",
+        r"\b_wheel_scroll_to\b",
+    )
+
+    def test_no_mouse_simulation_symbols_anywhere(self):
+        files = [p for p in list(ROOT.glob("*.py")) + list(PKG.rglob("*.py"))
+                 + list((ROOT / "tests").rglob("*.py")) + list((ROOT / "tools").rglob("*.py"))
+                 if p != pathlib.Path(__file__)]
+        files += list(PKG.rglob("*.js")) + list((ROOT / "ui").rglob("*.js"))
+        files += [p for p in (ROOT / "ui/renderer").glob("*.html")]
+        for path in files:
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+            for pattern in self.PATTERNS:
+                self.assertIsNone(re.search(pattern, text),
+                                  "%s còn sót %r" % (path.relative_to(ROOT), pattern))
+
+    def test_ui_has_no_human_mouse_switch(self):
+        html = (ROOT / "ui/renderer/index.html").read_text(encoding="utf-8")
+        app = (ROOT / "ui/renderer/app.js").read_text(encoding="utf-8")
+        self.assertNotIn("ba-human-mouse", html)
+        self.assertNotIn("ba-human-mouse", app)
+
+    def test_evo_betting_is_locked_to_websocket_tables(self):
+        text = (PKG / "controllers/baccarat.py").read_text(encoding="utf-8")
+        self.assertNotIn("TB.place_bet", text, "EVO không còn đặt chip bằng chuột")
+        self.assertIn("Đặt cược EVO đã khoá", text)
 
 
 if __name__ == "__main__":

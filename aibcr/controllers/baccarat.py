@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tầng Controller · Baccarat: đọc bàn, AI dự đoán, nhận lệnh cược từ UI, đặt chip.
+"""Tầng Controller · Baccarat: đọc bàn, AI dự đoán, nhận lệnh cược từ UI, đặt cược.
 
 Chỉ điều phối Model (``aibcr.models``) và Adapter (``aibcr.adapters``); không dùng tkinter
 và không biết gì về Electron. Tầng transport (``aibcr.service.engine``) gọi
@@ -7,12 +7,13 @@ và không biết gì về Electron. Tầng transport (``aibcr.service.engine``)
 
 Không còn phương pháp 3-3/3-2, thang cược hay khối mạnh/yếu. Mỗi tay người dùng cấu
 hình cửa + số chip trên UI (hoặc chọn “theo AI”), rồi bấm “Tự đặt cược”: controller
-chốt lệnh, chờ ván mới rồi bấm chip thật và đối chiếu xác nhận.
+chốt lệnh, chờ ván mới rồi gửi lệnh cược qua WebSocket của bàn WM và đối chiếu xác nhận.
+EVO chỉ đọc cầu/chip; đặt cược EVO đã khoá (không mô phỏng chuột).
 
 Trách nhiệm:
     - mở/gắn Chrome (CDP 9222), nút “VÀO BÀN HỢP LỆ”, quét sảnh, theo dõi bàn
     - chạy luồng live Petalive + AI (xác suất/EV do ``predict`` tính, AI chỉ giải thích)
-    - nhận lệnh ``bet.config`` / ``bet.place`` từ UI và tự đặt chip thật
+    - nhận lệnh ``bet.config`` / ``bet.place`` từ UI và tự đặt cược (WM: WebSocket)
     - ghi lãi/lỗ, chốt lời, lưu/khôi phục phiên
 
 API key AI chỉ nằm trong RAM (``ai.key.set``), không ghi vào state file hay snapshot.
@@ -58,8 +59,7 @@ DEFAULT_CONFIG = {
     "capital": 3000.0,          # vốn phiên (VN2)
     "take_profit_pct": 25.0,    # chốt lời % vốn
     "favorites_only": True,
-    "human_mouse": True,
-    "auto_place": True,         # cho phép bấm chip thật khi bấm “Tự đặt cược”
+    "auto_place": True,         # cho phép đặt chip thật (WM: WebSocket) khi bấm “Tự đặt cược”
     "auto_hunt": True,
     "auto_recover": True,
     "tables_to_play": 1,
@@ -142,8 +142,7 @@ class BaccaratController:
         self.config = self._load_config()
 
         self.browser = BR.BrowserSession()
-        self.stream = LS.LobbyStream(self.browser, human_mouse=self.config["human_mouse"],
-                                     game="baccarat")
+        self.stream = LS.LobbyStream(self.browser, game="baccarat")
         # Lịch sử tay bền vững: file JSONL riêng cạnh state file, KHÔNG bị xoá khi
         # reset phiên hay tạo phiên mới — chỉ nút Reset lịch sử mới xoá (có lưu bản sao).
         self.history_path = self.state_path.with_name("aibcr_history.jsonl")
@@ -200,7 +199,7 @@ class BaccaratController:
 
         # bàn vừa mở, chờ đọc được cầu rồi theo dõi
         self.auto_start_key = None
-        # Nút “Vào bàn hợp lệ”: tìm + mở + kiểm tra cầu nhưng KHÔNG theo dõi/đặt chip.
+        # Nút “Vào bàn hợp lệ”: tìm + mở + kiểm tra cầu nhưng KHÔNG theo dõi/đặt cược.
         self.enter_valid = False
         self.valid_check_done = False
         self.valid_note = ""
@@ -280,7 +279,7 @@ class BaccaratController:
         config["capital"] = max(1.0, _as_float(config.get("capital"), DEFAULT_CONFIG["capital"]))
         config["take_profit_pct"] = max(1.0, _as_float(config.get("take_profit_pct"),
                                                        DEFAULT_CONFIG["take_profit_pct"]))
-        for key in ("favorites_only", "human_mouse", "auto_place", "auto_hunt", "auto_recover"):
+        for key in ("favorites_only", "auto_place", "auto_hunt", "auto_recover"):
             config[key] = bool(config.get(key, DEFAULT_CONFIG[key]))
         side = str(config.get("bet_side") or "AUTO").strip().upper()
         config["bet_side"] = side if side in ("AUTO", "P", "B", "T") else "AUTO"
@@ -1303,8 +1302,8 @@ class BaccaratController:
         """Một nút duy nhất: tự vào bàn + theo dõi + tự đặt cược từng tay.
 
         Người dùng chỉ cần Chrome đang mở ở sảnh; mọi bước còn lại (gắn Chrome, quét
-        sảnh, mở bàn, đọc cầu, chốt lệnh, bấm chip) do tool tự làm và lặp lại mỗi tay
-        cho tới khi bấm “Dừng tool”.
+        sảnh, mở bàn, đọc cầu, chốt lệnh, đặt cược qua WebSocket) do tool tự làm và lặp
+        lại mỗi tay cho tới khi bấm “Dừng tool”.
         """
         if self.tool_running:
             return {"ok": True, "note": "Tool đang chạy."}
@@ -1344,8 +1343,9 @@ class BaccaratController:
         """Cài hook WebSocket của WM — **không bao giờ tải lại tab**.
 
         Tải lại tab sẽ đẩy Chrome về sảnh và làm mất bàn đang đứng, nên hook chỉ được cài
-        sẵn; nếu chưa bắt được socket thì cược đi bằng đường bấm chip (đọc lại số tiền sau
-        từng chip nên vẫn đúng). Không có trường hợp nào tự đổi trang.
+        sẵn; khi socket chưa bắt được thì đặt cược tạm khoá (báo lỗi rõ ràng) cho tới khi
+        vào lại bàn — app không còn đường bấm chip nào để dự phòng. Không có trường hợp
+        nào tự đổi trang.
         """
         from aibcr.adapters.wm_ws import get_socket
 
@@ -1356,7 +1356,8 @@ class BaccaratController:
         if socket.ready():
             self.log("WM: socket sẵn sàng · đặt cược gửi thẳng qua WebSocket.", "win")
         else:
-            self.log("WM: đặt cược bằng bấm chip (WebSocket sẽ dùng khi bàn mở lại).", "info")
+            self.log("WM: chưa bắt được socket — đặt cược tạm khoá tới khi vào lại bàn.",
+                     "info")
 
     def tool_stop(self):
         """Dừng tool và rời bàn về sảnh (đúng như quy tắc một nút)."""
@@ -1641,7 +1642,7 @@ class BaccaratController:
         except Exception as exc:
             return {"ok": False, "error": type(exc).__name__}
 
-    # ------------------------------------------------------- đặt chip tự động
+    # ------------------------------------------------------- đặt cược tự động
     def _tool_retry_enter(self, now):
         """Tool đang chạy nhưng chưa có bàn: tự thử vào bàn lại.
 
@@ -1796,13 +1797,13 @@ class BaccaratController:
         return fallback
 
     def _place_armed_bet(self, plan):
-        """Đặt chip thật theo lệnh đã chốt (chạy ở thread nền)."""
+        """Đặt cược theo lệnh đã chốt (chạy ở thread nền; WM: WebSocket)."""
         if not self.config["auto_place"]:
             with self.lock:
                 self.sim.mark_placing(plan)
-                self.sim.mark_placed(False, "Chưa đặt: bật “Tự đặt chip” để chỉ tính tay đã được xác nhận.",
+                self.sim.mark_placed(False, "Chưa đặt: bật “Tự đặt cược” để chỉ tính tay đã được xác nhận.",
                                      plan)
-            self.place_status = {"ok": False, "note": "Tay chưa đặt: đang tắt tự đặt chip."}
+            self.place_status = {"ok": False, "note": "Tay chưa đặt: đang tắt tự đặt cược."}
             return
         side, stake = plan.get("side"), float(plan.get("stake") or 0)
         with self.lock:
@@ -1813,7 +1814,7 @@ class BaccaratController:
             return
         if self.place_busy:
             with self.lock:
-                self.sim.mark_placed(False, "Lượt bấm chip trước chưa xong nên tay này chưa được bấm.",
+                self.sim.mark_placed(False, "Lượt đặt cược trước chưa xong nên tay này chưa được đặt.",
                                      plan)
             return
         self.place_busy = True
@@ -1832,13 +1833,14 @@ class BaccaratController:
                     return
                 row_letters = (self.tables.get(self.sim.table_key) or {}).get("letters")
                 if row_letters and row_letters != plan.get("baseline"):
-                    self.events.put(("placed", (False, "Kết quả tay này đã về trước khi bấm chip; "
-                                                       "không bấm sang cửa sổ tay sau.", plan)))
+                    self.events.put(("placed", (False, "Kết quả tay này đã về trước khi đặt cược; "
+                                                       "không đặt sang cửa sổ tay sau.", plan)))
                     return
 
                 if getattr(self.browser, "wm_page_id", None):
-                    # Bàn WM: chip treo lên ô trước, đọc lại số tiền, đủ mới bấm xác nhận
-                    # — cùng nguyên tắc an toàn của bản LONG-LONG (không đặt thiếu/lệch).
+                    # Bàn WM: cược đặt 100% qua WebSocket (protocol 22) — không mô phỏng
+                    # chuột, không phụ thuộc toạ độ khay chip. Thiếu socket là báo lỗi rõ
+                    # ràng chứ không rơi về đường chuột (đã bỏ hẳn).
                     result = WMBet(self.browser).place(side, stake, confirm=True,
                                                        wait_seconds=BET_GATE_TIMEOUT,
                                                        allow_short=bool(plan.get("all_in")))
@@ -1851,25 +1853,15 @@ class BaccaratController:
                                                 actual)))
                     return
 
-                def record_click():
-                    plan["placed_at"] = time.time()
-
-                ok, note, _placed = TB.place_bet(
-                    self.browser, side, [], unit=TB.DEFAULT_CHIP_UNIT,
-                    human_mouse=self.config["human_mouse"], amount=stake,
-                    on_bet_click=record_click)
-                # `_placed` là {mệnh giá: số chip}; tổng này là số THẬT đã bấm, có thể
-                # khác lệnh khi khay chip thiếu mệnh giá. Chỉ báo "đặt được" khi khớp.
-                actual = 0.0
-                if isinstance(_placed, dict):
-                    try:
-                        actual = float(sum(int(count or 0) * int(denom or 0)
-                                           for denom, count in _placed.items()))
-                    except (TypeError, ValueError):
-                        actual = 0.0
-                self.events.put(("placed", (ok, note, plan, actual or None)))
+                # EVO: chỉ đọc bảng cầu và đọc chip đang trên bàn. Đặt cược EVO đã khoá vì
+                # app không còn mô phỏng chuột (không bấm khay chip/ô cược).
+                self.events.put(("placed", (
+                    False,
+                    "Đặt cược EVO đã khoá — chỉ hỗ trợ đặt qua WebSocket (WM). "
+                    "Mở bàn WM rồi bật lại “Tự đặt cược”.",
+                    plan, None)))
             except Exception as exc:
-                self.events.put(("placed", (False, "Lỗi khi tự đặt chip (%s)." % type(exc).__name__,
+                self.events.put(("placed", (False, "Lỗi khi tự đặt cược (%s)." % type(exc).__name__,
                                             plan)))
 
         threading.Thread(target=work, daemon=True, name="ba-place").start()
@@ -1880,14 +1872,14 @@ class BaccaratController:
         last_error = ""
         while time.monotonic() < deadline:
             if not self.tool_running:
-                return False, "Tool đã dừng, huỷ tự đặt chip."
+                return False, "Tool đã dừng, huỷ tự đặt cược."
             live = self._read_chip_state()
             if table_is_clear(live):
                 return True, ""
             last_error = "" if (live or {}).get("ok") else ((live or {}).get("error") or "no_read")
             time.sleep(poll)
         if last_error:
-            return False, ("Không tự đặt: sau %ds vẫn không đọc được bàn (%s) nên chưa bấm chip."
+            return False, ("Không tự đặt: sau %ds vẫn không đọc được bàn (%s) nên chưa đặt cược."
                            % (int(timeout), last_error))
         return False, ("Không tự đặt: sau %ds bàn vẫn còn chip ván trước, chưa chắc đang ở lượt "
                        "đặt cược mới." % int(timeout))
@@ -1898,7 +1890,7 @@ class BaccaratController:
         changed = []
         with self.lock:
             config = dict(self.config)
-            for key in ("favorites_only", "human_mouse", "auto_place",
+            for key in ("favorites_only", "auto_place",
                         "auto_hunt", "auto_recover", "leave_on_shoe_reset"):
                 if key in params:
                     config[key] = bool(params[key])
@@ -1961,7 +1953,6 @@ class BaccaratController:
                 book.peak = normalized["capital"]
                 book.max_drawdown = 0.0
             book.check_limits()
-            self.stream.human_mouse = normalized["human_mouse"]
             self._apply_live_config()
             self._save_state()
 
@@ -3244,12 +3235,12 @@ class BaccaratController:
                 "auto_side_source": source, "note": note}
 
     def bet_place(self):
-        """Nút “Tự đặt cược”: chốt lệnh rồi bấm chip thật (có gate chờ ván mới)."""
+        """Nút “Tự đặt cược”: chốt lệnh rồi đặt qua WebSocket (có gate chờ ván mới)."""
         with self.lock:
             if not self.config["auto_place"]:
-                return {"ok": False, "error": "Đang tắt tự đặt chip — bật lại trong Cấu hình."}
+                return {"ok": False, "error": "Đang tắt tự đặt cược — bật lại trong Cấu hình."}
             if self.place_busy:
-                return {"ok": False, "error": "Lượt bấm chip trước chưa xong."}
+                return {"ok": False, "error": "Lượt đặt cược trước chưa xong."}
             if not self.sim.table_key:
                 return {"ok": False, "error": "Chưa vào bàn — bấm “VÀO BÀN HỢP LỆ” trước."}
             if not self.tool_running:
@@ -3266,7 +3257,7 @@ class BaccaratController:
         self._place_armed_bet(pending)
         self._push_state()
         return {"ok": True, "side": order["side"], "stake": order["stake"],
-                "note": "Đã gửi lệnh %s · %s đv (= %sđ) · đang chờ ván mới để bấm chip." % (
+                "note": "Đã gửi lệnh %s · %s đv (= %sđ) · đang chờ ván mới để đặt cược." % (
                     E.SIDE_NAME[order["side"]], M.fmt_money(order["stake"]),
                     M.fmt_money(order["stake"] * 1000))}
 

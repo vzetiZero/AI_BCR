@@ -296,7 +296,7 @@ class LiveSimulation:
             "baseline": self.letters if baseline is None else baseline,
             "armed_at": time.time(), "placed": None,
         }
-        self.note = "Đã chốt %s · %s đv · chờ ván mới để bấm chip." % (
+        self.note = "Đã chốt %s · %s đv · chờ ván mới để đặt cược." % (
             E.SIDE_NAME[side], M.fmt_money(stake))
         return self.pending
 
@@ -307,7 +307,7 @@ class LiveSimulation:
             order["placing_at"] = time.time()
 
     def mark_placed(self, ok, note="", order=None, placed_stake=None):
-        """Ghi kết quả lượt bấm chip.
+        """Ghi kết quả lượt đặt cược.
 
         ``placed_stake`` là số đơn vị THẬT đã lên bàn, dùng cho sổ vốn và cho thang
         cược. Bắt buộc truyền khi sàn xác nhận một số khác lệnh (ví dụ lệnh 200 nhưng

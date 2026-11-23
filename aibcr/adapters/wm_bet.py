@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Chọn chip và đặt cược trên bàn WM (M88) — bản port từ dự án LONG-LONG cũ.
+"""Đặt cược trên bàn WM (M88) — CHỈ qua WebSocket (protocol 22), không bấm chuột.
 
-Bàn WM đặt cược theo hai bước: bấm mệnh giá trên khay rồi bấm ô cược để "treo" chip,
-sau đó bấm nút xác nhận (``bet_btn``) mới thực sự gửi lệnh ``protocol 22`` đi. Nhờ vậy
-giữa hai bước có cửa sổ an toàn để đọc lại số tiền đã treo và huỷ nếu sai.
+Bàn WM đặt cược bằng lệnh ``protocol 22`` gửi trên chính socket của bàn::
+
+    {"protocol": 22, "data": {"betSerialNumber": 1, "gameNo": ..., "gameNoRound": ...,
+                              "betArr": [{"betArea": 2, "addBetMoney": 10}],
+                              "commission": 0, "remark": "1,0"}}
+
+Nhờ vậy không cần khay chip, ô cược hay toạ độ: app chỉ cần giữ được instance
+``WebSocket`` của trang (``wm_ws.WMSocket``) rồi gửi lệnh, sau đó xác minh bằng số chip
+thật đang treo trên bàn.
 
 Thang tiền: khay chip WM in ``10 / 20 / 50 / 100 / 500 / 1k`` theo đơn vị nghìn đồng
 (VNDK), nên **1 đơn vị sảnh = 1.000đ**: chip ``10`` = 10.000đ, ``1k`` = 1.000.000đ.
 Số gửi lên sàn đúng bằng số trên khay (``addBetMoney: 10`` cho chip 10), nên không cần
 nhân quy đổi — chỉ cần chia tiền theo đúng mệnh giá đang có.
 
-Quy trình ``place`` (giống ``LongLongTable.place`` của dự án cũ):
-    1. đọc khay chip + ô cược, kiểm tra từng hộp có bấm được (đủ lớn, nằm trong khung);
-    2. chờ hết hiệu ứng chia bài (lớp phủ kết quả che khay chip);
-    3. chia số tiền thành mệnh giá **khít** (không đặt thiếu);
-    4. mỗi chip: bấm chip → bấm ô → đọc lại số tiền đã treo, lệch là huỷ toàn bộ;
-    5. đủ tiền mới bấm xác nhận, rồi đọc lại lần cuối.
+Toàn bộ đường bấm chip bằng chuột đã bị xoá hẳn. Không có socket thì ``place`` trả lỗi
+rõ ràng chứ không rơi về mô phỏng chuột.
 """
 
 import json
@@ -26,11 +28,13 @@ from aibcr.models import chips as CHIPS
 
 # Mã ô cược trên WebSocket (protocol 22: ``betArea``) — đã đối chiếu với lệnh thật.
 BET_AREA = {"B": 1, "P": 2, "T": 3}
-SPOT_ID = {"B": "Banker", "P": "Player", "T": "Tie"}
 SIDE_NAME = {"B": "Banker", "P": "Player", "T": "Hoà"}
 # Một đơn vị sảnh = 1.000đ (khay WM in theo VNDK).
 DONG_PER_UNIT = 1000.0
 
+# Đọc trạng thái bàn (khay chip, ô cược, số tiền đang treo, số dư, pha cược). Kích thước
+# (``w``/``h``) và phần tử nằm trên tâm được trả về để biết khu vực cược đã render và
+# không bị lớp kết quả che — chỉ để ĐỌC, không dùng để bấm.
 READ_JS = r"""(() => {
     const frame = document.getElementById('iframe_101');
     if (!frame) return {reason: 'no_table_frame'};
@@ -43,11 +47,6 @@ READ_JS = r"""(() => {
     if (!doc) return {reason: 'no_document'};
     const box = (el) => {
         const r = el.getBoundingClientRect();
-        return {cx: fr.x + r.x + r.width / 2, cy: fr.y + r.y + r.height / 2,
-                w: r.width, h: r.height};
-    };
-    const local = (el) => {
-        const r = el.getBoundingClientRect();
         const hit = doc.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
         return {w: r.width, h: r.height,
                 hit: hit ? (hit.id || '') + '|' + (hit.className || '').toString().slice(0, 40) : ''};
@@ -57,10 +56,9 @@ READ_JS = r"""(() => {
         const cls = (item.className || '').toString();
         const m = /chip_b_([0-9a-z]+)/.exec(cls);
         if (!m) continue;
-        const info = local(item);
+        const info = box(item);
         if (info.w < 4) continue;
-        chips.push(Object.assign({key: m[1], on: item.classList.contains('on')},
-                                 box(item), info));
+        chips.push(Object.assign({key: m[1], on: item.classList.contains('on')}, info));
     }
     const spots = {};
     for (const side of ['B', 'P', 'T']) {
@@ -72,26 +70,15 @@ READ_JS = r"""(() => {
         const value = money ? parseFloat((money.textContent || '').replace(/[^0-9.]/g, '')) : 0;
         spots[side] = Object.assign({my_bet: Number.isFinite(value) ? value : 0,
                                      chips: holder ? holder.children.length : 0},
-                                    box(el), local(el));
+                                    box(el));
     }
-    const btn = (id) => { const e = doc.getElementById(id);
-        if (!e) return null;
-        const info = local(e);
-        if (info.w < 4) return null;
-        return Object.assign({cls: (e.className || '').toString()}, box(e)); };
     const wallet = document.getElementById('menu_ver2_balance');
     const countdown = doc.getElementById('countdown');
     return {
         chips, spots,
-        betBtn: btn('bet_btn'), cancelBtn: btn('cancel_btn'),
-        tray: (() => { const e = doc.getElementById('chip_box');
-            if (!e) return null;
-            const r = e.getBoundingClientRect();
-            return {w: r.width, h: r.height}; })(),
         open_result: !!doc.querySelector('#opencard-wrapper.wrapper.on'),
         countdown: countdown ? (countdown.className || '').toString() : '',
-        wallet: wallet ? (wallet.textContent || '').replace(/\s+/g, ' ').trim() : '',
-        href: location.href.slice(0, 120)
+        wallet: wallet ? (wallet.textContent || '').replace(/\s+/g, ' ').trim() : ''
     };
 })()"""
 
@@ -121,14 +108,14 @@ def parse_denominations(chips):
 
 
 def box_clickable(box, min_size=4):
-    """Hộp có bấm được không: đủ lớn và toạ độ hợp lệ."""
+    """Hộp đã render đủ lớn (dùng để biết khu vực cược/bàn đã sẵn sàng)."""
     if not isinstance(box, dict):
         return False
     return (box.get("w") or 0) >= min_size and (box.get("h") or 0) >= min_size
 
 
-def hovered(box):
-    """Chuột đang nằm trên chính phần tử này (không bị lớp phủ che)."""
+def uncovered(box):
+    """Phần tử không bị lớp phủ (kết quả chia bài, tooltip) che ở tâm hộp."""
     if not isinstance(box, dict):
         return False
     hit = str(box.get("hit") or "")
@@ -136,7 +123,7 @@ def hovered(box):
 
 
 class WMBet:
-    """Đọc khay chip/ô cược và đặt chip thật trên bàn WM (chỉ một kết nối CDP mỗi lệnh)."""
+    """Đọc khay chip/ô cược và đặt chip trên bàn WM chỉ bằng WebSocket."""
 
     def __init__(self, session=None):
         self.session = session or BR.BrowserSession()
@@ -221,33 +208,11 @@ class WMBet:
                 except Exception:
                     pass
 
-    # ------------------------------------------------------------------ bấm chuột
-    def _click(self, command, box, pause=0.14):
-        """Bấm chuột thật tại tâm hộp (toạ độ đã quy về khung gốc)."""
-        x, y = float(box["cx"]), float(box["cy"])
-        command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y,
-                                             "buttons": 0})
-        command("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y,
-                                             "button": "left", "buttons": 1,
-                                             "clickCount": 1})
-        command("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y,
-                                             "button": "left", "buttons": 0,
-                                             "clickCount": 1})
-        time.sleep(pause)
-
-    def _park_mouse(self, command):
-        """Đưa con trỏ ra khỏi bàn cược để lớp hover không che khay chip."""
-        try:
-            command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 2, "y": 2,
-                                                 "button": "none", "buttons": 0})
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------ pha cược
     def wait_phase(self, deadline_seconds=40.0, poll=0.25):
-        """Chờ bàn mở cửa cược: khay chip bấm được (không bị lớp kết quả che).
+        """Chờ bàn mở cửa cược: khay chip hiển thị (không bị lớp kết quả che).
 
-        Đây là điều kiện thật của WM — chính client cũng chỉ bấm được khi lớp phủ kết quả
+        Đây là điều kiện thật của WM — chính client cũng chỉ gửi được khi lớp phủ kết quả
         đã tan. Dùng chung cho cả WebSocket: gửi lệnh sớm sẽ bị server trả ``bOk: false``.
         Không dựa vào class ``#opencard-wrapper`` vì nó có thể "on" suốt ván.
         """
@@ -256,17 +221,20 @@ class WMBet:
             state = self.read()
             if state.get("ok"):
                 chips = [chip for chip in state.get("chips") or [] if box_clickable(chip)]
-                if chips and any(hovered(chip) for chip in chips):
+                if chips and any(uncovered(chip) for chip in chips):
                     return state
             time.sleep(poll)
         return {}
 
     # ------------------------------------------------------------------ đặt cược
     def place(self, side, units, confirm=True, max_chips=20, wait_seconds=40.0,
-              settle_seconds=1.2, allow_short=False):
+              allow_short=False):
         """Đặt ``units`` (đơn vị sảnh, 1 đv = 1.000đ) vào cửa ``side`` (B/P/T).
 
         Trả dict ``{"ok", "placed", "total", "denominations", "error"}``.
+
+        Lệnh luôn đi qua WebSocket (``_place_ws``). ``confirm=False`` (chế độ "treo
+        chip chờ xác nhận" của đường chuột cũ) bị từ chối vì không còn tồn tại.
 
         ``allow_short`` = chế độ ALL-IN: số tiền không chia khít được bằng mệnh giá
         khay (ví dụ còn 636 mà khay chỉ có 10/20/50/100/500/1k/5k/10k) thì đặt mức lớn
@@ -282,163 +250,65 @@ class WMBet:
             return {"ok": False, "error": "Số tiền không hợp lệ: %r" % (units,)}
         if target <= 0:
             return {"ok": False, "error": "Số tiền phải lớn hơn 0."}
+        if not confirm:
+            return {"ok": False,
+                    "error": "Chỉ hỗ trợ đặt cược qua WebSocket (WM) — không còn chế độ "
+                             "treo chip chờ xác nhận."}
         all_in_note = ""
 
-        # Chờ đúng cửa sổ cược trước khi làm bất cứ điều gì (áp dụng cho cả WS và chuột).
+        # Chờ đúng cửa sổ cược trước khi gửi lệnh (server từ chối khi cửa đã đóng).
         phase = self.wait_phase(wait_seconds)
         if not phase:
             return {"ok": False, "error": "Bàn chưa mở cược trong %d giây." % int(wait_seconds)}
 
-        # Đường nhanh: gửi lệnh cược thẳng qua WebSocket (protocol 22). Không phụ thuộc
-        # khay chip/toạ độ nên không bị lớp phủ chia bài che. Chỉ dùng khi bàn đang sạch
-        # chip để không cộng dồn nhầm vào lệnh cũ.
-        if confirm:
-            fast = self._place_ws(side, target)
-            if fast is not None:
-                return fast
+        denominations = parse_denominations(phase.get("chips"))
+        plan = CHIPS.decompose(target, unit=1, denominations=denominations)
+        if (not plan.get("exact") or not plan.get("chips")) and allow_short:
+            # ALL-IN: không chia khít (ví dụ 636) → đặt mức lớn nhất ghép được (630).
+            short = CHIPS.affordable(target, unit=1, denominations=denominations)
+            if short > 0:
+                target = short
+                plan = CHIPS.decompose(target, unit=1, denominations=denominations)
+                all_in_note = (" · all-in %d đv (số dư không chia khít mệnh giá)" % target)
+        if not plan.get("exact") or not plan.get("chips"):
+            # Không gửi số lẻ khay không có: giữ nguyên tắc "không bao giờ đặt thiếu".
+            return {"ok": False, "denominations": denominations,
+                    "error": "Không chia được %d đv theo mệnh giá %s (còn %s đv)."
+                             % (target, denominations, plan.get("remainder_vnd"))}
+        if len(plan["chips"]) > max_chips:
+            return {"ok": False, "denominations": denominations,
+                    "error": "Cần %d mệnh giá (> %d) — dừng cho an toàn."
+                             % (len(plan["chips"]), max_chips)}
+        return self._place_ws(side, target, denominations, all_in_note)
 
-        import websocket
+    def _place_ws(self, side, target, denominations=None, all_in_note=""):
+        """Gửi lệnh cược qua WebSocket; không có socket thì trả lỗi rõ ràng.
 
-        page = self.session._cdp_page()
-        if page is None:
-            return {"ok": False, "error": "Không có tab WM trong Chrome."}
-        ws = None
-        placed = []
-        try:
-            ws = websocket.create_connection(
-                BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
-                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
-            command = self._command_factory(ws)
-            command("Runtime.enable")
-
-            def read():
-                value = command("Runtime.evaluate", {
-                    "expression": READ_JS, "returnByValue": True, "silent": True,
-                }).get("result", {}).get("value")
-                return value if isinstance(value, dict) and not value.get("reason") else {}
-
-            self._park_mouse(command)
-            # Bàn đã mở cược (wait_phase ở trên); đọc lại một lần cho toạ độ mới nhất.
-            state = read()
-            deadline = time.monotonic() + max(1.0, float(wait_seconds))
-            while time.monotonic() < deadline:
-                chips = [chip for chip in state.get("chips") or []
-                         if box_clickable(chip)]
-                if chips and any(hovered(chip) for chip in chips) and state.get("spots"):
-                    break
-                time.sleep(0.3)
-                state = read()
-            if not state:
-                return {"ok": False, "error": "Chưa đọc được bàn WM."}
-            spot = (state.get("spots") or {}).get(side)
-            if not box_clickable(spot):
-                return {"ok": False, "error": "Không thấy ô cược %s." % SIDE_NAME[side]}
-            denominations = parse_denominations(state.get("chips"))
-            plan = CHIPS.decompose(target, unit=1, denominations=denominations)
-            if (not plan.get("exact") or not plan.get("chips")) and allow_short:
-                # ALL-IN: không chia khít (ví dụ 636) → đặt mức lớn nhất ghép được (630).
-                short = CHIPS.affordable(target, unit=1, denominations=denominations)
-                if short > 0:
-                    target = short
-                    plan = CHIPS.decompose(target, unit=1, denominations=denominations)
-                    all_in_note = (" · all-in %d đv (số dư không chia khít mệnh giá)"
-                                   % target)
-            if not plan.get("exact") or not plan.get("chips"):
-                return {"ok": False, "denominations": denominations,
-                        "error": "Không chia được %d đv theo mệnh giá %s (thiếu %s đv)."
-                                 % (target, denominations, plan.get("remainder_vnd"))}
-            if len(plan["chips"]) > max_chips:
-                return {"ok": False, "denominations": denominations,
-                        "error": "Cần %d chip (> %d) — dừng cho an toàn."
-                                 % (len(plan["chips"]), max_chips)}
-
-            before = float(spot.get("my_bet") or 0)
-            running = before
-            by_value = {chip_value(chip.get("key")): chip
-                        for chip in state.get("chips") or []}
-            for value in plan["chips"]:
-                chip = by_value.get(value)
-                if not box_clickable(chip):
-                    self._undo(command, state, len(placed))
-                    return {"ok": False, "placed": placed, "denominations": denominations,
-                            "error": "Không bấm được chip %s." % value}
-                self._click(command, chip, pause=0.10)
-                self._click(command, spot, pause=0.16)
-                placed.append(value)
-                # Xác minh ngay sau từng chip: cửa sổ cược có thể đóng giữa chừng.
-                gained = self._wait_my_bet(command, read, side, running + value,
-                                           timeout=settle_seconds)
-                if gained is None:
-                    probe = read()
-                    self._undo(command, probe or state, len(placed))
-                    return {"ok": False, "placed": placed, "denominations": denominations,
-                            "error": "Ván đã đóng — chip không vào bàn (đã huỷ)."}
-                running = gained
-                spot = (read().get("spots") or {}).get(side) or spot
-
-            total = running
-            if abs(total - (before + target)) > 0.01:
-                probe = read()
-                self._undo(command, probe or state, len(placed))
-                return {"ok": False, "placed": placed, "denominations": denominations,
-                        "delta": total - before,
-                        "error": "Đặt lệch: cần %d, bàn ghi %g — đã huỷ."
-                                 % (target, total - before)}
-            if not confirm:
-                self._park_mouse(command)
-                return {"ok": True, "placed": placed, "total": total,
-                        "denominations": denominations, "confirmed": False,
-                        "note": "Chip đã treo trên bàn (chưa bấm xác nhận)."}
-            # Bấm xác nhận: chỉ lúc này sàn mới gửi protocol 22.
-            probe = read()
-            button = (probe or {}).get("betBtn")
-            if not box_clickable(button):
-                self._undo(command, probe or state, len(placed))
-                return {"ok": False, "placed": placed, "denominations": denominations,
-                        "error": "Không thấy nút xác nhận (đã huỷ chip)."}
-            self._click(command, button, pause=0.2)
-            time.sleep(0.8)
-            self._park_mouse(command)
-            after = read()
-            remaining = sum((s or {}).get("my_bet") or 0
-                            for s in (after.get("spots") or {}).values())
-            # Đường bấm chuột đã kiểm tra ``total`` khớp ``target`` trước khi tới đây,
-            # nên ``total`` chính là số THẬT đã vào bàn. Vẫn trả đúng số đó (thay vì
-            # ``target``) để lớp trên dùng được con số sàn xác nhận.
-            return {"ok": True, "placed": placed, "total": float(total),
-                    "denominations": denominations, "confirmed": True,
-                    "bet_area": BET_AREA[side], "my_bet_after": remaining,
-                            "note": ("Đã đặt %g đv vào %s." % (float(total),
-                                                              SIDE_NAME[side])
-                                     + all_in_note)}
-        except Exception as exc:
-            self.last_error = "Lỗi khi đặt chip (%s)." % type(exc).__name__
-            return {"ok": False, "placed": placed, "error": self.last_error}
-        finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-
-    def _place_ws(self, side, target):
-        """Thử đặt qua WebSocket; ``None`` nghĩa là không dùng được, hãy bấm chuột."""
+        Không còn đường bấm chuột: nếu socket của bàn chưa bắt được thì báo đúng lý do để
+        người dùng mở lại bàn/thử lại, thay vì âm thầm chuyển sang mô phỏng chuột.
+        """
         from aibcr.adapters.wm_ws import get_socket
 
+        denominations = list(denominations or [])
         socket = get_socket(self.session, start=False)
         if socket is None or not socket.ready():
-            return None
+            return {"ok": False, "denominations": denominations, "via": "ws",
+                    "error": "Chưa bắt được WebSocket của bàn WM — đặt cược chỉ hỗ trợ "
+                             "qua WebSocket. Mở lại bàn WM rồi thử lại."}
         current = self.read_bets()
         if not current.get("ok"):
-            return None
+            return {"ok": False, "denominations": denominations, "via": "ws",
+                    "error": "Chưa đọc được chip đang treo trên bàn WM (%s)."
+                             % (current.get("error") or "no_read")}
         if current.get("total"):
-            # Đang có chip treo: gửi thêm qua WS sẽ cộng dồn — để đường bấm chuột xử lý.
-            return None
+            return {"ok": False, "denominations": denominations, "via": "ws",
+                    "error": "Bàn còn %g đv chip đang treo — huỷ trước khi đặt tay mới."
+                             % float(current.get("total") or 0)}
         result = socket.place(side, target)
         if not result.get("ok"):
-            # Server từ chối/lỗi gửi: KHÔNG bỏ tay — rơi về bấm chuột (đường đã kiểm chứng
-            # với chính client của sàn, có đọc lại số tiền sau từng chip).
-            return None
+            return {"ok": False, "denominations": denominations, "via": "ws",
+                    "error": "WebSocket từ chối lệnh cược (%s)."
+                             % (result.get("error") or "no_reply")}
         # Xác minh bằng số chip thật đang treo trên bàn.
         deadline = time.monotonic() + 2.5
         placed = 0.0
@@ -449,72 +319,44 @@ class WMBet:
                 break
             time.sleep(0.2)
         if abs(placed - target) >= 0.01:
-            # Lệch: huỷ ngay bằng nút huỷ của bàn để không giữ lệnh sai.
+            # Lệch: huỷ ngay để không giữ lệnh sai.
             undo = self.cancel()
-            return {"ok": False, "placed": [], "denominations": current.get("denominations") or [],
+            return {"ok": False, "placed": [], "denominations": denominations,
                     "via": "ws", "error": "WS đặt lệch: cần %d, bàn ghi %g%s."
                              % (target, placed,
                                 " (đã huỷ)" if undo.get("ok") else " (chưa huỷ được!)")}
         return {"ok": True, "placed": [target], "total": placed, "via": "ws",
-                "denominations": current.get("denominations") or [],
+                "denominations": denominations,
                 "confirmed": True, "bet_area": BET_AREA[side],
-                "note": "Đã đặt %d đv vào %s qua WebSocket." % (target, SIDE_NAME[side])}
-
-    def _wait_my_bet(self, command, read, side, target, timeout=1.2):
-        """Chờ số tiền treo trên cửa đạt ``target``; trả tổng mới hoặc None nếu không lên."""
-        deadline = time.monotonic() + max(0.2, float(timeout))
-        while True:
-            state = read()
-            spot = (state.get("spots") or {}).get(side) or {}
-            total = float(spot.get("my_bet") or 0)
-            if total + 0.01 >= float(target):
-                return total
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.12)
-
-    def _undo(self, command, state, times):
-        """Bấm nút huỷ để trả chip về (mỗi cú bấm huỷ toàn bộ chip đang treo)."""
-        button = (state or {}).get("cancelBtn")
-        if not box_clickable(button):
-            return False
-        try:
-            self._click(command, button, pause=0.2)
-            self._park_mouse(command)
-            return True
-        except Exception:
-            return False
+                "note": "Đã đặt %d đv vào %s qua WebSocket.%s"
+                        % (target, SIDE_NAME[side], all_in_note)}
 
     def cancel(self):
-        """Huỷ toàn bộ chip đang treo trên bàn (nếu có)."""
+        """Huỷ toàn bộ chip đang treo trên bàn bằng nút huỷ (bấm trong trang).
+
+        Nút huỷ không phải thao tác đặt cược nên vẫn dùng ``element.click()`` trong trang;
+        không gửi sự kiện chuột CDP.
+        """
         state = self.read()
         if not state.get("ok"):
             return {"ok": False, "error": state.get("error") or "Chưa đọc được bàn."}
         if not state.get("my_bet"):
             return {"ok": True, "note": "Không có chip nào đang treo."}
-        import websocket
-
-        page = self.session._cdp_page()
-        ws = None
+        socket = getattr(self.session, "wm_socket", None)
+        if socket is None or getattr(socket, "_command", None) is None:
+            return {"ok": False, "error": "Không có kết nối CDP tới bàn WM để huỷ chip."}
         try:
-            ws = websocket.create_connection(
-                BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
-                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
-            command = self._command_factory(ws)
-            command("Runtime.enable")
-            done = self._undo(command, state, 1)
-            time.sleep(0.5)
-            after = self.read()
-            return {"ok": True, "cancelled": done,
-                    "my_bet_after": after.get("my_bet") if after.get("ok") else None}
+            value = socket.evaluate("(() => { const f = document.getElementById('iframe_101');"
+                                    " const d = f && f.contentDocument;"
+                                    " const b = d && d.getElementById('cancel_btn');"
+                                    " if (!b) return {ok: false, reason: 'cancel_missing'};"
+                                    " b.click(); return {ok: true}; })()")
         except Exception as exc:
             return {"ok": False, "error": "Lỗi khi huỷ chip (%s)." % type(exc).__name__}
-        finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+        time.sleep(0.5)
+        after = self.read()
+        return {"ok": True, "cancelled": bool(isinstance(value, dict) and value.get("ok")),
+                "my_bet_after": after.get("my_bet") if after.get("ok") else None}
 
     # ------------------------------------------------------------------ tiện ích
     def read_bets(self):

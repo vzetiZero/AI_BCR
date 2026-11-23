@@ -318,63 +318,6 @@ WM_TILES_JS = r"""(() => {
     };
 })()"""
 
-# Toạ độ bấm ô bàn theo tiền tố id (groupBac_<game>_<group>_).
-# Sảnh gắn lớp hiệu ứng (chia bài/hover) đè lên ô nên một điểm duy nhất có thể bị che:
-# JS thử nhiều điểm trong ô và trả điểm đầu tiên mà lớp trên cùng vẫn nằm trong ô, kèm
-# lệch iframe để bấm đúng toạ độ khung gốc.
-WM_TILE_BOX_JS = r"""(() => {
-    const prefix = %s;
-    let node = null;
-    for (const item of document.querySelectorAll('section.game_list.roomItem')) {
-        if ((item.id || '').startsWith(prefix)) { node = item; break; }
-    }
-    if (!node) return {reason: 'tile_missing'};
-    const rect = node.getBoundingClientRect();
-    let ox = 0, oy = 0, w = window, depth = 0;
-    while (w !== w.top) {
-        let el = null;
-        try { el = w.frameElement; } catch (e) { el = null; }
-        if (!el) { ox = oy = 0; break; }
-        const fr = el.getBoundingClientRect();
-        const st = w.parent.getComputedStyle(el);
-        const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
-        ox += fr.x + num(st.borderLeftWidth) + num(st.paddingLeft);
-        oy += fr.y + num(st.borderTopWidth) + num(st.paddingTop);
-        w = w.parent;
-        if (++depth > 8) { ox = oy = 0; break; }
-    }
-    // Thử lần lượt: giữa ô, rồi các điểm lệch (tránh lớp phủ hiệu ứng ở giữa).
-    const points = [
-        [0.5, 0.5], [0.5, 0.78], [0.22, 0.5], [0.78, 0.5],
-        [0.5, 0.25], [0.12, 0.82], [0.88, 0.82]
-    ];
-    const seen = [];
-    for (const [px, py] of points) {
-        const x = rect.x + rect.width * px, y = rect.y + rect.height * py;
-        if (x <= 0 || y <= 0 || x >= innerWidth || y >= innerHeight) continue;
-        const hit = document.elementFromPoint(x, y);
-        seen.push((hit && (hit.id || '') + '.' + (hit.className || '').toString().slice(0, 24)) || '');
-        if (hit && node.contains(hit)) {
-            return {x: x + ox, y: y + oy, w: rect.width, h: rect.height,
-                    top: rect.top, bottom: rect.bottom, inside: true,
-                    vh: innerHeight, hit: seen[seen.length - 1]};
-        }
-    }
-    return {
-        x: rect.x + rect.width / 2 + ox, y: rect.y + rect.height / 2 + oy,
-        w: rect.width, h: rect.height, top: rect.top, bottom: rect.bottom,
-        inside: false,
-        // Ô nằm trong khung nhìn nhưng có lớp phủ (nhãn "Xử lý", badge, tooltip) che
-        // tâm → elementFromPoint trả lớp phủ chứ không phải ô. Vẫn bấm được (cú bấm
-        // xuyên qua lớp phủ) nên báo riêng để lớp trên không cuộn vô hạn.
-        center_visible: (rect.x + rect.width / 2 > 0
-                         && rect.y + rect.height / 2 > 0
-                         && rect.x + rect.width / 2 < innerWidth
-                         && rect.y + rect.height / 2 < innerHeight),
-        vh: innerHeight, hits: seen
-    };
-})()"""
-
 # Đưa ô bàn vào giữa khung danh sách bằng chính thanh cuộn của sảnh (không dùng
 # scrollIntoView vì trang cuộn cả khung ngoài và làm lệch toạ độ bấm).
 WM_SCROLL_TO_TILE_JS = r"""(() => {
@@ -641,14 +584,8 @@ WM_WALLET_JS = r"""(() => {
     return {reason: 'no_wallet'};
 })()"""
 
-# Nút thoát bàn của WM nằm ở khung gốc (góc phải trên) — đo rồi bấm chuột thật.
-WM_EXIT_JS = r"""(() => {
-    const btn = document.getElementById('exit_game_btn');
-    if (!btn) return {reason: 'exit_missing'};
-    const rect = btn.getBoundingClientRect();
-    if (rect.width < 4 || rect.height < 4) return {reason: 'exit_hidden'};
-    return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
-})()"""
+# Nút thoát bàn của WM nằm ở khung gốc (góc phải trên). Bấm bằng ``element.click()``
+# trong trang nên không cần đo toạ độ — xem ``lobby_stream.WM_EXIT_CLICK_JS``.
 
 # Trạng thái bàn: bảng cầu lớn đã vẽ (để biết trang bàn đã render) và đồng hồ cược.
 WM_TABLE_DOM_JS = r"""(() => {

@@ -32,7 +32,7 @@ BET_GATE_POLL = 0.3
 # LiveSimulation.mark_placed), nhưng bỏ quá nhiều tay liên tiếp nghĩa là bàn đang đặt
 # không được chút nào — dừng để người dùng nhìn thấy thay vì bỏ tay mãi.
 PLACE_SKIP_LIMIT = 3
-# Trần thời gian một lượt bấm chip còn được coi là "đang chạy" (gate chờ ván mới 20s +
+# Trần thời gian một lượt đặt cược còn được coi là "đang chạy" (gate chờ ván mới 20s +
 # vài giây bấm/đọc chip). Quá hạn mà chưa có xác nhận thì coi như không đặt được — nhờ
 # vậy thread chết giữa chừng không khiến việc tính tay bị treo vĩnh viễn.
 PLACE_CONFIRM_TIMEOUT = 60.0

@@ -18,8 +18,8 @@ lần lúc tải trang. Vì vậy module này chạy một thread giữ kết n�
 kết nối đó để gửi lệnh và đọc phản hồi. Sàn giữ nhiều socket (bàn cũ chưa đóng), nên
 socket được chọn theo ``groupID`` khớp bàn đang mở (``#container`` của iframe bàn).
 
-Không có socket thì ``WMBet`` tự quay về đường bấm chuột — tính năng đặt cược không bao
-giờ phụ thuộc duy nhất vào WebSocket.
+Đây là **đường đặt cược duy nhất** của app: không có socket thì ``WMBet`` báo lỗi rõ
+ràng, không mô phỏng chuột.
 """
 
 import json
@@ -303,24 +303,6 @@ class WMSocket(threading.Thread):
             }, timeout)
         return (result or {}).get("result", {}).get("value")
 
-    def click_at(self, x, y, pause=0.0):
-        """Bấm chuột thật tại toạ độ khung gốc bằng kết nối CDP dùng chung.
-
-        Dùng chung kết nối với hook thay vì mở kết nối mới mỗi lần bấm: mở/đóng CDP liên
-        tục làm tab chậm và dễ timeout.
-        """
-        with self.lock:
-            self._command_locked("Input.dispatchMouseEvent",
-                                 {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
-            self._command_locked("Input.dispatchMouseEvent",
-                                 {"type": "mousePressed", "x": x, "y": y, "button": "left",
-                                  "buttons": 1, "clickCount": 1})
-            self._command_locked("Input.dispatchMouseEvent",
-                                 {"type": "mouseReleased", "x": x, "y": y, "button": "left",
-                                  "buttons": 0, "clickCount": 1})
-        if pause:
-            time.sleep(pause)
-
     def state(self, fresh=False):
         """Ảnh chụp hook (đọc trực tiếp nếu ``fresh`` hoặc cache đã cũ)."""
         with self.lock:
@@ -399,8 +381,8 @@ class WMSocket(threading.Thread):
         """Kết nối + cài hook. Chỉ nạp lại khung khi ``reload_on_start`` cho phép.
 
         Nạp lại khung bàn sẽ làm bàn nháy và có thể mất trạng thái cược, nên khi đang đứng
-        trong bàn (``reload_on_start=False``) ta chỉ cài hook sẵn và để đường bấm chip
-        xử lý — không đụng vào bàn đang theo dõi.
+        trong bàn (``reload_on_start=False``) ta chỉ cài hook sẵn — lần vào bàn sau socket
+        sẽ được bắt và lệnh cược đi qua WebSocket.
         """
         if not self._connect():
             return False
@@ -436,7 +418,7 @@ class WMSocket(threading.Thread):
         """Vòng nền: giữ hook sống và bắt socket khi bàn được mở lại.
 
         Không tải lại tab (sẽ mất bàn). Chỉ báo trạng thái một lần để log không spam khi
-        socket chưa sẵn sàng và cược đang đi bằng đường bấm chip.
+        socket chưa sẵn sàng.
         """
         warned = False
         while not self.stop_event.is_set():
@@ -459,7 +441,8 @@ class WMSocket(threading.Thread):
                                      "win")
                         warned = False
                 elif not warned:
-                    self._status("Cược bằng bấm chip (chưa bắt được socket WM).", "info")
+                    self._status("Chưa bắt được socket WM — đặt cược tạm khoá tới khi "
+                                 "socket sẵn sàng.", "info")
                     warned = True
                 self.stop_event.wait(0.5)
             except Exception as exc:

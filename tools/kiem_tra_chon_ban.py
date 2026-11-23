@@ -9,7 +9,7 @@ Cách dùng (Chrome đang mở sảnh Baccarat với CDP 9222):
 
 Không còn điều kiện lọc cầu: bàn nào có mã bàn thì vào bàn đó. --vao-ban dùng đúng
 quy trình của nút “VÀO BÀN HỢP LỆ” nhưng dừng ở bước đọc được cầu: không arm kế
-hoạch, không bấm chip.
+hoạch, không đặt cược.
 """
 
 import argparse
