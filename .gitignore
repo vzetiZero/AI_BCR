@@ -43,7 +43,7 @@ backtest_report.txt
 ui/node_modules/
 ui/dist/
 
-# Ban dong goi portable (nang ~1GB) - tao bang dong-goi-portable.ps1
+# Thu muc ket qua build (nang, khong commit)
 build/
 dist/
 runtime/

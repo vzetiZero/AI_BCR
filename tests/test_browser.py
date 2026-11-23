@@ -113,25 +113,7 @@ class ProbeTests(unittest.TestCase):
         self.assertFalse(BR.BrowserSession._port_open(free_port, timeout=0.4))
 
 
-class BundledRuntimeTests(unittest.TestCase):
-    """Bản portable mang sẵn runtime/chrome: phải nhận đúng file đi kèm, không lẫn
-    Chrome của máy (driver đi kèm khớp đúng bản Chrome trong gói)."""
-
-    def test_driver_candidates_include_bundled_folder(self):
-        self.assertTrue(any("runtime" in p and "chromedriver" in p
-                            for p in BR.DRIVER_CANDIDATES))
-        self.assertTrue(any("runtime" in p and "chrome.exe" in p
-                            for p in BR.BUNDLED_CHROME_CANDIDATES))
-
-    def test_host_chrome_would_be_ignored_when_bundled_exists(self):
-        with patch.object(BR.os.path, "isfile", return_value=True):
-            self.assertEqual(BR.chrome_path(), BR.BUNDLED_CHROME_CANDIDATES[0])
-
-    def test_driver_for_accepts_bundled_driver_without_host_chrome(self):
-        with patch.object(BR, "chrome_version", return_value=""), \
-             patch.object(BR, "driver_version", return_value="157.0.8103.79"):
-            self.assertEqual(BR.driver_for()[0], "local", "driver đi kèm phải dùng được ngay")
-
+class DriverForTests(unittest.TestCase):
     def test_driver_for_falls_back_when_versions_differ(self):
         with patch.object(BR, "chrome_version", return_value="140.0.1.2"), \
              patch.object(BR, "driver_version", return_value="157.0.8103.79"):
