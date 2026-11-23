@@ -113,6 +113,67 @@ class CurrentTableTests(unittest.TestCase):
         state = self._state(frames, group=None)
         self.assertEqual(wm_ws.current_table(state)[0], 1)
 
+    def test_uses_embedded_wm_socket_when_no_same_origin_frame(self):
+        """WM nhúng khác origin: socket bàn nằm ở khung nhúng, không có 'iframe'."""
+        frames = [{"socket": 0, "at": 9000, "data": {"groupID": 1352, "gameNo": 3}}]
+        state = {"recent21": frames, "open_group": 1352, "states": [1],
+                 "scopes": {0: "oopif"}}
+        index, data, _at = wm_ws.current_table(state)
+        self.assertEqual(index, 0)
+        self.assertEqual(data["gameNo"], 3)
+
+    def test_same_origin_frame_socket_beats_embedded_one(self):
+        frames = [
+            {"socket": 0, "at": 9000, "data": {"groupID": 1352}},  # oopif
+            {"socket": 1, "at": 1000, "data": {"groupID": 1352}},  # iframe bàn
+        ]
+        state = {"recent21": frames, "open_group": 1352, "states": [1, 1],
+                 "scopes": {0: "oopif", 1: "iframe"}}
+        self.assertEqual(wm_ws.current_table(state)[0], 1)
+
+
+class MergeStatesTests(unittest.TestCase):
+    """Gộp hook của tab cổng + target iframe khác origin, giữ đúng chỉ số socket."""
+
+    def test_offsets_routes_and_scopes(self):
+        page = {"installed": True, "urls": ["wss://portal/ws"], "states": [1],
+                "scopes": {0: "top"}, "protocols": {0: 21},
+                "recent21": [{"socket": 0, "at": 100, "data": {"groupID": 7}}],
+                "sent": [], "errors": [], "open_group": 7}
+        oopif = {"installed": True, "urls": ["wss://wm/a", "wss://wm/b"],
+                 "states": [1, 3], "scopes": {0: "iframe", 1: "iframe"},
+                 "protocols": {0: 21}, "recent21": [
+                     {"socket": 1, "at": 50, "data": {"groupID": 7}}],
+                 "sent": [], "errors": [], "open_group": 7}
+        merged = wm_ws.merge_states([("oopif", oopif), ("page", page)])
+        self.assertEqual(merged["urls"],
+                         ["wss://wm/a", "wss://wm/b", "wss://portal/ws"])
+        # Socket của khung nhúng được đánh dấu riêng, socket khung gốc giữ 'top'.
+        self.assertEqual(merged["scopes"][0], "iframe")
+        self.assertEqual(merged["scopes"][2], "top")
+        self.assertEqual(merged["routes"], ["oopif", "oopif", "page"])
+        self.assertEqual(merged["locals"], [0, 1, 0])
+        # Chỉ số khung nhúng được dồn tiếp sau khung trước khi gộp.
+        self.assertEqual([item["socket"] for item in merged["recent21"]], [1, 2])
+        self.assertEqual(merged["open_group"], 7)
+        self.assertTrue(merged["installed"])
+
+    def test_closed_socket_states_survive(self):
+        merged = wm_ws.merge_states([("page", {"states": [1, 3], "scopes": {}})])
+        self.assertEqual(merged["states"], [1, 3])
+        self.assertEqual(merged["scopes"][0], None)
+        self.assertFalse(merged["installed"])
+
+
+class SocketInstallJsTests(unittest.TestCase):
+    def test_install_hook_covers_every_iframe(self):
+        """Bàn có thể nằm ở iframe không tên iframe_101 → phải quét mọi iframe."""
+        self.assertIn("querySelectorAll('iframe')", wm_ws.INSTALL_TABLE_JS)
+
+    def test_reload_targets_are_reported_not_swallowed(self):
+        self.assertIn("no_table_frame", wm_ws.RELOAD_TABLE_JS)
+        self.assertIn("iframe_101", wm_ws.TABLE_FRAME_PICKER_JS)
+
 
 class ClickableTests(unittest.TestCase):
     def test_requires_real_size(self):

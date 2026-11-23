@@ -120,5 +120,35 @@ class DriverForTests(unittest.TestCase):
             self.assertEqual(BR.driver_for()[0], "auto")
 
 
+class ScanStaysOnCdpTests(unittest.TestCase):
+    """Quét không được kéo cửa sổ Chrome lên trước (không giành tiêu điểm)."""
+
+    def test_scan_uses_cdp_even_when_a_webdriver_session_exists(self):
+        session = BR.BrowserSession()
+        session.driver = type("Driver", (), {"window_handles": ["h1"]})()
+        calls = {}
+        session._scan_cdp = lambda: (calls.__setitem__("cdp", True), [])[1]
+        session._probe_wm_pages = lambda: False
+        with patch.object(BR.BrowserSession, "_cdp_scannable", return_value=True):
+            session.scan()
+        self.assertTrue(calls.get("cdp"), "phải đọc bằng CDP, không dùng WebDriver")
+
+    def test_scan_falls_back_to_webdriver_when_cdp_is_unreachable(self):
+        session = BR.BrowserSession()
+        session.driver = type("Driver", (), {"window_handles": ["h1"]})()
+        seen = []
+        with patch.object(BR.BrowserSession, "_probe_wm_pages", return_value=False), \
+             patch.object(BR.BrowserSession, "_cdp_scannable", return_value=False), \
+             patch.object(BR.BrowserSession, "_select_root",
+                          side_effect=lambda driver: seen.append(True) or None):
+            self.assertEqual(session.scan(), [])
+        self.assertTrue(seen, "CDP không dùng được thì mới quay lại WebDriver")
+
+    def test_cdp_scannable_is_false_when_port_is_closed(self):
+        session = BR.BrowserSession()
+        with patch.object(BR.BrowserSession, "_cdp_page", side_effect=OSError("closed")):
+            self.assertFalse(session._cdp_scannable())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -252,10 +252,25 @@ khi chưa bật tool.
    "betArr": [{"betArea", "addBetMoney"}], "commission": 0, "remark": "1,0"}` với
    `betArea` 1 = Banker, 2 = Player, 3 = Hoà. Server trả `{"protocol": 22, "bOk": true}` là
    lệnh đã vào; `bOk: false` thì báo lỗi — **không rơi về bấm chuột**.
-   Hook được cài bằng `Page.addScriptToEvaluateOnNewDocument`, **không bao giờ tải lại
-   tab** (tải lại sẽ đẩy Chrome về sảnh và mất bàn đang đứng). Socket chọn theo `groupID`
-   khớp bàn đang mở **và** phải thuộc iframe bàn — socket khung gốc nhận được dữ liệu bàn
-   nhưng server từ chối lệnh cược gửi từ đó.
+   Hook được cài bằng `Page.addScriptToEvaluateOnNewDocument` **và** chạy ngay trong
+   document đang sống, cho **mọi khung**; **không bao giờ tải lại tab** (tải lại sẽ đẩy
+   Chrome về sảnh và mất bàn đang đứng). Socket chọn theo `groupID` khớp bàn đang mở,
+   ưu tiên socket của iframe bàn — socket khung gốc nhận được dữ liệu bàn nhưng server
+   từ chối lệnh cược gửi từ đó.
+
+   **WM nhúng KHÁC ORIGIN (OOPIF)** — kiểu `https://m.9vnv.com/vn/wm_casino` bọc
+   `wmvn.m8810.com` — là trường hợp hay làm app “vào bàn mà không đặt được chip”: tab
+   cổng không đọc được `iframe.contentDocument` và `Network.enable` của tab mẹ **không**
+   thấy WebSocket bên trong. Vì vậy `WMSocket` gắn thêm `Target.attachToTarget` vào target
+   iframe (target `iframe` trong `Target.getTargets`), cài hook ngay trong đó, rồi gộp
+   trạng thái hai khung lại (`merge_states`) — chỉ số socket được dồn tiếp và mỗi socket
+   nhớ khung của nó (`routes`/`locals`), nên lệnh cược đi đúng khung.
+
+   **Bàn mở trước khi cài hook** (socket cũ không bắt được): `rescue_table` nạp lại
+   **riêng khung bàn** một lần cho đúng bàn đó (hoặc chính khung WM khi là OOPIF) để tạo
+   socket mới — không đụng tab/sảnh/nút thoát bàn, tối đa một lần mỗi bàn và cách nhau
+   10 giây. Hook cũng được cài lại ngay khi sự kiện `table_opened` xảy ra, không chỉ lúc
+   đứng ở sảnh.
 3. **Xác minh** bằng số chip thật đang treo trên bàn (`mybet_money`): lệch là huỷ ngay và
    báo lỗi, không giữ lệnh sai.
 4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng

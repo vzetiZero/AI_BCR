@@ -35,16 +35,34 @@ DONG_PER_UNIT = 1000.0
 # Đọc trạng thái bàn (khay chip, ô cược, số tiền đang treo, số dư, pha cược). Kích thước
 # (``w``/``h``) và phần tử nằm trên tâm được trả về để biết khu vực cược đã render và
 # không bị lớp kết quả che — chỉ để ĐỌC, không dùng để bấm.
+# Bàn có thể nằm trong iframe_101 (bản nhiều khung) hoặc ngay trong khung gốc (bản
+# một-document), nên chọn document có khay chip thay vì chỉ tìm iframe_101.
 READ_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
-    if (!frame) return {reason: 'no_table_frame'};
-    const fs = getComputedStyle(frame);
-    const fr = frame.getBoundingClientRect();
-    if (fs.display === 'none' || fs.visibility === 'hidden' || fr.width < 10)
-        return {reason: 'table_hidden'};
-    let doc = null;
-    try { doc = frame.contentDocument; } catch (e) { return {reason: 'cross_origin'}; }
-    if (!doc) return {reason: 'no_document'};
+    const candidates = [];
+    const push = (doc, inside) => {
+        if (!doc) return;
+        let box = null;
+        try { box = doc.getElementById('chip_box') || doc.getElementById('container'); }
+        catch (e) { return; }
+        if (!box) return;
+        // Ưu tiên document có khay chip thật (bàn đang vẽ), rồi mới tới #container.
+        const score = (doc.getElementById('chip_box') ? 2 : 0)
+                    + (doc.getElementById('playbetboxBanker') ? 1 : 0);
+        candidates.push({doc: doc, inside: inside, score: score});
+    };
+    for (const id of ['iframe_101']) {
+        const frame = document.getElementById(id);
+        if (!frame) continue;
+        try { push(frame.contentDocument, true); } catch (e) {}
+    }
+    for (const frame of document.querySelectorAll('iframe')) {
+        try { push(frame.contentDocument, true); } catch (e) {}
+    }
+    push(document, false);
+    if (!candidates.length) return {reason: 'no_table_frame'};
+    candidates.sort((a, b) => b.score - a.score);
+    const picked = candidates[0];
+    const doc = picked.doc;
     const box = (el) => {
         const r = el.getBoundingClientRect();
         const hit = doc.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
@@ -72,14 +90,35 @@ READ_JS = r"""(() => {
                                      chips: holder ? holder.children.length : 0},
                                     box(el));
     }
-    const wallet = document.getElementById('menu_ver2_balance');
+    // Ví hiển thị ở khung gốc (``#menu_ver2_balance``) hoặc trong khung bàn
+    // (``#userBalanceBox`` in "VNDK 80.84"); thử cả hai, chỉ để đọc.
+    const walletEl = doc.getElementById('menu_ver2_balance')
+        || document.getElementById('menu_ver2_balance')
+        || doc.getElementById('userBalanceBox');
     const countdown = doc.getElementById('countdown');
     return {
-        chips, spots,
+        chips, spots, in_iframe: picked.inside,
         open_result: !!doc.querySelector('#opencard-wrapper.wrapper.on'),
         countdown: countdown ? (countdown.className || '').toString() : '',
-        wallet: wallet ? (wallet.textContent || '').replace(/\s+/g, ' ').trim() : ''
+        wallet: walletEl ? (walletEl.textContent || '').replace(/\s+/g, ' ').trim() : ''
     };
+})()"""
+
+# Bấm nút huỷ chip trong đúng document đang vẽ bàn (iframe hoặc một-document).
+CANCEL_JS = r"""(() => {
+    const docs = [document];
+    const frame = document.getElementById('iframe_101');
+    if (frame) { try { if (frame.contentDocument) docs.unshift(frame.contentDocument); } catch (e) {} }
+    for (const f of document.querySelectorAll('iframe')) {
+        try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+    }
+    for (const doc of docs) {
+        const btn = doc.getElementById('cancel_btn') || doc.querySelector('#cancel_btn, .cancel_btn');
+        if (!btn) continue;
+        btn.click();
+        return {ok: true};
+    }
+    return {ok: false, reason: 'cancel_missing'};
 })()"""
 
 
@@ -181,32 +220,55 @@ class WMBet:
         return value
 
     def _read_once(self):
-        """Đọc trạng thái qua một kết nối CDP riêng (dự phòng khi chưa có WMSocket)."""
+        """Đọc trạng thái qua một kết nối CDP riêng (dự phòng khi chưa có WMSocket).
+
+        WM nhúng KHÁC ORIGIN không đọc được từ tab cổng (``iframe.contentDocument`` bị
+        chặn), nên khi tab không thấy bàn thì thử gắn thẳng vào target iframe WM.
+        """
         import websocket
 
+        value = None
         page = self.session._cdp_page()
         if page is None:
             self.last_error = "Không có tab WM trong Chrome."
-            return None
-        ws = None
+        else:
+            ws = None
+            try:
+                ws = websocket.create_connection(
+                    BR.validated_endpoint(page), suppress_origin=True,
+                    timeout=BR.SCRIPT_TIMEOUT, redirect_limit=0,
+                    http_no_proxy=["127.0.0.1", "localhost", "::1"])
+                command = self._command_factory(ws)
+                command("Runtime.enable")
+                value = command("Runtime.evaluate", {
+                    "expression": READ_JS, "returnByValue": True, "silent": True,
+                }).get("result", {}).get("value")
+            except Exception as exc:
+                self.last_error = "Không đọc được bàn WM (%s)." % type(exc).__name__
+                value = None
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+        if isinstance(value, dict) and not value.get("reason"):
+            return value
+        if not str(getattr(self.session, "wm_oopif_target", "") or ""):
+            return value
+        from aibcr.adapters import wm_targets as WT
         try:
-            ws = websocket.create_connection(
-                BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
-                redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
-            command = self._command_factory(ws)
-            command("Runtime.enable")
-            return command("Runtime.evaluate", {
-                "expression": READ_JS, "returnByValue": True, "silent": True,
-            }).get("result", {}).get("value")
-        except Exception as exc:
-            self.last_error = "Không đọc được bàn WM (%s)." % type(exc).__name__
-            return None
+            socket_ = WT.open_frame_socket(BR.CDP_PORT, timeout=BR.SCRIPT_TIMEOUT)
+        except Exception:
+            return value
+        try:
+            socket_.command("Runtime.enable")
+            inner = socket_.evaluate(READ_JS)
+            return inner if isinstance(inner, dict) else value
+        except Exception:
+            return value
         finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+            socket_.close()
 
     # ------------------------------------------------------------------ pha cược
     def wait_phase(self, deadline_seconds=40.0, poll=0.25):
@@ -346,11 +408,7 @@ class WMBet:
         if socket is None or getattr(socket, "_command", None) is None:
             return {"ok": False, "error": "Không có kết nối CDP tới bàn WM để huỷ chip."}
         try:
-            value = socket.evaluate("(() => { const f = document.getElementById('iframe_101');"
-                                    " const d = f && f.contentDocument;"
-                                    " const b = d && d.getElementById('cancel_btn');"
-                                    " if (!b) return {ok: false, reason: 'cancel_missing'};"
-                                    " b.click(); return {ok: true}; })()")
+            value = socket.evaluate(CANCEL_JS)
         except Exception as exc:
             return {"ok": False, "error": "Lỗi khi huỷ chip (%s)." % type(exc).__name__}
         time.sleep(0.5)

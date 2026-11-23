@@ -1340,21 +1340,32 @@ class BaccaratController:
         return {"ok": True, "note": "Tool đang chạy · đang tự vào bàn và đặt cược."}
 
     def _wm_prepare_socket(self):
-        """Cài hook WebSocket của WM — **không bao giờ tải lại tab**.
+        """Cài hook WebSocket của WM — **không bao giờ tải lại TAB**.
 
-        Tải lại tab sẽ đẩy Chrome về sảnh và làm mất bàn đang đứng, nên hook chỉ được cài
-        sẵn; khi socket chưa bắt được thì đặt cược tạm khoá (báo lỗi rõ ràng) cho tới khi
-        vào lại bàn — app không còn đường bấm chip nào để dự phòng. Không có trường hợp
-        nào tự đổi trang.
+        Tải lại tab sẽ đẩy Chrome về sảnh và làm mất bàn đang đứng. Khi bàn đã mở trước
+        lúc cài hook (socket cũ không bắt được), thread socket tự nạp lại **riêng khung
+        bàn** một lần cho đúng bàn đó — xem ``WMSocket.rescue_table``. Nếu vẫn không có
+        socket thì đặt cược tạm khoá (báo lỗi rõ ràng); app không còn đường bấm chip nào
+        để dự phòng và không tự đổi trang.
         """
         from aibcr.adapters.wm_ws import get_socket
 
+        if not (getattr(self.browser, "wm_page_id", None)
+                or getattr(self.browser, "wm_oopif_target", "")):
+            # Không phải WM (hoặc chưa nhận ra tab WM): không có gì để bắt.
+            return
         socket = get_socket(self.browser, start=False, reload_on_start=False,
                             on_status=lambda text, level="info": self.log(text, level))
         if not socket.is_alive():
             socket.start()
-        if socket.ready():
-            self.log("WM: socket sẵn sàng · đặt cược gửi thẳng qua WebSocket.", "win")
+        # Chờ để kịp bắt socket của bàn vừa mở: khi bàn mở trước hook, thread socket sẽ
+        # tự nạp lại riêng khung bàn và tạo socket mới.
+        was_ready = socket.ready()
+        if was_ready or socket.wait_ready(20.0):
+            if was_ready:
+                self.log("WM: socket sẵn sàng · đặt cược gửi thẳng qua WebSocket.", "win")
+            else:
+                self.log("WM: đã bắt socket của bàn · cược đi qua WebSocket.", "win")
         else:
             self.log("WM: chưa bắt được socket — đặt cược tạm khoá tới khi vào lại bàn.",
                      "info")
@@ -2151,6 +2162,14 @@ class BaccaratController:
                 self.chip_read_at = 0.0
                 self.last_order = None
                 self.log("Đã mở bàn %s." % self.tables[key]["label"])
+                # Bàn vừa mở: cài hook + bắt socket NGAY cho bàn này. Nếu chỉ cài lúc
+                # đứng ở sảnh, socket của bàn (hoặc khung nhúng khác origin) có thể đã
+                # được tạo trước khi hook chạy → app đọc/phân tích được mà không đặt
+                # được chip. Chạy nền để không chặn vòng sự kiện; chỉ áp dụng cho WM
+                # (EVO/Petalive không đặt cược qua WebSocket).
+                if getattr(self.browser, "wm_page_id", None):
+                    threading.Thread(target=self._wm_prepare_socket, daemon=True,
+                                     name="ba-wm-socket-table").start()
             elif not ok:
                 if self._auth_blame():
                     self._session_lost(note)

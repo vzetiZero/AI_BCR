@@ -566,6 +566,18 @@ class BrowserSession:
                 return page
         return pages[0] if pages else None
 
+    def _cdp_scannable(self):
+        """CDP 9222 đang trả về một tab hợp lệ để đọc?
+
+        Dùng để chọn đường đọc: WebDriver chỉ là đường dự phòng, vì mỗi lệnh
+        ``switch_to.window``/``switch_to.frame`` của chromedriver đều kích hoạt cửa sổ
+        Chrome (kéo nó lên trước, giành tiêu điểm). CDP chỉ đọc DOM nên không làm vậy.
+        """
+        try:
+            return self._cdp_page() is not None
+        except Exception:
+            return False
+
     def attach(self):
         """Gắn Chrome hiện có qua CDP; không mở, đóng hay điều hướng tab."""
         with self.lock:
@@ -1822,10 +1834,16 @@ class BrowserSession:
         return True
 
     def scan(self):
-        """Chỉ đọc tab được phép, tối đa 64 context; WebDriver sâu 4 iframe."""
+        """Chỉ đọc tab được phép, tối đa 64 context; WebDriver sâu 4 iframe.
+
+        Luôn ưu tiên CDP, kể cả khi Chrome do app mở bằng WebDriver: gọi WebDriver
+        ``switch_to.window``/``switch_to.frame`` làm chromedriver kích hoạt cửa sổ
+        Chrome, tức là mỗi lượt quét lại kéo Chrome lên trước và bạn không bấm được
+        cửa sổ khác trong lúc app chạy. CDP chỉ đọc DOM, không giành tiêu điểm.
+        """
         self._probe_wm_pages()
         with self.lock:
-            if self.cdp_attached:
+            if self.cdp_attached or self._cdp_scannable():
                 return self._scan_cdp()
             self.last_frames = 0
             self.last_diag = {}

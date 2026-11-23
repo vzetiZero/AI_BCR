@@ -13,10 +13,14 @@ Bàn WM nói chuyện với server bằng khung **nhị phân** chứa JSON, m�
 đúng 10 (10.000đ) và chip hiện trên ô Player.
 
 Muốn gửi lệnh thì phải giữ được instance ``WebSocket`` của trang, mà socket chỉ tạo một
-lần lúc tải trang. Vì vậy module này chạy một thread giữ kết nối CDP: cài hook
-``WebSocket``, tải lại tab một lần nếu cần (hook chỉ ăn từ document mới), rồi giữ nguyên
-kết nối đó để gửi lệnh và đọc phản hồi. Sàn giữ nhiều socket (bàn cũ chưa đóng), nên
-socket được chọn theo ``groupID`` khớp bàn đang mở (``#container`` của iframe bàn).
+lần lúc trang tải. Vì vậy module này chạy một thread giữ kết nối CDP: cài hook
+``WebSocket`` cho tab và mọi iframe cùng origin — hoặc cho đúng target iframe khi WM được
+nhúng KHÁC ORIGIN (OOPIF, kiểu ``9vnv.com/vn/wm_casino`` bọc ``wmvn.m8810.com``) — rồi
+giữ kết nối đó để gửi lệnh và đọc phản hồi. Hook chỉ bọc được socket tạo **sau** khi nó
+chạy, nên khi người dùng đã ở trong bàn từ trước (socket cũ) module nạp lại **riêng khung
+bàn** một lần — không tải lại tab, không đẩy Chrome về sảnh. Sàn giữ nhiều socket (bàn cũ
+chưa đóng), nên socket được chọn theo ``groupID`` khớp bàn đang mở (``#container``) và ưu
+tiên socket của iframe bàn.
 
 Đây là **đường đặt cược duy nhất** của app: không có socket thì ``WMBet`` báo lỗi rõ
 ràng, không mô phỏng chuột.
@@ -101,54 +105,116 @@ HOOK_JS = r"""(() => {
 })()"""
 
 # Cài hook vào iframe bàn hiện tại (iframe có thể đã tồn tại trước khi cài hook).
+# Quét MỌI iframe cùng origin, không chỉ ``iframe_101``: mirror đổi id/tên khung, và
+# bàn có thể được vẽ trong khung khác. Khung khác origin thì truy cập bị chặn → bỏ qua.
 INSTALL_TABLE_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
-    if (!frame || !frame.contentWindow) return 'no_frame';
-    try {
-        const child = frame.contentWindow;
-        const factory = window.__wmMakeHook;
-        if (typeof factory !== 'function') return 'no_factory';
-        if (!child.__wmHook3) {
-            child.__wmHook3 = {sockets: [], urls: [], protocols: {}, recent21: [],
-                               last22: null, sent: [], errors: [], scope: {}, top: false};
-        }
-        factory(child, child.__wmHook3, 'iframe');
-        return 'ok';
-    } catch (e) { return 'err:' + String(e).slice(0, 60); }
+    const factory = window.__wmMakeHook;
+    if (typeof factory !== 'function') return 'no_factory';
+    const hookFrame = (frame) => {
+        let child = null;
+        try { child = frame && frame.contentWindow; } catch (e) { return 0; }
+        if (!child) return 0;
+        try {
+            const hook = child.__wmHook3 || {sockets: [], urls: [], protocols: {},
+                recent21: [], last22: null, sent: [], errors: [], scope: {}, top: false};
+            child.__wmHook3 = hook;
+            factory(child, hook, 'iframe');
+            return 1;
+        } catch (e) { return 0; }
+    };
+    let hooked = 0;
+    for (const frame of document.querySelectorAll('iframe')) hooked += hookFrame(frame);
+    return 'ok:' + hooked;
 })()"""
 
-# Nạp lại iframe bàn để nó tạo socket MỚI (socket cũ tạo trước khi cài hook nên không
-# bắt được). Chỉ nạp lại iframe — không đụng khung ngoài, bàn vẫn y nguyên.
-RELOAD_TABLE_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
-    if (!frame || !frame.contentWindow) return 'no_frame';
+# Nạp lại RIÊNG khung bàn để nó tạo socket MỚI (socket cũ tạo trước khi cài hook nên
+# không bắt được). Không đụng tab/sảnh: tab và nút thoát bàn giữ nguyên.
+TABLE_FRAME_PICKER_JS = r"""
+    const tableFrame = () => {
+        const byId = document.getElementById('iframe_101');
+        if (byId) return byId;
+        for (const frame of document.querySelectorAll('iframe')) {
+            const src = frame.getAttribute('src') || '';
+            if (/iframe_101(?:\/|$|[?#])/.test(src)) return frame;
+        }
+        return null;
+    };"""
+
+RELOAD_TABLE_JS = "(() => {" + TABLE_FRAME_PICKER_JS + r"""
+    const frame = tableFrame();
+    if (!frame) return {ok: false, reason: 'no_table_frame'};
     try {
         frame.contentWindow.location.reload();
-        return 'reload';
+        return {ok: true, via: 'reload'};
     } catch (e) {
-        try { frame.src = frame.getAttribute('src') || frame.src; return 'reload_src'; }
-        catch (err) { return 'err:' + String(err).slice(0, 60); }
+        try {
+            const src = frame.getAttribute('src') || '';
+            if (!src) return {ok: false, reason: 'no_frame_src'};
+            frame.src = src;
+            return {ok: true, via: 'reload_src'};
+        } catch (err) { return {ok: false, reason: 'reload_blocked'}; }
     }
 })()"""
 
 READ_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
-    const doc = (frame && frame.contentDocument) || document;
-    const box = doc.getElementById('container');
-    const m = box ? /(?:^|\s)group(\d+)/.exec((box.className || '').toString()) : null;
-    const openGroup = m ? parseInt(m[1], 10) : null;
-    // Hook chạy riêng trong mỗi frame: gộp socket của khung gốc (sảnh) và iframe (bàn).
+    // Đọc mã bàn đang mở từ #container: nằm ở khung gốc (bản một-document) hoặc trong
+    // iframe bàn (bản nhiều iframe). Dò lần lượt, không chỉ iframe_101.
+    const docs = [document];
+    for (const frame of document.querySelectorAll('iframe')) {
+        try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (e) {}
+    }
+    let openGroup = null;
+    for (const doc of docs) {
+        const box = doc.getElementById('container');
+        if (!box) continue;
+        const m = /(?:^|\s)group(\d+)/.exec((box.className || '').toString());
+        if (m) { openGroup = parseInt(m[1], 10); break; }
+    }
+    // Hook chạy riêng trong mỗi frame: gộp socket của khung gốc (sảnh) và MỌI iframe
+    // cùng origin đã cài hook (bàn có thể không tên iframe_101 ở mirror mới).
+    //
+    // Nhãn của từng store quyết định việc chọn socket đặt cược, nên không dựa vào "có
+    // phải khung gốc" — với WM nhúng KHÁC ORIGIN, cả trang WM lẫn bàn đều KHÔNG phải
+    // khung gốc. Thay vào đó nhìn NỘI DUNG: document nào vẽ bàn (khay chip, ô cược, cầu)
+    // thì socket của nó là socket bàn -> 'iframe'; còn lại là sảnh -> 'top'.
+    const isTableDoc = (doc) => {
+        if (!doc) return false;
+        try {
+            const shown = (el) => {
+                if (!el) return false;
+                const st = doc.defaultView ? doc.defaultView.getComputedStyle(el) : null;
+                const r = el.getBoundingClientRect();
+                return (!st || (st.display !== 'none' && st.visibility !== 'hidden'))
+                       && r.width > 4 && r.height > 4;
+            };
+            if (shown(doc.getElementById('chip_box'))) return true;
+            if (shown(doc.getElementById('playbetboxBanker'))) return true;
+            if (shown(doc.getElementById('bigRoadContainer'))) return true;
+            const box = doc.getElementById('container');
+            const cls = box ? (box.className || '').toString() : '';
+            return shown(box) && /(?:^|\s)game\d+/.test(cls)
+                   && /(?:^|\s)group\d+/.test(cls);
+        } catch (e) { return false; }
+    };
     const stores = [];
     const push = (hook, label) => {
         if (hook && hook.sockets) stores.push({hook: hook, label: label});
     };
-    push(window.__wmHook3, 'top');
-    try {
-        const child = frame && frame.contentWindow;
-        if (child && child.__wmHook3 && child.__wmHook3 !== window.__wmHook3) {
-            push(child.__wmHook3, 'iframe');
+    push(window.__wmHook3, isTableDoc(document) ? 'iframe' : 'top');
+    for (const frame of document.querySelectorAll('iframe')) {
+        let child = null;
+        try { child = frame.contentWindow; } catch (e) { continue; }
+        if (!child) continue;
+        let hook = null;
+        let childDoc = null;
+        try {
+            hook = child.__wmHook3;
+            childDoc = child.document;
+        } catch (e) { continue; }
+        if (hook && hook !== window.__wmHook3) {
+            push(hook, isTableDoc(childDoc) ? 'iframe' : 'top');
         }
-    } catch (e) {}
+    }
     if (!stores.length) return {installed: false, open_group: openGroup};
     const merged = {urls: [], states: [], scopes: {}, protocols: {}, recent21: [],
                     last22: null, sent: [], errors: [], offsets: {}};
@@ -185,16 +251,18 @@ READ_JS = r"""(() => {
 })()"""
 
 SEND_JS = r"""(() => {
-    const frame = document.getElementById('iframe_101');
     const want = %d;
+    // Thứ tự store PHẢI khớp READ_JS, nếu không chỉ số socket bị lệch.
     const stores = [];
     if (window.__wmHook3) stores.push({hook: window.__wmHook3, label: 'top'});
-    try {
-        const child = frame && frame.contentWindow;
-        if (child && child.__wmHook3 && child.__wmHook3 !== window.__wmHook3) {
-            stores.push({hook: child.__wmHook3, label: 'iframe'});
-        }
-    } catch (e) {}
+    for (const frame of document.querySelectorAll('iframe')) {
+        let child = null;
+        try { child = frame.contentWindow; } catch (e) { continue; }
+        if (!child) continue;
+        let hook = null;
+        try { hook = child.__wmHook3; } catch (e) { continue; }
+        if (hook && hook !== window.__wmHook3) stores.push({hook: hook, label: 'iframe'});
+    }
     let offset = 0;
     for (const entry of stores) {
         const count = entry.hook.sockets.length;
@@ -228,10 +296,12 @@ def bet_frame(side, amount, game_no, round_no, serial=1):
 def current_table(state):
     """Socket + khung 21 của ĐÚNG bàn đang mở: ``(index, data, seen_at_ms)`` hoặc ``None``.
 
-    Hai điều kiện:
-      * ``groupID`` khớp bàn đang mở (sàn đẩy 21 cho nhiều bàn trên cùng socket);
-      * socket phải thuộc **iframe bàn** khi có — socket khung gốc (sảnh) nhận được dữ
-        liệu bàn nhưng server từ chối lệnh cược gửi từ đó (``bOk: false``).
+    Thứ tự chọn:
+      1. socket của **iframe bàn** cùng origin (layout nhiều iframe) — đường chuẩn;
+      2. socket của khung nhúng WM khác origin (OOPIF) — bàn chạy trong target riêng;
+      3. nếu không có cả hai thì dùng socket bất kỳ khớp ``groupID`` (layout
+         một-document). Sàn có thể từ chối lệnh gửi từ socket sảnh, nhưng im lặng
+         khoá cược còn tệ hơn: lệnh bị từ chối được báo rõ và chip không hề đổi.
     """
     frames = (state or {}).get("recent21") or []
     states = (state or {}).get("states") or []
@@ -241,7 +311,7 @@ def current_table(state):
     def open_socket(index):
         return 0 <= index < len(states) and states[index] == 1
 
-    def pick(only_iframe):
+    def pick(scope):
         best = None
         for entry in frames:
             try:
@@ -250,7 +320,7 @@ def current_table(state):
                 continue
             if not open_socket(index):
                 continue
-            if only_iframe and scopes.get(str(index), scopes.get(index)) != "iframe":
+            if scope is not None and scopes.get(str(index), scopes.get(index)) != scope:
                 continue
             data = (entry or {}).get("data") or {}
             if group is not None and data.get("groupID") != group:
@@ -260,7 +330,76 @@ def current_table(state):
                 best = (index, data, at)
         return best
 
-    return pick(True) or (None if group is not None else pick(False))
+    return pick("iframe") or pick("oopif") or pick(None)
+
+
+def merge_states(channels):
+    """Gộp ảnh hook của NHIỀU khung (tab cổng + target iframe khác origin) làm một.
+
+    ``channels`` là danh sách ``(label, state)``, ``label`` = ``"page"`` hoặc
+    ``"oopif"``. Mỗi khung đánh số socket riêng, nên chỉ số được dồn tiếp sau khung
+    trước; ``routes``/``locals`` giữ lại vị trí thật để gửi lệnh đúng socket.
+
+    Vì sao phải gộp: khi WM nằm trong iframe KHÁC ORIGIN, ``Network.enable`` và hook của
+    tab mẹ **không** thấy WebSocket của bàn. Hook phải chạy trong chính target iframe, và
+    chỉ số socket của nó phải cộng dồn với socket của tab mẹ — nếu không lệnh cược sẽ
+    nhắm sai socket (hoặc không tìm thấy).
+    """
+    merged = {"installed": False, "urls": [], "states": [], "scopes": {},
+              "protocols": {}, "recent21": [], "last22": None, "open_group": None,
+              "sent": [], "errors": [], "offsets": {}, "routes": [], "locals": []}
+    for entry in channels or ():
+        label, state = (entry or (None, None))
+        if not label or not isinstance(state, dict):
+            continue
+        if state.get("installed"):
+            merged["installed"] = True
+        base = len(merged["states"])
+        merged["offsets"][label] = base
+        states = list(state.get("states") or [])
+        urls = list(state.get("urls") or [])
+        scopes = state.get("scopes") or {}
+        for index, value in enumerate(states):
+            merged["states"].append(value)
+            merged["urls"].append(urls[index] if index < len(urls) else "")
+            scope = scopes.get(str(index), scopes.get(index))
+            # Socket của khung bàn luôn tính là "iframe": đó là socket đặt được cược.
+            # Socket gốc của khung nhúng (WM chạy trong iframe khác origin) là chỗ sàn
+            # nhận dữ liệu bàn nhưng CÓ THỂ từ chối lệnh cược — đánh dấu "oopif" để
+            # ``current_table`` chỉ dùng khi không có socket iframe nào.
+            if scope == "iframe":
+                merged["scopes"][base + index] = "iframe"
+            elif label != "page":
+                merged["scopes"][base + index] = "oopif"
+            else:
+                merged["scopes"][base + index] = scope
+            merged["routes"].append(label)
+            merged["locals"].append(index)
+        for key, value in (state.get("protocols") or {}).items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                continue
+            merged["protocols"][base + index] = value
+        for item in (state.get("recent21") or []):
+            try:
+                index = int((item or {}).get("socket"))
+            except (TypeError, ValueError):
+                continue
+            merged["recent21"].append({"socket": base + index, "at": item.get("at"),
+                                       "data": item.get("data")})
+        last = state.get("last22") or None
+        if isinstance(last, dict):
+            at = float(last.get("at") or 0)
+            if merged["last22"] is None or at > float(merged["last22"].get("at") or 0):
+                merged["last22"] = dict(last, socket=base + int(last.get("socket") or 0),
+                                        scope=label, offset=base)
+        if merged["open_group"] is None and state.get("open_group") is not None:
+            merged["open_group"] = state.get("open_group")
+        merged["sent"].extend(list(state.get("sent") or [])[-6:])
+        merged["errors"].extend(list(state.get("errors") or []))
+    merged["sent"] = merged["sent"][-6:]
+    return merged
 
 
 class WMSocket(threading.Thread):
@@ -275,10 +414,16 @@ class WMSocket(threading.Thread):
         self.lock = threading.RLock()
         self._command = None
         self._ws = None
+        self._page = None
+        self._oopif = None
         self._state = {}
         self._state_at = 0.0
         self._reloaded = False
         self._serial = {"key": None, "value": 0}
+        # Bàn đã thử "cứu" socket (nạp lại riêng khung bàn) — tránh nạp lại lặp vô hạn.
+        self._rescued_group = None
+        self._rescue_at = 0.0
+        self._oopif_try_at = 0.0
         self.last_error = ""
         self.ready_at = 0.0
 
@@ -296,26 +441,104 @@ class WMSocket(threading.Thread):
             raise RuntimeError("not_connected")
         return self._command(method, params, timeout)
 
-    def evaluate(self, expression, timeout=BR.SCRIPT_TIMEOUT):
+    def _drop_oopif(self):
+        """Gỡ target iframe đã chết (rời bàn, khung bị dựng lại) để lần sau bám lại."""
+        channel = self._oopif
+        self._oopif = None
+        self._oopif_try_at = time.monotonic() + 1.0
+        if channel is None:
+            return
+        try:
+            channel["ws"].close()
+        except Exception:
+            pass
+
+    def _channels(self):
+        """Các khung đang giữ hook: target iframe (nếu có) trước, rồi tab.
+
+        Thứ tự này quan trọng: khi WM nhúng khác origin thì BÀN nằm trong target iframe,
+        còn tab mẹ chỉ thấy khung cổng — đọc bàn phải hỏi target trước.
+        """
+        out = []
+        for channel in (self._oopif, self._page):
+            if channel is not None:
+                out.append(channel)
+        return out
+
+    def _evaluate_in(self, channel, expression, timeout=BR.SCRIPT_TIMEOUT):
         with self.lock:
-            result = self._command_locked("Runtime.evaluate", {
+            result = channel["command"]("Runtime.evaluate", {
                 "expression": expression, "returnByValue": True, "silent": True,
             }, timeout)
         return (result or {}).get("result", {}).get("value")
 
+    def evaluate(self, expression, timeout=BR.SCRIPT_TIMEOUT):
+        """Chạy JS ở khung đang vẽ BÀN; khung không có bàn thì thử khung kế tiếp.
+
+        Nhờ vậy ``READ_JS``/``CANCEL_JS``/đọc ví chạy đúng cả khi bàn nằm trong iframe
+        khác origin (target riêng), không cần lớp gọi biết chi tiết đó.
+        """
+        first = None
+        for channel in self._channels():
+            try:
+                value = self._evaluate_in(channel, expression, timeout)
+            except Exception:
+                continue
+            if first is None:
+                first = value
+            if isinstance(value, dict) and value.get("reason"):
+                continue
+            if value is not None:
+                return value
+        return first
+
+    def install_everywhere(self):
+        """Cài hook cho MỌI khung đang mở (không dừng ở khung đầu như ``evaluate``).
+
+        Khung bàn và khung sảnh cùng cần hook: dừng sớm sẽ khiến socket của sảnh (hoặc
+        của bàn) không bao giờ được bắt.
+        """
+        installed = 0
+        for channel in self._channels():
+            try:
+                result = self._evaluate_in(channel, INSTALL_TABLE_JS)
+            except Exception:
+                continue
+            if isinstance(result, str) and result.startswith("ok"):
+                installed += 1
+        return installed
+
     def state(self, fresh=False):
-        """Ảnh chụp hook (đọc trực tiếp nếu ``fresh`` hoặc cache đã cũ)."""
+        """Ảnh chụp hook của MỌI khung, gộp lại (đọc trực tiếp nếu cần).
+
+        Khung nào không trả lời (target iframe đã chết khi rời bàn) thì bị bỏ và gỡ
+        khỏi danh sách, để lần sau bám lại target mới — nếu giữ, trạng thái cũ sẽ khiến
+        app tưởng socket vẫn sẵn sàng và gửi lệnh vào hư không.
+        """
         with self.lock:
             if fresh or time.time() - self._state_at > 1.0:
-                try:
-                    value = self._command_locked("Runtime.evaluate", {
-                        "expression": READ_JS, "returnByValue": True, "silent": True,
-                    }).get("result", {}).get("value")
+                snapshots = []
+                dead = []
+                for channel in self._channels():
+                    try:
+                        value = self._evaluate_in(channel, READ_JS)
+                    except Exception:
+                        dead.append(channel)
+                        continue
                     if isinstance(value, dict):
-                        self._state = value
-                        self._state_at = time.time()
-                except Exception as exc:
-                    self.last_error = "Không đọc được hook WS (%s)." % type(exc).__name__
+                        snapshots.append((channel["label"], value))
+                for channel in dead:
+                    if channel is self._oopif:
+                        self._drop_oopif()
+                if snapshots:
+                    self._state = merge_states(snapshots)
+                    self._state_at = time.time()
+                else:
+                    # Không khung nào trả lời: bỏ cache để không báo "sẵn sàng" sai.
+                    self._state = {}
+                    self._state_at = 0.0
+                    if dead:
+                        self.last_error = "Không đọc được hook WS của khung nào."
         return dict(self._state or {})
 
     def ready(self):
@@ -323,7 +546,36 @@ class WMSocket(threading.Thread):
         return current_table(state) is not None
 
     # ------------------------------------------------------------------ kết nối
-    def _connect(self):
+    def _install_new_document_hook(self, channel):
+        """Đăng ký hook cho MỌI document mới của khung VÀ cài ngay cho document hiện tại.
+
+        ``Page.addScriptToEvaluateOnNewDocument`` chỉ áp cho document tải **sau** — với
+        WM nhúng khác origin, document WM đã tải xong từ trước, nên nếu chỉ đăng ký thì
+        socket của bàn (tạo khi vào bàn, trong chính document đó) không bao giờ được bắt.
+        Vì vậy phải chạy ``HOOK_JS`` ngay trong document đang sống.
+        """
+        registered = False
+        try:
+            channel["command"]("Page.addScriptToEvaluateOnNewDocument",
+                              {"source": HOOK_JS, "runImmediately": True})
+            registered = True
+        except Exception:
+            registered = False
+        if not registered:
+            # Chrome cũ không biết ``runImmediately``: vẫn đăng ký cho document mới.
+            try:
+                channel["command"]("Page.addScriptToEvaluateOnNewDocument",
+                                  {"source": HOOK_JS})
+            except Exception:
+                pass
+        try:
+            channel["command"]("Runtime.evaluate", {"expression": HOOK_JS,
+                                                   "returnByValue": True, "silent": True})
+        except Exception:
+            pass
+
+    def _attach_page(self):
+        """Mở kết nối CDP tới tab và cài hook cho tab + mọi khung cùng origin."""
         import websocket
 
         page = self.session._cdp_page()
@@ -352,20 +604,104 @@ class WMSocket(threading.Thread):
 
         self._ws = ws
         self._command = command
+        channel = {"label": "page", "command": command, "ws": ws}
+        self._page = channel
         command("Page.enable")
         command("Runtime.enable")
-        command("Page.addScriptToEvaluateOnNewDocument",
-                {"source": HOOK_JS, "runImmediately": True})
+        self._install_new_document_hook(channel)
+        return True
+
+    def _attach_oopif(self):
+        """Gắn vào target iframe WM khi WM nhúng KHÁC ORIGIN; ``None`` nếu không có.
+
+        Vì sao cần: tab cổng chỉ thấy iframe ``wmvn.m8810.com`` như một hộp đen —
+        ``iframe.contentDocument`` bị chặn và ``Network.enable`` của tab mẹ không nhận
+        được WebSocket bên trong. Bàn thật (và socket đặt cược) nằm trong target riêng,
+        nên hook phải chạy Ở ĐÓ. Target được nhớ trong ``session.wm_oopif_target`` khi
+        luồng quét nhận ra WM; nếu chưa có thì tự dò.
+        """
+        if self._oopif is not None:
+            return self._oopif
+        from aibcr.adapters import wm_targets as WT
+
+        page_id = str((self.session and getattr(self.session, "wm_page_id", "")) or "")
+        target_id = str(getattr(self.session, "wm_oopif_target", "") or "")
+        if not target_id:
+            try:
+                frame, parent = WT.find_wm_frame_target(BR.CDP_PORT)
+            except Exception:
+                frame, parent = None, None
+            if not frame:
+                return None
+            target_id = str(frame.get("id") or "")
+            if (frame.get("type") == "page"
+                    or target_id == page_id
+                    or (parent and parent.get("id") == target_id)):
+                # WM đang mở thành TAB (không phải iframe nhúng): tab đó đã được gắn ở
+                # ``_attach_page``. Gắn thêm sẽ đếm trùng socket của cùng một document.
+                return None
+        if not target_id or target_id == page_id:
+            return None
+        try:
+            socket_ = WT.open_frame_socket(BR.CDP_PORT, target_id=target_id,
+                                           timeout=BR.SCRIPT_TIMEOUT)
+        except Exception:
+            # Target đã chết (khung dựng lại / đã rời bàn): xoá ký ức để luồng quét nhận
+            # target mới, thay vì bám mãi vào id không còn tồn tại.
+            if self.session is not None and \
+                    str(getattr(self.session, "wm_oopif_target", "") or "") == target_id:
+                self.session.wm_oopif_target = ""
+            return None
+        try:
+            socket_.command("Page.enable")
+            socket_.command("Runtime.enable")
+        except Exception:
+            try:
+                socket_.close()
+            except Exception:
+                pass
+            return None
+
+        def frame_command(method, params=None, timeout=BR.SCRIPT_TIMEOUT):
+            # ``FrameSocket.command`` chỉ nhận (method, params); timeout đặt riêng.
+            socket_.settimeout(timeout)
+            return socket_.command(method, params)
+
+        channel = {"label": "oopif", "command": frame_command, "ws": socket_,
+                   "target": target_id}
+        try:
+            self._install_new_document_hook(channel)
+            self._evaluate_in(channel, INSTALL_TABLE_JS)
+        except Exception:
+            pass
+        self._oopif = channel
+        return channel
+
+    def _connect(self):
+        """Kết nối tab + (nếu WM nhúng khác origin) target iframe của bàn."""
+        if not self._attach_page():
+            return False
+        self._attach_oopif()
         return True
 
     def _close(self):
         self._command = None
+        self._page = None
+        channels = [self._oopif]
+        self._oopif = None
         if self._ws is not None:
             try:
                 self._ws.close()
             except Exception:
                 pass
         self._ws = None
+        for channel in channels:
+            if channel is None:
+                continue
+            try:
+                channel["ws"].close()
+            except Exception:
+                pass
 
     def wait_ready(self, timeout=20.0):
         """Chờ hook thấy socket của bàn đang mở."""
@@ -377,34 +713,79 @@ class WMSocket(threading.Thread):
             time.sleep(0.5)
         return False
 
-    def prepare(self, timeout=25.0):
-        """Kết nối + cài hook. Chỉ nạp lại khung khi ``reload_on_start`` cho phép.
+    def rescue_table(self, timeout=18.0):
+        """Nạp lại **riêng khung bàn** để socket được tạo lại và hook bắt được.
 
-        Nạp lại khung bàn sẽ làm bàn nháy và có thể mất trạng thái cược, nên khi đang đứng
-        trong bàn (``reload_on_start=False``) ta chỉ cài hook sẵn — lần vào bàn sau socket
-        sẽ được bắt và lệnh cược đi qua WebSocket.
+        Vì sao cần: hook chỉ bọc được ``WebSocket`` tạo **sau** khi hook chạy. Bàn mở
+        trước đó (người dùng tự vào bàn, hoặc iframe bàn được dựng sẵn từ sảnh) đã có
+        socket cũ nên không bắt được, và khi ấy mọi lệnh cược bị khoá dù app vẫn đọc và
+        phân tích bình thường. Nạp lại khung bàn tạo socket mới → cược đi được.
+
+        Chỉ nạp lại khi: chưa có socket, ĐANG ở trong bàn (có ``open_group``), và mỗi bàn
+        chỉ thử một lần để không nháy bàn lặp lại. Không đụng tab/sảnh/nút thoát bàn.
+        """
+        if self.ready():
+            return True
+        state = self.state(fresh=True)
+        group = state.get("open_group")
+        if group is None:
+            # Đang ở sảnh (hoặc khung bàn đang tải lại): hook đã cài sẵn, socket của bàn
+            # sẽ được bắt khi bàn mở ra. Không nạp lại gì để tránh nháy bàn — đồng thời
+            # xoá mốc "đã cứu" để lần vào lại CÙNG bàn vẫn được thử lại một lần.
+            self._rescued_group = None
+            return False
+        if self._rescued_group == group:
+            return False
+        if time.monotonic() - self._rescue_at < 10.0:
+            # Vừa nạp lại xong mà chưa thấy socket: cho bàn thời gian khởi động thay vì
+            # nạp lại dồn dập (mỗi lần nạp lại làm bàn nháy và mất trạng thái cược).
+            return False
+        self._rescued_group = group
+        self._rescue_at = time.monotonic()
+        try:
+            result = self.evaluate(RELOAD_TABLE_JS, timeout=10)
+        except Exception:
+            result = None
+        reloaded = isinstance(result, dict) and bool(result.get("ok"))
+        if not reloaded and self._oopif is not None:
+            # WM một-document nằm trong iframe KHÁC ORIGIN: không có khung con nào để
+            # nạp lại, và bàn chính là target đó. Nạp lại CHÍNH khung WM (tab cổng và
+            # liên kết bàn giữ nguyên) để nó tạo socket mới lọt vào hook.
+            try:
+                reloaded = bool(self._evaluate_in(
+                    self._oopif,
+                    "(() => { try { location.reload(); return true; } "
+                    "catch (e) { return false; } })()"))
+            except Exception:
+                reloaded = False
+        if not reloaded:
+            return False
+        self._status("Chưa bắt được socket của bàn đã mở — nạp lại riêng khung bàn "
+                     "một lần để bắt socket đặt cược…", "info")
+        return self.wait_ready(timeout)
+
+    def prepare(self, timeout=25.0):
+        """Kết nối + cài hook cho bàn đang mở.
+
+        Thứ tự: cài hook cho các khung hiện có → nếu vẫn chưa có socket của bàn đang mở
+        thì nạp lại **riêng khung bàn** một lần (``rescue_table``). Không tải lại tab nên
+        không mất bàn, không đẩy Chrome về sảnh.
         """
         if not self._connect():
             return False
         if self.wait_ready(3.0):
             return True
         try:
-            self.evaluate(INSTALL_TABLE_JS)
+            self.install_everywhere()
             if self.ready():
                 return True
         except Exception:
             pass
+        if self.rescue_table(timeout):
+            return True
         if not self.reload_on_start or self._reloaded:
             return self.wait_ready(min(5.0, timeout))
         self._reloaded = True
-        try:
-            # Ưu tiên nạp lại riêng khung bàn (khung ngoài và sảnh giữ nguyên).
-            self.evaluate(RELOAD_TABLE_JS)
-            self._status("Đang nạp lại khung bàn để bắt socket đặt cược…", "info")
-            if self.wait_ready(timeout):
-                return True
-        except Exception:
-            pass
         try:
             with self.lock:
                 self._command_locked("Page.reload", {"ignoreCache": False}, timeout=15)
@@ -417,8 +798,9 @@ class WMSocket(threading.Thread):
     def run(self):
         """Vòng nền: giữ hook sống và bắt socket khi bàn được mở lại.
 
-        Không tải lại tab (sẽ mất bàn). Chỉ báo trạng thái một lần để log không spam khi
-        socket chưa sẵn sàng.
+        Không tải lại tab (sẽ mất bàn). Khi đang ở trong bàn mà chưa bắt được socket
+        (bàn mở trước khi cài hook) thì nạp lại **riêng khung bàn** một lần cho đúng
+        bàn đó; các bàn khác không bị ảnh hưởng.
         """
         warned = False
         while not self.stop_event.is_set():
@@ -426,15 +808,24 @@ class WMSocket(threading.Thread):
                 if self._command is None:
                     self._connect()
                     try:
-                        self.evaluate(INSTALL_TABLE_JS)
+                        self.install_everywhere()
                     except Exception:
                         pass
                 self.state(fresh=True)
                 if not self.ready():
+                    # Bàn có thể vừa được tách thành target riêng (iframe khác origin):
+                    # bám vào target iframe để hook chạy đúng chỗ bàn sống.
+                    if self._oopif is None and time.monotonic() >= self._oopif_try_at:
+                        self._oopif_try_at = time.monotonic() + 3.0
+                        try:
+                            self._attach_oopif()
+                        except Exception:
+                            pass
                     try:
-                        self.evaluate(INSTALL_TABLE_JS)
+                        self.install_everywhere()
                     except Exception:
                         pass
+                    self.rescue_table(12.0)
                 if self.ready():
                     if warned:
                         self._status("Socket WM sẵn sàng · đặt cược gửi thẳng qua WebSocket.",
@@ -493,29 +884,38 @@ class WMSocket(threading.Thread):
         frame = bet_frame(side, amount, game_no, round_no,
                           serial=self._next_serial(game_no, round_no))
         payload = json.dumps(json.dumps(frame, ensure_ascii=False))
+        routes = list(state.get("routes") or [])
+        locals_ = list(state.get("locals") or [])
+        route = routes[socket_index] if socket_index < len(routes) else "page"
+        local_index = locals_[socket_index] if socket_index < len(locals_) else socket_index
+        channel = self._oopif if (route != "page" and self._oopif) else self._page
+        if channel is None:
+            return {"ok": False, "error": "not_connected"}
         sent_at = time.time() * 1000.0
         with self.lock:
             try:
-                result = self._command_locked("Runtime.evaluate", {
-                    "expression": SEND_JS % (int(socket_index), payload),
-                    "returnByValue": True, "silent": True,
-                }).get("result", {}).get("value") or {}
+                result = self._evaluate_in(channel, SEND_JS % (int(local_index), payload))
             except Exception as exc:
                 return {"ok": False, "error": "send_failed", "frame": frame,
                         "detail": type(exc).__name__}
-            if not result.get("ok"):
-                return {"ok": False, "error": result.get("error") or "send_failed",
+            if not isinstance(result, dict) or not result.get("ok"):
+                return {"ok": False,
+                        "error": (result or {}).get("error") or "send_failed",
                         "frame": frame}
             deadline = time.monotonic() + max(1.0, float(wait_seconds))
             while time.monotonic() < deadline:
-                try:
-                    info = self._command_locked("Runtime.evaluate", {
-                        "expression": READ_JS, "returnByValue": True, "silent": True,
-                    }).get("result", {}).get("value") or {}
-                except Exception:
-                    break
-                reply = info.get("last22") or {}
-                if float(reply.get("at") or 0) >= sent_at:
+                reply = None
+                for item in self._channels():
+                    try:
+                        info = self._evaluate_in(item, READ_JS) or {}
+                    except Exception:
+                        continue
+                    candidate = info.get("last22") or {}
+                    if float(candidate.get("at") or 0) >= sent_at:
+                        if reply is None or float(candidate.get("at") or 0) > \
+                                float((reply or {}).get("at") or 0):
+                            reply = candidate
+                if reply is not None:
                     body = reply.get("data") or {}
                     return {"ok": bool(body.get("bOk")), "frame": frame, "reply": body,
                             "error": "" if body.get("bOk") else "server_rejected"}
@@ -525,48 +925,26 @@ class WMSocket(threading.Thread):
 
 # ------------------------------------------------------------------ dùng chung
 def install_hook(session):
-    """Cài hook WebSocket cho các document MỚI của tab (không tải lại trang).
+    """Cài hook WebSocket cho tab, cho mọi khung đang mở và cho target iframe WM.
 
     Dùng khi người dùng đang đứng trong bàn: tải lại tab sẽ đẩy Chrome về sảnh và mất
-    bàn, nên chỉ cài hook sẵn — lần tải trang sau (hoặc lần vào bàn từ sảnh) socket sẽ
-    được bắt và lệnh cược đi qua WebSocket.
+    bàn, nên chỉ cài hook sẵn. Khung bàn đã mở từ trước vẫn có socket cũ (tạo trước hook)
+    — ``WMSocket.rescue_table`` lo phần đó bằng cách nạp lại riêng khung bàn.
     """
-    import websocket
-
-    page = session._cdp_page()
-    if page is None:
-        return False
-    ws = None
+    helper = WMSocket(session)
+    ok = False
     try:
-        ws = websocket.create_connection(
-            BR.validated_endpoint(page), suppress_origin=True, timeout=BR.SCRIPT_TIMEOUT,
-            redirect_limit=0, http_no_proxy=["127.0.0.1", "localhost", "::1"])
-        state = {"seq": 0}
-
-        def command(method, params=None):
-            state["seq"] += 1
-            seq = state["seq"]
-            ws.settimeout(BR.SCRIPT_TIMEOUT)
-            ws.send(json.dumps({"id": seq, "method": method, "params": params or {}}))
-            while True:
-                message = json.loads(ws.recv())
-                if message.get("id") == seq:
-                    if message.get("error"):
-                        raise RuntimeError(str(message["error"])[:120])
-                    return message.get("result", {})
-
-        command("Page.enable")
-        command("Page.addScriptToEvaluateOnNewDocument",
-                {"source": HOOK_JS, "runImmediately": True})
-        return True
+        ok = bool(helper._attach_page())
+        helper._attach_oopif()
+        try:
+            helper.install_everywhere()
+        except Exception:
+            pass
     except Exception:
         return False
     finally:
-        if ws is not None:
-            try:
-                ws.close()
-            except Exception:
-                pass
+        helper._close()
+    return ok
 
 
 def get_socket(session, start=True, reload_on_start=False, on_status=None):

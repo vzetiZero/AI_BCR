@@ -301,7 +301,8 @@ CLICK_PRELUDE_JS = r"""
             el.dispatchEvent(new PointerEvent('pointerup', Object.assign(
                 {pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0}, at)));
             el.dispatchEvent(new MouseEvent('mouseup', Object.assign({buttons: 0}, at)));
-            if (typeof el.focus === 'function') { try { el.focus(); } catch (e) {} }
+            // KHÔNG gọi el.focus(): bấm bằng JS không được kéo tiêu điểm bàn phím hay
+            // làm trang tự cuộn tới phần tử — người dùng có thể đang gõ ở cửa sổ khác.
             el.dispatchEvent(new MouseEvent('click', Object.assign({buttons: 0}, at)));
             return true;
         } catch (e) {
