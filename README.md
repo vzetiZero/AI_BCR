@@ -58,6 +58,7 @@ AI_BCR/
 ├─ tools/                    script chạy tay (đọc WebSocket, soi CDP, kiểm chọn bàn)
 ├─ Start.bat                 mở app (tự cài Electron nếu thiếu)
 ├─ install-toan-bo.bat       cài Python deps + Electron
+├─ Dong_goi.bat              đóng gói portable (Python + Electron + Chrome)
 └─ push_update.bat/.ps1      commit + push lên GitHub
 ```
 
@@ -70,6 +71,27 @@ Luồng một lệnh: Electron → `preload.js` → `ui/main.js` → `aibcr.serv
 install-toan-bo.bat      # lần đầu: pip deps + Electron
 Start.bat                # mở app
 ```
+
+### Bản portable — đưa sang máy khác không cần cài gì
+
+```
+Dong_goi.bat             # tạo dist\AI_BCR_Portable.zip
+```
+
+Gói sinh ra chứa **Python 3.12 embeddable + selenium/websocket-client**, **Electron +
+`node_modules` đã cài sẵn** và **Chrome portable + chromedriver cùng phiên bản** trong
+`runtime\`. Máy mới chỉ cần Windows 10/11 64-bit: giải nén rồi bấm `Start.bat`, **không
+cần cài Python, Node.js, npm hay Chrome**.
+
+- `ui/main.js` ưu tiên `runtime\python\python.exe`; `aibcr/adapters/browser.py` ưu tiên
+  `runtime\chrome\chrome.exe` + `runtime\chrome\chromedriver-win64\chromedriver.exe`
+  (cả hai đều tự lùi về Python/Chrome của máy nếu không có `runtime\`).
+- Script `dong-goi-portable.ps1` (tham số `-ChromeVersion`, `-PythonVersion`, `-SkipZip`)
+  chép mã nguồn nhưng **loại** `.git`, `chrome_profile*`, `aibcr_state*.json`, lịch sử cá
+  nhân, `__pycache__`; sau đó kiểm tra gói bằng chính Python bên trong gói.
+- Kết quả khoảng 350 MB ZIP (~800 MB sau giải nén) do có Chrome. Muốn gọn hơn thì xoá
+  `runtime\chrome\` sau khi giải nén — app sẽ dùng Chrome của máy.
+- `build/`, `dist/`, `runtime/` đã nằm trong `.gitignore` (nặng, không commit).
 
 Chạy engine bằng tay (CLI):
 

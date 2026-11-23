@@ -21,7 +21,16 @@ from aibcr.adapters import wm_targets as WT
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(HERE, "chrome_profile")
 READER_JS = os.path.join(HERE, "reader.js")
-DRIVER_PATH = os.path.join(HERE, "drivers", "chromedriver.exe")
+ROOT_DIR = os.path.dirname(os.path.dirname(HERE))
+# Bản đóng gói (portable) mang sẵn Chrome + chromedriver trong runtime/ để máy mới
+# không phải cài gì. Không có runtime/ thì dùng Chrome/driver của máy như trước.
+RUNTIME_DIR = os.path.join(ROOT_DIR, "runtime")
+DRIVER_CANDIDATES = (
+    os.path.join(RUNTIME_DIR, "chrome", "chromedriver.exe"),
+    os.path.join(RUNTIME_DIR, "chrome", "chromedriver-win64", "chromedriver.exe"),
+    os.path.join(HERE, "drivers", "chromedriver.exe"),
+)
+DRIVER_PATH = next((p for p in DRIVER_CANDIDATES if os.path.isfile(p)), DRIVER_CANDIDATES[-1])
 LOBBY_PATH = "/frontend/evo/r3"
 # Sảnh Baccarat của Petalive (site đang dùng) không đi qua EVO /frontend/evo/r3.
 PETALIVE_LOBBY_PATH = "/live-games/lobby/bcr"
@@ -54,7 +63,12 @@ PAGE_LOAD_TIMEOUT = 20
 SCRIPT_TIMEOUT = 8
 COMMAND_TIMEOUT = 25
 CDP_PORT = 9222
-CHROME_CANDIDATES = (
+# Chrome đi kèm bản đóng gói: luôn ưu tiên vì khớp đúng chromedriver đi kèm.
+BUNDLED_CHROME_CANDIDATES = (
+    os.path.join(RUNTIME_DIR, "chrome", "chrome.exe"),
+    os.path.join(RUNTIME_DIR, "chrome", "chrome-win64", "chrome.exe"),
+)
+CHROME_CANDIDATES = BUNDLED_CHROME_CANDIDATES + (
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     r"E:\Tools\Google Chrome\App\Chrome-bin\chrome.exe",
@@ -229,7 +243,10 @@ def _clean_report(report):
 
 
 def chrome_path():
-    """Chọn Chrome mới nhất trong các vị trí ứng viên."""
+    """Chọn Chrome mới nhất trong các vị trí ứng viên (Chrome đi kèm được ưu tiên)."""
+    for cand in BUNDLED_CHROME_CANDIDATES:
+        if os.path.isfile(cand):
+            return cand
     found = [(chrome_version(cand), cand) for cand in CHROME_CANDIDATES
              if os.path.isfile(cand)]
     return max(found, key=lambda v: tuple(int(x or 0) for x in v[0].split(".")))[1] if found else ""
@@ -266,8 +283,8 @@ def driver_for():
     """Driver cục bộ khớp bản; nếu không, để Selenium Manager chọn driver."""
     cv = chrome_version()
     dv = driver_version()
-    if cv and dv and cv.split(".")[:3] == dv.split(".")[:3]:
-        return "local", "driver %s khớp Chrome %s" % (dv, cv)
+    if dv and (not cv or cv.split(".")[:3] == dv.split(".")[:3]):
+        return "local", "driver %s khớp Chrome %s" % (dv, cv or "đi kèm")
     return "auto", "Selenium Manager chọn driver tương thích Chrome %s" % (cv or "đã cài")
 
 

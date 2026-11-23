@@ -7,8 +7,12 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
+// Bản đóng gói mang sẵn Python trong runtime/python (python.exe + thư viện) nên máy mới
+// không cần cài Python. Không có runtime/ thì tìm Python của máy như trước.
+const BUNDLED_PYTHON = path.join(PROJECT_ROOT, 'runtime', 'python', 'python.exe');
 const PYTHON_CANDIDATES = [
   process.env.AIBCR_PYTHON,
+  fs.existsSync(BUNDLED_PYTHON) ? BUNDLED_PYTHON : '',
   'python',
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python312', 'python.exe'),
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python313', 'python.exe'),

@@ -42,3 +42,8 @@ backtest_report.txt
 # Electron UI: thu vien cai bang npm, khong commit
 ui/node_modules/
 ui/dist/
+
+# Ban dong goi portable (nang ~1GB) - tao bang dong-goi-portable.ps1
+build/
+dist/
+runtime/
