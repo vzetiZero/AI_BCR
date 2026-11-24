@@ -21,19 +21,6 @@ from aibcr.adapters import wm as WM
 DEFAULT_PORT = 9222
 RECONNECT_SECONDS = 3.0
 
-# Nạp lại iframe SẢNH (``iframe_109``) để nó tạo WebSocket MỚI. CDP chỉ phát khung của
-# socket được tạo SAU ``Network.enable``, nên gắn vào tab đang mở sẵn thì không thấy
-# khung nào. Chỉ nạp iframe sảnh: kết quả (protocol 25/26) đi trên socket sảnh, và nạp
-# nó KHÔNG đụng tới iframe bàn (``iframe_101``) nên bàn đang mở vẫn nguyên.
-_RELOAD_FRAMES_JS = r"""(() => {
-    const frame = document.getElementById('iframe_109');
-    if (!frame) return 0;
-    try { frame.contentWindow.location.reload(); return 1; }
-    catch (e) {
-        try { frame.src = frame.getAttribute('src') || frame.src; return 1; }
-        catch (err) { return 0; }
-    }
-})()"""
 # Nạp đủ lịch sử shoe (không chỉ 40 tay) để số tay/chuỗi cầu khớp tuyệt đối với
 # những gì bàn đang hiển thị; LiveSession chỉ mô phỏng shoe trên 40 ván cuối.
 SEED_LIMIT = 400
@@ -409,24 +396,10 @@ class WMReader(threading.Thread):
             self._status("Đã gắn bàn WM · đang đọc lá bài qua WebSocket.", "win")
             sequence = 1
             next_probe = 0.0
-            # Socket của sàn được tạo TRƯỚC khi ta ``Network.enable`` nên CDP không phát
-            # lại khung cũ. Nếu 6 giây đầu không có khung nào, nạp lại riêng iframe bàn
-            # (không đụng khung ngoài) để nó tạo socket mới — nếu không app đứng ở "chưa
-            # có cầu" mãi dù bàn đang chạy.
-            first_frame_at = None
-            reloaded_at = time.monotonic()
-            reload_done = False
+            # CDP chỉ nhận khung của socket được tạo sau Network.enable. Không reload
+            # iframe bàn/sảnh để tránh làm thay đổi giao diện hoặc mất trạng thái hiện tại.
             while not self.stop.is_set():
                 now = time.monotonic()
-                if first_frame_at is None and not reload_done and now - reloaded_at >= 6.0:
-                    reload_done = True
-                    try:
-                        ws.send(json.dumps({
-                            "id": "reload-table", "method": "Runtime.evaluate",
-                            "params": {"expression": _RELOAD_FRAMES_JS,
-                                       "returnByValue": True, "silent": True}}))
-                    except Exception:
-                        pass
                 if now >= next_probe:
                     # Đọc lại bàn đang mở định kỳ: người dùng có thể đổi bàn trong lúc
                     # đọc, và sảnh gửi kết quả của mọi bàn trên cùng một socket.
@@ -460,8 +433,6 @@ class WMReader(threading.Thread):
                 opcode = response.get("opcode")
                 if opcode not in (1, 2):
                     continue
-                if first_frame_at is None:
-                    first_frame_at = time.monotonic()
                 frame = WM.decode_frame(response.get("payloadData"), opcode)
                 if frame is not None:
                     self.handle(frame)

@@ -138,9 +138,8 @@ Một lần bấm chạy đúng chuỗi:
    là dấu hiệu bàn.
 
    **Đọc cầu khi tab mở sẵn:** CDP chỉ phát khung WebSocket của socket được tạo **sau**
-   `Network.enable`. Vì vậy `WMReader` nạp lại riêng `iframe_109` (sảnh) sau 6 giây nếu
-   chưa thấy khung nào — khung sảnh mang protocol 25/26 (kết quả + lịch sử), và nạp nó
-   không đụng `iframe_101` nên bàn đang mở vẫn nguyên.
+   `Network.enable`. `WMReader` không nạp lại iframe bàn hay sảnh; nếu không thấy frame
+   mới thì tiếp tục dò/đọc và giữ nguyên giao diện hiện tại.
 
    **Số dư ví:** `WM_WALLET_JS` đọc `#userBalanceBox` lần lượt trong `iframe_101`,
    `iframe_109`, rồi khung gốc, nên đọc được **cả khi đang ở sảnh** (trước đây chỉ đọc
@@ -266,11 +265,11 @@ khi chưa bật tool.
    trạng thái hai khung lại (`merge_states`) — chỉ số socket được dồn tiếp và mỗi socket
    nhớ khung của nó (`routes`/`locals`), nên lệnh cược đi đúng khung.
 
-   **Bàn mở trước khi cài hook** (socket cũ không bắt được): `rescue_table` nạp lại
-   **riêng khung bàn** một lần cho đúng bàn đó (hoặc chính khung WM khi là OOPIF) để tạo
-   socket mới — không đụng tab/sảnh/nút thoát bàn, tối đa một lần mỗi bàn và cách nhau
-   10 giây. Hook cũng được cài lại ngay khi sự kiện `table_opened` xảy ra, không chỉ lúc
-   đứng ở sảnh.
+   **Bàn mở trước khi cài hook** (socket cũ không bắt được): hook được gắn vào các
+   document/target hiện có. Nếu socket cũ không thể quan sát, tool báo WebSocket chưa
+   sẵn sàng và khóa đặt cược qua tool; không tự reload tab, iframe bàn hay iframe sảnh.
+   Hook cũng được cài lại ngay khi sự kiện `table_opened` xảy ra, không chỉ lúc đứng ở
+   sảnh.
 3. **Xác minh** bằng số chip thật đang treo trên bàn (`mybet_money`): lệch là huỷ ngay và
    báo lỗi, không giữ lệnh sai.
 4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng

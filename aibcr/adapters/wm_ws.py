@@ -127,35 +127,6 @@ INSTALL_TABLE_JS = r"""(() => {
     return 'ok:' + hooked;
 })()"""
 
-# Nạp lại RIÊNG khung bàn để nó tạo socket MỚI (socket cũ tạo trước khi cài hook nên
-# không bắt được). Không đụng tab/sảnh: tab và nút thoát bàn giữ nguyên.
-TABLE_FRAME_PICKER_JS = r"""
-    const tableFrame = () => {
-        const byId = document.getElementById('iframe_101');
-        if (byId) return byId;
-        for (const frame of document.querySelectorAll('iframe')) {
-            const src = frame.getAttribute('src') || '';
-            if (/iframe_101(?:\/|$|[?#])/.test(src)) return frame;
-        }
-        return null;
-    };"""
-
-RELOAD_TABLE_JS = "(() => {" + TABLE_FRAME_PICKER_JS + r"""
-    const frame = tableFrame();
-    if (!frame) return {ok: false, reason: 'no_table_frame'};
-    try {
-        frame.contentWindow.location.reload();
-        return {ok: true, via: 'reload'};
-    } catch (e) {
-        try {
-            const src = frame.getAttribute('src') || '';
-            if (!src) return {ok: false, reason: 'no_frame_src'};
-            frame.src = src;
-            return {ok: true, via: 'reload_src'};
-        } catch (err) { return {ok: false, reason: 'reload_blocked'}; }
-    }
-})()"""
-
 READ_JS = r"""(() => {
     // Đọc mã bàn đang mở từ #container: nằm ở khung gốc (bản một-document) hoặc trong
     // iframe bàn (bản nhiều iframe). Dò lần lượt, không chỉ iframe_101.
@@ -714,15 +685,11 @@ class WMSocket(threading.Thread):
         return False
 
     def rescue_table(self, timeout=18.0):
-        """Nạp lại **riêng khung bàn** để socket được tạo lại và hook bắt được.
+        """Giữ bàn nguyên trạng nếu socket cũ không bắt được.
 
-        Vì sao cần: hook chỉ bọc được ``WebSocket`` tạo **sau** khi hook chạy. Bàn mở
-        trước đó (người dùng tự vào bàn, hoặc iframe bàn được dựng sẵn từ sảnh) đã có
-        socket cũ nên không bắt được, và khi ấy mọi lệnh cược bị khoá dù app vẫn đọc và
-        phân tích bình thường. Nạp lại khung bàn tạo socket mới → cược đi được.
-
-        Chỉ nạp lại khi: chưa có socket, ĐANG ở trong bàn (có ``open_group``), và mỗi bàn
-        chỉ thử một lần để không nháy bàn lặp lại. Không đụng tab/sảnh/nút thoát bàn.
+        Việc reload khung WM có thể làm mất giao diện/trạng thái cược và không an toàn
+        với mọi layout. Chỉ gắn hook cho các document đang mở; nếu socket được tạo trước
+        hook thì báo chưa sẵn sàng, không tự reload.
         """
         if self.ready():
             return True
@@ -734,42 +701,16 @@ class WMSocket(threading.Thread):
             # xoá mốc "đã cứu" để lần vào lại CÙNG bàn vẫn được thử lại một lần.
             self._rescued_group = None
             return False
-        if self._rescued_group == group:
-            return False
-        if time.monotonic() - self._rescue_at < 10.0:
-            # Vừa nạp lại xong mà chưa thấy socket: cho bàn thời gian khởi động thay vì
-            # nạp lại dồn dập (mỗi lần nạp lại làm bàn nháy và mất trạng thái cược).
-            return False
         self._rescued_group = group
-        self._rescue_at = time.monotonic()
-        try:
-            result = self.evaluate(RELOAD_TABLE_JS, timeout=10)
-        except Exception:
-            result = None
-        reloaded = isinstance(result, dict) and bool(result.get("ok"))
-        if not reloaded and self._oopif is not None:
-            # WM một-document nằm trong iframe KHÁC ORIGIN: không có khung con nào để
-            # nạp lại, và bàn chính là target đó. Nạp lại CHÍNH khung WM (tab cổng và
-            # liên kết bàn giữ nguyên) để nó tạo socket mới lọt vào hook.
-            try:
-                reloaded = bool(self._evaluate_in(
-                    self._oopif,
-                    "(() => { try { location.reload(); return true; } "
-                    "catch (e) { return false; } })()"))
-            except Exception:
-                reloaded = False
-        if not reloaded:
-            return False
-        self._status("Chưa bắt được socket của bàn đã mở — nạp lại riêng khung bàn "
-                     "một lần để bắt socket đặt cược…", "info")
-        return self.wait_ready(timeout)
+        self._status("Chưa bắt được WebSocket của bàn đã mở. Giữ nguyên giao diện; "
+                     "đặt cược qua tool đang tạm khóa.", "warn")
+        return False
 
     def prepare(self, timeout=25.0):
         """Kết nối + cài hook cho bàn đang mở.
 
-        Thứ tự: cài hook cho các khung hiện có → nếu vẫn chưa có socket của bàn đang mở
-        thì nạp lại **riêng khung bàn** một lần (``rescue_table``). Không tải lại tab nên
-        không mất bàn, không đẩy Chrome về sảnh.
+        Cài hook cho các khung hiện có. Nếu bàn đã tạo socket trước hook thì giữ nguyên
+        trang và báo chưa sẵn sàng thay vì tự tải lại bàn/tab.
         """
         if not self._connect():
             return False
@@ -781,26 +722,15 @@ class WMSocket(threading.Thread):
                 return True
         except Exception:
             pass
-        if self.rescue_table(timeout):
-            return True
-        if not self.reload_on_start or self._reloaded:
-            return self.wait_ready(min(5.0, timeout))
-        self._reloaded = True
-        try:
-            with self.lock:
-                self._command_locked("Page.reload", {"ignoreCache": False}, timeout=15)
-        except Exception:
-            return False
-        self._status("Đang tải lại tab WM để bắt socket đặt cược…", "info")
-        return self.wait_ready(timeout)
+        self.rescue_table(timeout)
+        return self.wait_ready(min(5.0, timeout))
 
     # ------------------------------------------------------------------ vòng nền
     def run(self):
         """Vòng nền: giữ hook sống và bắt socket khi bàn được mở lại.
 
-        Không tải lại tab (sẽ mất bàn). Khi đang ở trong bàn mà chưa bắt được socket
-        (bàn mở trước khi cài hook) thì nạp lại **riêng khung bàn** một lần cho đúng
-        bàn đó; các bàn khác không bị ảnh hưởng.
+        Không tự tải lại tab hay khung bàn. Nếu socket của bàn có trước hook thì đặt cược
+        tạm khóa và giữ giao diện nguyên trạng.
         """
         warned = False
         while not self.stop_event.is_set():
@@ -825,7 +755,7 @@ class WMSocket(threading.Thread):
                         self.install_everywhere()
                     except Exception:
                         pass
-                    self.rescue_table(12.0)
+                    self.rescue_table()
                 if self.ready():
                     if warned:
                         self._status("Socket WM sẵn sàng · đặt cược gửi thẳng qua WebSocket.",
@@ -927,9 +857,8 @@ class WMSocket(threading.Thread):
 def install_hook(session):
     """Cài hook WebSocket cho tab, cho mọi khung đang mở và cho target iframe WM.
 
-    Dùng khi người dùng đang đứng trong bàn: tải lại tab sẽ đẩy Chrome về sảnh và mất
-    bàn, nên chỉ cài hook sẵn. Khung bàn đã mở từ trước vẫn có socket cũ (tạo trước hook)
-    — ``WMSocket.rescue_table`` lo phần đó bằng cách nạp lại riêng khung bàn.
+    Dùng khi người dùng đang đứng trong bàn: chỉ cài hook sẵn, không tải lại tab hay
+    iframe. Nếu socket cũ được tạo trước hook thì giữ nguyên trang và báo chưa sẵn sàng.
     """
     helper = WMSocket(session)
     ok = False

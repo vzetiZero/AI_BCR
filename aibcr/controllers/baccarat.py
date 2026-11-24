@@ -1340,14 +1340,7 @@ class BaccaratController:
         return {"ok": True, "note": "Tool đang chạy · đang tự vào bàn và đặt cược."}
 
     def _wm_prepare_socket(self):
-        """Cài hook WebSocket của WM — **không bao giờ tải lại TAB**.
-
-        Tải lại tab sẽ đẩy Chrome về sảnh và làm mất bàn đang đứng. Khi bàn đã mở trước
-        lúc cài hook (socket cũ không bắt được), thread socket tự nạp lại **riêng khung
-        bàn** một lần cho đúng bàn đó — xem ``WMSocket.rescue_table``. Nếu vẫn không có
-        socket thì đặt cược tạm khoá (báo lỗi rõ ràng); app không còn đường bấm chip nào
-        để dự phòng và không tự đổi trang.
-        """
+        """Cài hook WebSocket WM mà không tự tải lại trang hoặc khung bàn."""
         from aibcr.adapters.wm_ws import get_socket
 
         if not (getattr(self.browser, "wm_page_id", None)

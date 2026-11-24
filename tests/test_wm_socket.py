@@ -170,6 +170,21 @@ class StateTests(unittest.TestCase):
         self.assertEqual(socket.state(), {})
 
 
+class RescueTableSafetyTests(unittest.TestCase):
+    def test_missing_socket_never_reloads_an_open_table(self):
+        socket = wm_ws.WMSocket(session=None)
+        socket.ready = lambda: False
+        socket.state = lambda fresh=False: {"open_group": 1352}
+        reload_calls = []
+        socket.evaluate = lambda *args, **kwargs: reload_calls.append(args) or {
+            "ok": True,
+        }
+        socket._status = lambda *args, **kwargs: None
+
+        self.assertFalse(socket.rescue_table(timeout=0))
+        self.assertEqual(reload_calls, [])
+
+
 class PlaceRoutingTests(unittest.TestCase):
     """Lệnh cược phải đi vào ĐÚNG khung của socket được chọn."""
 

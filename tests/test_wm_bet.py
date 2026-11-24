@@ -170,9 +170,8 @@ class SocketInstallJsTests(unittest.TestCase):
         """Bàn có thể nằm ở iframe không tên iframe_101 → phải quét mọi iframe."""
         self.assertIn("querySelectorAll('iframe')", wm_ws.INSTALL_TABLE_JS)
 
-    def test_reload_targets_are_reported_not_swallowed(self):
-        self.assertIn("no_table_frame", wm_ws.RELOAD_TABLE_JS)
-        self.assertIn("iframe_101", wm_ws.TABLE_FRAME_PICKER_JS)
+    def test_tool_has_no_automatic_table_reload_script(self):
+        self.assertFalse(hasattr(wm_ws, "RELOAD_TABLE_JS"))
 
 
 class ClickableTests(unittest.TestCase):
