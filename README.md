@@ -56,6 +56,7 @@ AI_BCR/
 ├─ tests/                    unittest + node --test
 ├─ tools/                    script chạy tay (đọc WebSocket, soi CDP, kiểm chọn bàn)
 ├─ Start.bat                 mở app (tự cài Electron nếu thiếu)
+├─ UPDATE.bat                cập nhật mã từ origin/main (git pull --ff-only)
 ├─ install-toan-bo.bat       cài Python deps + Electron
 └─ push_update.bat/.ps1      commit + push lên GitHub
 ```
@@ -67,6 +68,7 @@ Luồng một lệnh: Electron → `preload.js` → `ui/main.js` → `aibcr.serv
 
 ```
 install-toan-bo.bat      # lần đầu: pip deps + Electron
+UPDATE.bat               # cập nhật mã mới nhất từ GitHub
 Start.bat                # mở app
 ```
 
