@@ -158,7 +158,7 @@ class StructureTests(unittest.TestCase):
     def test_electron_ui_files_are_present(self):
         for rel in ("ui/package.json", "ui/main.js", "ui/preload.js",
                     "ui/renderer/index.html", "ui/renderer/app.js",
-                    "ui/renderer/alarm.js", "ui/renderer/styles.css"):
+                    "ui/renderer/styles.css"):
             self.assertTrue((ROOT / rel).exists(), rel)
 
     def test_games_use_a_single_baccarat_profile(self):

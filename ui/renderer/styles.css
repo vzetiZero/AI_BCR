@@ -394,47 +394,6 @@ main::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 
 .modal-body li { margin-bottom: 3px; }
 .modal-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
 
-/* ---------------------- âm báo: còi sự cố + chuông KPI ---------------------- */
-.alarm-box {
-  display: inline-flex; align-items: center; gap: 8px; padding: 3px 9px;
-  border: 1px solid rgba(245, 196, 81, 0.55); border-radius: 8px;
-  background: var(--gold-soft); transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
-}
-.alarm-box.off { border-color: var(--line-strong); background: var(--hover-bg); }
-.alarm-box.flashing {
-  border-color: #ef4444; background: rgba(239, 68, 68, 0.55);
-  box-shadow: 0 0 18px rgba(239, 68, 68, 0.85);
-}
-.alarm-box.success {
-  border-color: var(--green); background: rgba(52, 211, 153, 0.32);
-  box-shadow: 0 0 18px rgba(52, 211, 153, 0.7);
-}
-.alarm-toggle {
-  display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0;
-  background: none; color: var(--gold); font: inherit; font-size: 10px;
-  font-weight: 800; cursor: pointer;
-}
-.alarm-box.off .alarm-toggle { color: var(--muted); }
-.alarm-icon { font-size: 12px; line-height: 1; }
-.alarm-state {
-  padding: 1px 5px; border-radius: 4px; background: rgba(245, 196, 81, 0.22);
-  font-size: 9px; letter-spacing: 0.3px;
-}
-.alarm-box.off .alarm-state { background: var(--hover-bg); color: var(--muted); }
-.alarm-volume {
-  display: inline-flex; align-items: center; gap: 4px;
-  color: var(--muted); font-size: 9px; font-weight: 700;
-}
-.alarm-volume input { width: 58px; height: 5px; margin: 0; accent-color: var(--gold); cursor: pointer; }
-.alarm-volume strong { min-width: 28px; color: var(--gold); font-size: 10px; }
-.alarm-test {
-  padding: 2px 7px; border: 0; border-radius: 5px; cursor: pointer;
-  background: linear-gradient(135deg, #f59e0b, #d97706);
-  color: #0f172a; font: inherit; font-size: 9px; font-weight: 800;
-}
-.alarm-test:hover { filter: brightness(1.1); }
-.alarm-test.ok { background: linear-gradient(135deg, #34d399, #059669); color: #04261a; }
-
 
 /* ===================== BACCARAT (port từ giao diện Tk) ===================== */
 .row.wrap { flex-wrap: wrap; }

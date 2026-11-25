@@ -2641,7 +2641,8 @@ class BaccaratController:
             note = "Mất kết nối/đọc cầu lỗi. Hãy đối chiếu lại trước khi tiếp tục."
             with self.lock:
                 self.sim.pause(note)
-            # Phải ghi log mức error: UI phát còi theo mức log, không đọc `sim.note`.
+            # Phải ghi log mức error: Nhật ký là nơi duy nhất hiện lý do dừng này,
+            # `sim.note` không đi qua event.
             self.log(note + " (" + error + ")", "error")
             return
         self.session_lost = False
@@ -3012,7 +3013,7 @@ class BaccaratController:
         self.chip_live = None
         self.chip_read_at = 0.0
         # Rời bàn vì Chrome không còn trong bàn WM: đây là sự cố (mất chỗ đặt), nên ghi
-        # mức error để âm báo kêu, không phải warn.
+        # mức error để dòng Nhật ký nổi bật, không phải warn.
         self.log(self.sim.note, "error")
         self._push_state()
 
@@ -3061,8 +3062,8 @@ class BaccaratController:
         if changed:
             self._save_state()
             # `sim.process` có thể tạm dừng vì sự cố (dữ liệu cũ, xung đột, bỏ tay
-            # liên tiếp). Trạng thái đó chỉ nằm trong `sim.note` nên UI không hú còi
-            # được — ghi log mức error để âm báo của renderer bắt được.
+            # liên tiếp). Trạng thái đó chỉ nằm trong `sim.note`, nên phải ghi log mức
+            # error để người dùng thấy lý do dừng ngay trong Nhật ký.
             self._log_sim_pause()
         return bool(changed)
 
@@ -3075,7 +3076,7 @@ class BaccaratController:
         """
         if self.sim.running or not self.sim.note:
             return
-        # Chốt lời có chuông riêng ở renderer; không được hú còi lỗi cho cùng sự kiện.
+        # Chốt lời là kết thúc phiên bình thường; không ghi log lỗi cho cùng sự kiện.
         quiet = ("Đã dừng tool", "Đang rời bàn", "Đã chốt lời", "Đã rời bàn",
                  "Đã tạm dừng", "đã chốt lời", "mục tiêu lãi")
         if any(marker in self.sim.note for marker in quiet):

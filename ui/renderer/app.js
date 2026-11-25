@@ -16,16 +16,16 @@ const state = {
   sub: { baccarat: 'play' },
   tableSearch: '',
   huntTick: 0,
-  // Mốc đã báo âm thanh: chỉ kêu khi TRẠNG THÁI ĐỔI, không kêu lại mỗi vòng state.
+  // Mốc trạng thái KPI đã ghi log: chỉ ghi khi TRẠNG THÁI ĐỔI, không lặp mỗi vòng state.
   kpi: { signature: null },
 };
 
-/* ---------------------------- âm báo theo trạng thái ----------------------------
-   Chỉ kêu khi TRẠNG THÁI ĐỔI, không kêu lại mỗi vòng `state` (2 giây/lần):
-     bình thường → đủ KPI   : chuông thành công (đi lên, nghe tích cực)
-     bình thường → sự cố    : còi hú (hết vốn, mất phiên)
-   Lần render đầu tiên chỉ "chụp" trạng thái làm mốc, không kêu, để mở app lúc phiên
-   đã chốt lời sẵn cũng không giật mình.
+/* ------------------------- ghi log theo trạng thái KPI -------------------------
+   Chỉ ghi khi TRẠNG THÁI ĐỔI, không lặp lại mỗi vòng `state` (2 giây/lần):
+     bình thường → đủ KPI   : ghi log mức win
+     bình thường → sự cố    : ghi log mức error (hết vốn, mất phiên)
+   Lần render đầu tiên chỉ "chụp" trạng thái làm mốc, không ghi, để mở app lúc phiên
+   đã chốt lời sẵn cũng không thêm dòng thừa.
 */
 function kpiStateOf(snapshot) {
   const money = snapshot.money || {};
@@ -44,36 +44,18 @@ function kpiStateOf(snapshot) {
   return { level: '', note: '' };
 }
 
-function syncKpiAudio(snapshot) {
+function syncKpiLog(snapshot) {
   const current = kpiStateOf(snapshot);
   const signature = current.level;
   if (state.kpi.signature === signature) return;
   const previous = state.kpi.signature;
   state.kpi.signature = signature;
-  if (previous === null) return;   // render đầu tiên: chỉ ghi mốc, không kêu
+  if (previous === null) return;   // render đầu tiên: chỉ ghi mốc, không ghi log
   if (signature === 'success') {
-    window.aibcrAlarm?.success?.(current.note);
     appendLog('baccarat', 'win', current.note);
   } else if (signature === 'error' && previous !== 'error') {
-    window.aibcrAlarm?.notify?.(current.note, { level: 'error' });
     appendLog('baccarat', 'error', current.note);
   }
-}
-
-/* Lỗi từ lệnh/thông điệp cũng phải kêu còi: đây là lỗi thao tác (đặt chip, kết nối).
-   Chống bão lỗi bằng cách so NỘI DUNG gần nhất thay vì cửa sổ thời gian: lỗi khác nội
-   dung phải kêu ngay (vd. đọc cầu lỗi ngay sau khi đặt chip lỗi), còn cùng một lỗi lặp
-   lại thì im để không hú liên tục. */
-let lastNoteError = '';
-let lastNoteErrorAt = 0;
-function noteError(game, text) {
-  const message = String(text || '').trim();
-  if (!message) return;
-  const now = Date.now();
-  if (message === lastNoteError && now - lastNoteErrorAt < 15000) return;
-  lastNoteError = message;
-  lastNoteErrorAt = now;
-  window.aibcrAlarm?.notify?.(message, { level: 'error' });
 }
 
 /* ------------------------------- định dạng ------------------------------- */
@@ -125,7 +107,6 @@ async function call(game, method, params = {}) {
     const text = (reply && reply.error) || payloadError || 'lỗi không rõ';
     appendLog(game, 'error', `${method}: ${text}`);
     toast(text);
-    noteError(game, text);
     return null;
   }
   return reply.result;
@@ -686,7 +667,7 @@ function renderAiPanel(live) {
 function renderBaccarat(snapshot) {
   if (!snapshot) return;
   state.baccarat = snapshot;
-  syncKpiAudio(snapshot);
+  syncKpiLog(snapshot);
   const money = snapshot.money || {};
   const table = snapshot.table || {};
   const plan = snapshot.plan || {};
@@ -912,7 +893,6 @@ api.onEngineEvent(({ game, event, data }) => {
   if (event === 'log') {
     const level = data.level || 'info';
     appendLog(game, level, data.text || '');
-    if (level === 'error') window.aibcrAlarm?.notify?.(data.text || '', { level });
     return;
   }
   if (event === 'ready') {
@@ -1310,7 +1290,6 @@ $('#ba-ai-key-clear').addEventListener('click', async () => {
 (async function boot() {
   initTheme();
   initRail();
-  window.aibcrAlarm?.init?.();
   renderLog('baccarat');
   const info = await api.info();
   $('#app-ver').textContent = `v${info.version}`;
