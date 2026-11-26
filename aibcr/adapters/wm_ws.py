@@ -125,6 +125,9 @@ HOOK_JS = r"""(() => {
         Wrapped.prototype = Native.prototype;
         ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach((k) => { Wrapped[k] = Native[k]; });
         win.WebSocket = Wrapped;
+        // Đánh dấu: constructor của khung đã được bọc. ``adopt_existing`` dựa vào cờ này
+        // để không bọc hai lần (bọc chồng sẽ đẩy cùng một socket vào store hai lần).
+        store.wrapped = true;
     };
     window.__wmMakeHook = make;
     window.__wmDecode = decode;
@@ -701,16 +704,24 @@ class WMSocket(threading.Thread):
             return 0
         # Store của chính window này (hook đã tạo khi cài cho document hiện tại). Nếu
         # chưa có thì tạo — socket vẫn dùng được qua SEND_JS, chỉ thiếu store để đọc.
+        # Kèm luôn việc BỌC constructor nếu khung này chưa được bọc: nếu chỉ nhận socket
+        # cũ mà không bọc, socket của ván/bàn sau (tạo lại khi trang tự kết nối lại) sẽ
+        # không bao giờ được thấy, và tool lại rơi về "chưa bắt được socket".
         store_id = ((channel["command"]("Runtime.callFunctionOn", {
             "objectId": window_id, "objectGroup": group,
             "functionDeclaration": (
                 "function(){"
                 "  if (!this.__wmHook3) {"
                 "    this.__wmHook3 = {sockets: [], urls: [], protocols: {},"
-                "      recent21: [], last22: null, sent: [], errors: [], scope: {},"
-                "      top: (this === this.top), adopted: 0};"
+                "      recent21: [], recent22: [], last22: null, sent: [], errors: [],"
+                "      scope: {}, top: (this === this.top), adopted: 0};"
                 "  }"
-                "  return this.__wmHook3;"
+                "  const store = this.__wmHook3;"
+                "  const make = this.__wmMakeHook;"
+                "  if (typeof make === 'function' && !store.wrapped) {"
+                "    make(this, store, (this === this.top) ? 'top' : 'iframe');"
+                "  }"
+                "  return store;"
                 "}"),
             "returnByValue": False,
         }).get("result") or {}).get("objectId"))

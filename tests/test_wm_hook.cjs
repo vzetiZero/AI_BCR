@@ -101,8 +101,7 @@ test('socket tạo TRƯỚC hook vẫn nhận được bằng ADOPT_FN', () => {
   assert.strictEqual(store.adopted, 1);
 });
 
-test('nhận lại lần hai không nhân đôi socket', () => {
-  const win = realm();
+test('nhận lại lần hai không nhân đôi socket', () => {  const win = realm();
   const old = new win.WebSocket('wss://wm/table');
   vm.runInContext(js('HOOK_JS'), win);
   const adopt = vm.runInContext('(' + js('ADOPT_FN').trim() + ')', win);
@@ -145,6 +144,21 @@ test('WINDOWS_JS chỉ gom khung truy cập được (khác origin thì bỏ)', 
   assert.strictEqual(list.length, 2, 'window gốc + 1 iframe cùng origin');
   assert.ok(list[0].WebSocket === win.WebSocket, 'phần tử đầu phải là window gốc');
   assert.ok(list[1].WebSocket, 'iframe cùng origin phải có mặt');
+});
+
+test('socket tạo SAU khi nhận socket cũ vẫn được hook bắt', () => {
+  // ``adopt_existing`` tạo store rồi bọc constructor; socket tạo sau đó (trang tự kết
+  // nối lại khi đổi bàn) phải vào store, nếu không tool lại mất socket.
+  const win = realm();
+  const old = new win.WebSocket('wss://wm/table');
+  vm.runInContext(js('HOOK_JS'), win);
+  const adopt = vm.runInContext('(' + js('ADOPT_FN').trim() + ')', win);
+  const store = win.__wmHook3;
+  assert.strictEqual(adopt.call([old], store, 'iframe'), 1);
+  const later = new win.WebSocket('wss://wm/table2');
+  later.deliver(frame21(99));
+  assert.strictEqual(store.sockets.length, 2, 'socket mới vẫn phải được bọc');
+  assert.strictEqual(store.recent21[store.recent21.length - 1].data.groupID, 99);
 });
 
 let failed = 0;
