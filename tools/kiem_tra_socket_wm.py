@@ -106,6 +106,8 @@ def main():
                   % (item.get("socket"), item.get("ok", data.get("bOk")),
                      item.get("serial", data.get("betSerialNumber")),
                      str(data)[:80]))
+            if item.get("raw"):
+                print("    raw: %s" % str(item.get("raw"))[:300])
     print("\nMã bàn đang mở (#container group): %s" % state.get("open_group"))
     print("Số khung protocol 21 đã thấy: %d" % len(state.get("recent21") or []))
     if current is None:

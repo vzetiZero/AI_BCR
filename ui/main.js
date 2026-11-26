@@ -7,11 +7,16 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
+// THỨ TỰ QUAN TRỌNG: đường dẫn tuyệt đối của Python thật phải đứng TRƯỚC 'python'.
+// Trên Windows, `python` trong PATH thường là stub Microsoft Store: nó "tồn tại" nên
+// `find()` cũ luôn chọn nó, spawn trả exit 9009 và engine không bao giờ chạy — UI mở
+// nhưng mọi lệnh treo. Chỉ dùng 'python' khi không tìm thấy bản cài thật.
 const PYTHON_CANDIDATES = [
   process.env.AIBCR_PYTHON,
-  'python',
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python312', 'python.exe'),
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python313', 'python.exe'),
+  path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python311', 'python.exe'),
+  'python',
 ].filter(Boolean);
 
 let mainWindow = null;

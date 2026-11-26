@@ -56,7 +56,7 @@ HOOK_JS = r"""(() => {
             const msg = JSON.parse(text);
             const proto = msg && msg.protocol;
             if (typeof proto !== 'number') return;
-            handler(proto, msg);
+            handler(proto, msg, text);
         } catch (e) {
             if (store.errors.length < 20) store.errors.push(String(e).slice(0, 80));
         }
@@ -74,7 +74,7 @@ HOOK_JS = r"""(() => {
             data.text().then(onText(store, handler)).catch(() => {});
         }
     };
-    const record = (store, idx, proto, msg) => {
+    const record = (store, idx, proto, msg, raw) => {
         store.protocols[idx] = proto;
         if (proto === 21) {
             store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
@@ -87,6 +87,9 @@ HOOK_JS = r"""(() => {
                 : ((msg.data && msg.data[key] !== undefined) ? msg.data[key] : null);
             const entry = {socket: idx, at: Date.now(), data: msg.data,
                            ok: pick('bOk'), serial: pick('betSerialNumber')};
+            // Giữ khung THÔ: khi định dạng khác dự đoán, đây là thứ duy nhất cho biết
+            // sàn thật trả gì (dùng để chẩn đoán, không dùng để quyết định đặt cược).
+            if (typeof raw === 'string') entry.raw = raw.slice(0, 400);
             store.last22 = entry;
             // Giữ lịch sử ngắn: phản hồi của lệnh trước không bị lệnh sau ghi đè trước
             // khi vòng chờ đọc kịp.
@@ -124,7 +127,8 @@ HOOK_JS = r"""(() => {
                 };
                 ws.addEventListener('message', function (event) {
                     const idx = indexOf(ws);
-                    decode(store, event.data, (proto, msg) => record(store, idx, proto, msg));
+                    decode(store, event.data,
+                           (proto, msg, raw) => record(store, idx, proto, msg, raw));
                 });
             } catch (e) {}
             return ws;
@@ -167,7 +171,7 @@ ADOPT_FN = r"""function (store, label) {
     const decoder = new TextDecoder('utf-8');
     const pick = (msg, key) => (msg[key] !== undefined) ? msg[key]
         : ((msg.data && msg.data[key] !== undefined) ? msg.data[key] : null);
-    const put = (idx, proto, msg) => {
+    const put = (idx, proto, msg, raw) => {
         store.protocols[idx] = proto;
         if (proto === 21) {
             store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
@@ -177,6 +181,7 @@ ADOPT_FN = r"""function (store, label) {
             // ``data`` tuỳ mirror, nên chép sẵn cả hai để bộ khớp không đoán sai.
             const entry = {socket: idx, at: Date.now(), data: msg.data,
                            ok: pick(msg, 'bOk'), serial: pick(msg, 'betSerialNumber')};
+            if (typeof raw === 'string') entry.raw = raw.slice(0, 400);
             store.last22 = entry;
             store.recent22 = store.recent22 || [];
             store.recent22.push(entry);
@@ -188,7 +193,7 @@ ADOPT_FN = r"""function (store, label) {
             const msg = JSON.parse(text);
             const proto = msg && msg.protocol;
             if (typeof proto !== 'number') return;
-            put(idx, proto, msg);
+            put(idx, proto, msg, text);
         } catch (e) {
             if (store.errors.length < 20) store.errors.push(String(e).slice(0, 80));
         }
@@ -329,7 +334,9 @@ READ_JS = r"""(() => {
         const replies = (hook.recent22 || (hook.last22 ? [hook.last22] : []));
         for (const item of replies.slice(-12)) {
             merged.recent22.push({socket: base + item.socket, at: item.at,
-                                  data: item.data, offset: base, scope: entry.label});
+                                  data: item.data, offset: base, scope: entry.label,
+                                  ok: item.ok, serial: item.serial,
+                                  raw: item.raw});
         }
         if (hook.last22) {
             const at = hook.last22.at || 0;
@@ -1232,7 +1239,6 @@ class WMSocket(threading.Thread):
             return int(value) == int(serial)
         except (TypeError, ValueError):
             return False
-
 
 # ------------------------------------------------------------------ dùng chung
 def install_hook(session):
