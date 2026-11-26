@@ -438,12 +438,52 @@ def bet_frame(side, amount, game_no, round_no, serial=1):
                      "commission": 0, "remark": BET_REMARK}}
 
 
-def current_table(state, want_group=None):
+def _preferred(index, url, prefer):
+    """Socket này có phải socket "đã chứng minh đặt được" không?
+
+    ``prefer`` có thể là chỉ số (layout hook ổn định) hoặc URL của socket. URL quan
+    trọng hơn chỉ số: khi trang mở/đóng một socket (đổi bàn, reconnect) danh sách socket
+    đổi thứ tự và chỉ số cũ trỏ sang socket khác — đúng kiểu lỗi "tay đầu đặt được, tay
+    sau không" vì tay sau gửi nhầm sang socket sảnh.
+    """
+    if prefer is None:
+        return False
+    if isinstance(prefer, str):
+        return bool(url) and url == prefer
+    try:
+        return int(index) == int(prefer)
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_dead(index, url, dead):
+    """Socket đã từng gửi lệnh mà sàn im lặng (đã xác minh tiền chưa đi)."""
+    if not dead:
+        return False
+    for key in dead:
+        if isinstance(key, str):
+            if url and key == url:
+                return True
+        else:
+            try:
+                if int(key) == int(index):
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def current_table(state, want_group=None, prefer=None, silent=None):
     """Socket + khung 21 của ĐÚNG bàn đang mở: ``(index, data, seen_at_ms)`` hoặc ``None``.
 
     ``want_group`` = ``groupID`` của bàn người dùng đang mở (lấy từ ``wm_open_key``).
     Rất quan trọng với socket sảnh: một socket phát khung 21 của **nhiều bàn**, nên nếu
     chỉ lấy "khung mới nhất" thì có thể chọn nhầm bàn khác và đặt tiền vào đó.
+
+    ``prefer`` = chỉ số socket đã từng trả lời lệnh cược của đúng bàn này. WM nhúng một
+    document có thể có nhiều socket cùng nhận khung 21 (socket sảnh + socket bàn); gửi
+    lệnh vào socket sảnh thì sàn **im lặng** và app báo ``no_reply`` oan. Ưu tiên socket
+    đã chứng minh là nó nhận được phản hồi 22 của bàn mình.
 
     Thứ tự chọn:
       1. socket của **iframe bàn** cùng origin (layout nhiều iframe) — đường chuẩn;
@@ -454,6 +494,7 @@ def current_table(state, want_group=None):
     """
     frames = (state or {}).get("recent21") or []
     states = (state or {}).get("states") or []
+    urls = (state or {}).get("urls") or []
     scopes = (state or {}).get("scopes") or {}
     group = (state or {}).get("open_group")
     if group is None:
@@ -471,8 +512,16 @@ def current_table(state, want_group=None):
     def open_socket(index):
         return 0 <= index < len(states) and states[index] == 1
 
-    def pick(scope):
+    dead = (state or {}).get("silent") or silent or {}
+
+    def matches(entry, index):
+        data = (entry or {}).get("data") or {}
+        return data.get("groupID") == group
+
+    def pick(scope, avoid_dead=True):
         best = None
+        preferred = None
+        fallback_dead = None
         for entry in frames:
             try:
                 index = int((entry or {}).get("socket"))
@@ -482,15 +531,43 @@ def current_table(state, want_group=None):
                 continue
             if scope is not None and scopes.get(str(index), scopes.get(index)) != scope:
                 continue
-            data = (entry or {}).get("data") or {}
-            if group is not None and data.get("groupID") != group:
+            if not matches(entry, index):
                 continue
             at = float((entry or {}).get("at") or 0)
+            url = urls[index] if index < len(urls) else ""
+            if _preferred(index, url, prefer):
+                # Socket đã từng nhận phản hồi 22 của đúng bàn: chắc chắn hơn "mới nhất".
+                preferred = (index, (entry or {}).get("data") or {}, at)
+                continue
+            candidate = (index, (entry or {}).get("data") or {}, at)
+            if avoid_dead and _is_dead(index, url, dead):
+                # Socket này từng gửi lệnh mà sàn im lặng (đã xác minh tiền chưa đi).
+                # Chỉ dùng khi không còn lựa chọn nào khác.
+                if fallback_dead is None or at > fallback_dead[2]:
+                    fallback_dead = candidate
+                continue
             if best is None or at > best[2]:
-                best = (index, data, at)
-        return best
+                best = candidate
+        # Socket ưa thích chỉ được dùng khi khung 21 của nó thuộc ĐÚNG ván hiện tại.
+        # Một lần trả lời trước đây không bảo đảm socket đó còn nhận khung của ván mới;
+        # dùng khung cũ là gửi lệnh vào ván đã đóng (sàn im lặng hoặc từ chối). So theo
+        # ván chứ không theo mốc thời gian: cửa sổ cược của một ván kéo dài hàng chục
+        # giây nên "khung cũ hơn vài giây" vẫn là ván đang mở.
+        if preferred is not None and best is not None:
+            now_round = ((best[1] or {}).get("gameNo"), (best[1] or {}).get("gameNoRound"))
+            was_round = ((preferred[1] or {}).get("gameNo"),
+                         (preferred[1] or {}).get("gameNoRound"))
+            known = [value for value in now_round if value is not None]
+            if known and now_round != was_round:
+                preferred = None
+        return preferred or best or fallback_dead
 
-    return pick("iframe") or pick("oopif") or pick(None)
+    picked = pick("iframe") or pick("oopif") or pick(None)
+    if picked is None and dead:
+        # Mọi socket còn sống đều đã từng câm: thà thử lại còn hơn không đặt được tay nào.
+        picked = pick("iframe", avoid_dead=False) or pick("oopif", avoid_dead=False) \
+            or pick(None, avoid_dead=False)
+    return picked
 
 
 def merge_states(channels):
@@ -602,6 +679,17 @@ class WMSocket(threading.Thread):
         self._state_at = 0.0
         self._reloaded = False
         self._serial = {"key": None, "value": 0}
+        # Socket đã từng nhận phản hồi 22 của đúng bàn này: ``{group: index}``. Dùng để
+        # gửi tay kế vào CÙNG socket thay vì "khung 21 mới nhất" — nhiều socket cùng
+        # nhận khung 21 nhưng chỉ một cái là socket cược của bàn; gửi vào socket sảnh thì
+        # sàn im lặng → ``no_reply`` dù tiền có thể đã bị trừ.
+        self._reply_socket = {}
+        # Socket đã gửi lệnh mà sàn không trả lời, dù chip cho thấy tiền chưa đi:
+        # ``{group: {index: lúc ghi}}``. Tránh lặp lại đúng socket câm ở tay sau.
+        self._silent_socket = {}        # Lệch đồng hồ TRANG - Python (ms). Khung 21/22 đánh dấu bằng ``Date.now()`` của
+        # trang, nên mọi so sánh tuổi dữ liệu phải quy về cùng một đồng hồ.
+        self._skew_ms = None
+        self._skew_at = 0.0
         # Bàn đã thử "cứu" socket (nạp lại riêng khung bàn) — tránh nạp lại lặp vô hạn.
         self._rescued_group = None
         self._rescue_at = 0.0
@@ -1160,6 +1248,94 @@ class WMSocket(threading.Thread):
         self._close()
 
     # ------------------------------------------------------------------ đặt cược
+    def _page_now(self):
+        """Giờ của TRANG (ms) — nguồn thời gian của mọi khung protocol 21/22.
+
+        Trả ``None`` nếu chưa đọc được (khung chết). Lệch đồng hồ được tính lại mỗi 30
+        giây; giữa hai lần đo, dùng ``time.monotonic`` để tuổi dữ liệu vẫn tăng đúng.
+        """
+        monotonic = time.monotonic()
+        if self._skew_ms is not None and monotonic - self._skew_at < 30.0:
+            base, elapsed = self._skew_ms
+            return base + (monotonic - elapsed) * 1000.0
+        channel = self._page
+        if channel is None or self._command is None:
+            return None
+        try:
+            value = self._evaluate_in(channel, "Date.now()")
+        except Exception:
+            return None
+        try:
+            page_now = float(value)
+        except (TypeError, ValueError):
+            return None
+        self._skew_ms = (page_now, monotonic)
+        self._skew_at = monotonic
+        return page_now
+
+    def _age_ms(self, seen_at):
+        """Tuổi của mốc ``at`` (đồng hồ trang) tính theo giờ TRANG, đơn vị ms.
+
+        Trả ``None`` khi không xác định được (không đọc được giờ trang) — nơi gọi phải
+        coi là "không kết luận được", không được mặc định là cũ.
+        """
+        try:
+            seen = float(seen_at or 0)
+        except (TypeError, ValueError):
+            return None
+        if not seen:
+            return None
+        now = self._page_now()
+        if now is None:
+            return None
+        return now - seen
+
+    def _socket_url(self, index):
+        """URL của socket thứ ``index`` — khoá ổn định hơn chỉ số khi danh sách đổi."""
+        try:
+            urls = (self.state() or {}).get("urls") or []
+            if 0 <= int(index) < len(urls):
+                return str(urls[int(index)] or "")
+        except (TypeError, ValueError):
+            pass
+        return ""
+
+    def _remember_socket(self, group, index, url=""):
+        """Nhớ socket đã trả lời lệnh của bàn: ưu tiên URL, giữ chỉ số làm dự phòng."""
+        self._reply_socket[group] = url or index
+        return self._reply_socket[group]
+
+    def _forget_socket(self, group):
+        self._reply_socket.pop(group, None)
+
+    def mark_unresponsive(self, detail=None):
+        """Ghi nhớ socket vừa gửi lệnh mà sàn KHÔNG trả lời, để tay sau chọn socket khác.
+
+        Chỉ gọi khi đã đọc chip thật và thấy tiền CHƯA đi — tức là ta biết chắc lệnh
+        không tới nơi. Nhờ vậy lần đặt sau không lặp lại đúng sai lầm đó thay vì bỏ cả tay.
+        """
+        detail = detail or {}
+        try:
+            group = int(detail.get("group"))
+            index = int(detail.get("socket"))
+        except (TypeError, ValueError):
+            return False
+        self._reply_socket.pop(group, None)
+        url = ""
+        try:
+            url = self._socket_url(int(index))
+        except (TypeError, ValueError):
+            url = ""
+        dead = self._silent_socket.setdefault(group, {})
+        # Khoá theo URL khi biết: chỉ số socket đổi khi trang reconnect.
+        dead[url or index] = time.time()
+        # Chỉ giữ 10 phút: socket có thể được tạo lại sau khi trang tự kết nối lại.
+        cutoff = time.time() - 600.0
+        for key in list(dead):
+            if dead[key] < cutoff:
+                dead.pop(key, None)
+        return True
+
     def _next_serial(self, game_no, round_no):
         key = "%s:%s" % (game_no, round_no)
         if self._serial["key"] != key:
@@ -1190,14 +1366,17 @@ class WMSocket(threading.Thread):
             except (TypeError, ValueError):
                 want_group = None
         state = self.state(fresh=True)
-        current = current_table(state, want_group)
+        prefer = self._reply_socket.get(int(want_group)) if want_group is not None else None
+        silent = self._silent_socket.get(int(want_group)) if want_group is not None else None
+        current = current_table(state, want_group, prefer=prefer, silent=silent)
         if current is None:
             # Lần cuối thử cứu: socket của bàn có thể đã sống trước hook (người dùng vào
             # bàn rồi mới bấm Chạy tool). Nhận nó và thử lại một lần — không tải lại gì.
             try:
                 if self.adopt_existing():
                     state = self.state(fresh=True)
-                    current = current_table(state, want_group)
+                    current = current_table(state, want_group, prefer=prefer,
+                                            silent=silent)
             except Exception:
                 current = None
         if current is None:
@@ -1219,8 +1398,8 @@ class WMSocket(threading.Thread):
         if table_group is None and want_group is None:
             return {"ok": False, "error": "unknown_table",
                     "detail": {"note": "Không xác định được bàn đang mở — không gửi lệnh."}}
-        age = (time.time() * 1000.0) - float(seen_at or 0)
-        if age > 15000:
+        age = self._age_ms(seen_at)
+        if age is not None and age > 15000:
             return {"ok": False, "error": "Dữ liệu bàn đã cũ (%.1fs) — chưa gửi."
                                           % (age / 1000.0)}
         # Không tự đoán pha cược bằng ``tableStatus``: server trả ``bOk: false`` khi cửa
@@ -1235,7 +1414,7 @@ class WMSocket(threading.Thread):
         channel = self._oopif if (route != "page" and self._oopif) else self._page
         if channel is None:
             return {"ok": False, "error": "not_connected"}
-        sent_at = time.time() * 1000.0
+        sent_at = self._page_now() or (time.time() * 1000.0)
         with self.lock:
             try:
                 result = self._evaluate_in(channel, SEND_JS % (int(local_index), payload))
@@ -1255,7 +1434,7 @@ class WMSocket(threading.Thread):
             except (TypeError, ValueError):
                 sent_at = 0.0
             if not sent_at:
-                sent_at = time.time() * 1000.0
+                sent_at = self._page_now() or (time.time() * 1000.0)
             deadline = time.monotonic() + max(1.0, float(wait_seconds))
             # Thời gian chờ vẽ/đẩy phản hồi của trang: so đồng hồ trang với nhau nên chỉ
             # cần dung sai nhỏ; vẫn cho phép phản hồi đến trước mốc một chút vì
@@ -1331,6 +1510,13 @@ class WMSocket(threading.Thread):
                         break
                 if reply is not None:
                     body = reply.get("data") or {}
+                    # Socket đã nhận phản hồi của bàn này = socket CƯỢC thật của bàn. Nhớ
+                    # lại để tay kế gửi đúng chỗ, thay vì chọn "khung 21 mới nhất" (nhiều
+                    # socket cùng nhận khung 21, gửi vào socket sảnh thì sàn im lặng).
+                    # Khoá theo URL vì chỉ số socket đổi khi trang mở/đóng kết nối.
+                    if table_group is not None:
+                        url = self._socket_url(int(socket_index))
+                        self._remember_socket(int(table_group), int(socket_index), url)
                     # ``ok``/``serial`` được hook chép từ cả cấp ngoài lẫn ``data``; ``None``
                     # = khung không mang trường đó (mirror cũ), khi đó mới xét ``body``.
                     ok_flag = reply.get("ok")
@@ -1346,9 +1532,37 @@ class WMSocket(threading.Thread):
         except Exception:
             snapshot = {}
         seen = sorted({str(value) for value in (snapshot.get("protocols") or {}).values()})
+        # Gửi xong mà không khớp được phản hồi: bỏ ký ức socket cũ vì nó không còn đáng
+        # tin (có thể lệnh đã đi vào socket sảnh — sàn im lặng). Vẫn giữ ``sent`` để nơi
+        # gọi kiểm tra chip thật trước khi kết luận hỏng.
+        if want_group is not None:
+            try:
+                self._forget_socket(int(want_group))
+            except (TypeError, ValueError):
+                pass
+        urls = snapshot.get("urls") or []
+        sent_url = (str(urls[int(socket_index)]) if 0 <= int(socket_index) < len(urls)
+                    else "")
+        # Bằng chứng cho lần chạy sau: mọi khung 22 đã thấy (socket, groupID, bOk, thời điểm
+        # so với lúc gửi) để biết phản hồi đến từ socket nào, hoặc sàn có trả lời không.
+        replies = []
+        for item in (snapshot.get("recent22") or [])[-6:]:
+            if not isinstance(item, dict):
+                continue
+            body = item.get("data") or {}
+            try:
+                lag = round(float(item.get("at") or 0) - sent_at)
+            except (TypeError, ValueError):
+                lag = None
+            replies.append({"socket": item.get("socket"), "group": body.get("groupID"),
+                            "bOk": body.get("bOk", item.get("ok")), "lagMs": lag,
+                            "raw": str(body)[:160]})
         return {"ok": False, "frame": frame, "error": "no_reply", "sent": True,
                 "detail": {"group": table_group, "serial": serial,
+                           "socket": socket_index, "url": sent_url, "at": sent_at,
+                           "sentLocalIndex": local_index, "route": route,
                            "recent22": len(snapshot.get("recent22") or []),
+                           "replies22": replies,
                            "seen": snapshot.get("seen") or {},
                            "protocols": seen[:12]}}
 

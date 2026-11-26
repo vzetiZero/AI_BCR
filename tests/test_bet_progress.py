@@ -8,8 +8,9 @@ sàn chỉ nhận 100 (trần bàn/ví). Khi tay đó THẮNG, chương trình v
   · thang cược tưởng "vừa thắng ở 200" nhưng lại đang giữ `last_outcome` cũ, và mức bị
     trần cắt còn 100 → tay sau đặt tiếp 100 mãi, không bao giờ về 50.
 
-Ngoài ra: tay KHÔNG đặt được chip không phải thua, nên phải reset thang về mức gốc;
-không reset thì mức đang chờ bị lặp vô hạn.
+Ngoài ra: tay KHÔNG đặt được chip không phải thua, nhưng cũng không được xoá mức cược
+đang chờ — thua ở 10 thì tay kế vẫn phải là 20. Chỉ khi lỗi lặp 3 tay liền
+(``PLACE_SKIP_LIMIT``) mới dừng tool để kiểm tra.
 """
 
 import pathlib
@@ -138,21 +139,31 @@ class ShortPlacementTests(unittest.TestCase):
                          "thắng ở 100 phải về mức gốc 50, không lặp lại 100")
 
 
-class FailedPlacementResetsLadderTests(unittest.TestCase):
-    """Tay không đặt được chip không phải thua → thang phải bắt đầu lại."""
+class FailedPlacementKeepsTheLadderTests(unittest.TestCase):
+    """Tay không đặt được chip KHÔNG phải thua, nhưng cũng KHÔNG xoá mức đang chờ.
 
-    def test_skip_clears_the_ladder(self):
+    Đây là yêu cầu thực tế: thua ở mức 10 ⇒ tay kế phải là 20. Nếu lượt đặt 20 lỗi
+    (WebSocket không khớp phản hồi), tay sau vẫn phải thử 20 — không được âm thầm rơi về
+    10, vì như vậy chuỗi "thua gấp đôi" mất tác dụng và khoản lỗ trước đó không bao giờ
+    được gỡ. Vòng lặp vô hạn đã bị chặn bằng ``PLACE_SKIP_LIMIT`` (3 tay liền) nên giữ
+    mức là an toàn.
+    """
+
+    def test_skip_keeps_the_pending_level(self):
         sim, row = make_sim()
         play(sim, row, 50, "P")            # thua 50 → mức kế 100
         self.assertEqual(sim.progress_stake, 50.0)
         self.assertEqual(sim.last_outcome, "loss")
         play(sim, row, 100, "P", ok=False)  # không đặt được
-        self.assertIsNone(sim.progress_stake, "phải reset để không lặp mức đã gấp")
-        self.assertIsNone(sim.last_outcome)
+        self.assertEqual(sim.progress_stake, 100.0,
+                         "phải giữ đúng mức vừa chờ (100), không rơi về 50")
+        self.assertIsNone(sim.last_outcome,
+                          "lượt không đặt được không có kết quả để nhân đôi tiếp")
         self.assertEqual(progress_stake(50, current=sim.progress_stake,
-                                        last_outcome=sim.last_outcome, mode=MODE), 50.0)
+                                        last_outcome=sim.last_outcome, mode=MODE), 100.0,
+                         "tay kế vẫn phải đặt 100, không quay về 50 và không leo 200")
 
-    def test_repeated_failures_keep_retrying_the_base_not_the_doubled_amount(self):
+    def test_repeated_failures_keep_retrying_the_doubled_amount(self):
         controller = BaccaratController(
             pathlib.Path(tempfile.mkdtemp()) / "s.json",
             type("E", (), {"event": lambda self, n, d: None})())
@@ -166,18 +177,29 @@ class FailedPlacementResetsLadderTests(unittest.TestCase):
         controller.sim.start(row)
         controller.sim.entry_waiting = False
         controller.tool_running = True
-        controller.sim.set_order("B", 100, baseline=controller.sim.letters)
+        # Tay đầu đặt đúng mức gốc 50 và thua ⇒ mức chờ là 100.
+        controller.sim.set_order("B", 50, baseline=controller.sim.letters)
         controller.sim.mark_placing()
         controller.sim.mark_placed(True, "")
         controller.sim.process(dict(row, letters=controller.sim.letters + "P"))
+        self.assertEqual(controller._resolve_order()["stake"], 100.0)
         for _ in range(2):
             stake = controller._resolve_order()["stake"]
             controller.sim.set_order("B", stake, baseline=controller.sim.letters)
             controller.sim.mark_placing()
             controller.sim.mark_placed(False, "không bấm được")
             controller.sim.process(dict(row, letters=controller.sim.letters + "P"))
-        self.assertEqual(controller._resolve_order()["stake"], 50.0,
-                         "sau tay không đặt được, mức kế phải là mức gốc")
+        self.assertEqual(controller._resolve_order()["stake"], 100.0,
+                         "sau tay không đặt được, vẫn phải thử mức đang chờ (100)")
+
+    def test_three_failures_in_a_row_stop_the_tool(self):
+        """Giữ mức không được biến thành vòng lặp vô hạn: đủ 3 tay là dừng để kiểm tra."""
+        sim, row = make_sim()
+        play(sim, row, 50, "P")
+        for _ in range(3):
+            play(sim, row, 100, "P", ok=False)
+        self.assertFalse(sim.running)
+        self.assertIn("3 tay liên tiếp", sim.note)
 
 
 class PlacementStatusTests(unittest.TestCase):

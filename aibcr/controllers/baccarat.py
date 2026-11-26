@@ -1880,7 +1880,13 @@ class BaccaratController:
 
         def work():
             try:
-                ok_gate, gate_note = self._wait_for_next_hand()
+                # Một hạn chót cho CẢ lượt đặt: chờ bàn dọn chip → chờ cửa cược mở → gửi
+                # lệnh → đọc lại chip. Trước đây mỗi bước có hạn riêng (45 + 45 + 6 giây)
+                # nên lượt đặt có thể chạy quá ``PLACE_CONFIRM_TIMEOUT``; sim đã ghi tay
+                # này là "không đặt được" trong khi thread vẫn gửi lệnh thật.
+                deadline = time.monotonic() + PLACE_WINDOW
+                ok_gate, gate_note = self._wait_for_next_hand(
+                    timeout=min(PLACE_GATE_TIMEOUT, PLACE_WINDOW), deadline=deadline)
                 if not ok_gate:
                     self.events.put(("placed", (False, gate_note, plan)))
                     return
@@ -1894,8 +1900,9 @@ class BaccaratController:
                     # Bàn WM: cược đặt 100% qua WebSocket (protocol 22) — không mô phỏng
                     # chuột, không phụ thuộc toạ độ khay chip. Thiếu socket là báo lỗi rõ
                     # ràng chứ không rơi về đường chuột (đã bỏ hẳn).
+                    remaining = max(5.0, deadline - time.monotonic())
                     result = WMBet(self.browser).place(side, stake, confirm=True,
-                                                       wait_seconds=BET_GATE_TIMEOUT,
+                                                       wait_seconds=remaining,
                                                        allow_short=bool(plan.get("all_in")))
                     plan["placed_at"] = time.time()
                     note = result.get("note") or result.get("error") or ""
@@ -1919,11 +1926,17 @@ class BaccaratController:
 
         threading.Thread(target=work, daemon=True, name="ba-place").start()
 
-    def _wait_for_next_hand(self, timeout=BET_GATE_TIMEOUT, poll=BET_GATE_POLL):
-        """Chờ bàn gom hết chip ván trước rồi mới bấm (tránh bấm chồng ván cũ)."""
-        deadline = time.monotonic() + timeout
+    def _wait_for_next_hand(self, timeout=BET_GATE_TIMEOUT, poll=BET_GATE_POLL,
+                            deadline=None):
+        """Chờ bàn gom hết chip ván trước rồi mới bấm (tránh bấm chồng ván cũ).
+
+        ``deadline`` (``time.monotonic()``) là hạn chót của CẢ lượt đặt cược: gate không
+        được ăn hết thời gian rồi để bước gửi lệnh chạy quá ``PLACE_CONFIRM_TIMEOUT``.
+        """
+        own = time.monotonic() + timeout
+        limit = own if deadline is None else min(own, deadline)
         last_error = ""
-        while time.monotonic() < deadline:
+        while time.monotonic() < limit:
             if not self.tool_running:
                 return False, "Tool đã dừng, huỷ tự đặt cược."
             live = self._read_chip_state()

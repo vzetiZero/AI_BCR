@@ -27,6 +27,14 @@ CHIP_REFRESH = 3
 # lâu; 20 giây trước đây làm mọi lệnh bị huỷ oan ("Bàn chưa mở cược").
 BET_GATE_TIMEOUT = 45.0
 BET_GATE_POLL = 0.3
+# Cả một lượt đặt cược (chờ bàn dọn chip → chờ cửa cược mở → gửi lệnh → đọc lại chip)
+# phải xong TRƯỚC ``PLACE_CONFIRM_TIMEOUT``. Trước đây gate 45s + chờ cửa cược 45s + đọc
+# chip 6s = tới 96s, trong khi sim tuyên bố "không đặt được" ở 60s: thread vẫn đặt tiếp và
+# một lệnh THẬT có thể vào bàn cho tay đã bị ghi là chưa đặt — tiền không được theo dõi.
+# Vì vậy dùng chung một hạn chót: chờ bàn dọn chip ≤ 30s, rồi phần còn lại của 50s dành
+# cho chờ cửa cược + gửi lệnh + đọc lại chip — luôn kết thúc trước PLACE_CONFIRM_TIMEOUT.
+PLACE_WINDOW = 50.0
+PLACE_GATE_TIMEOUT = 30.0
 # Vào bàn từ sảnh mất vài giây tải trang, khay chip/ô cược chưa kịp hiện nên lượt bấm
 # đầu thường hỏng. Tay chưa đặt được chip thật thì không được tính (xem
 # LiveSimulation.mark_placed), nhưng bỏ quá nhiều tay liên tiếp nghĩa là bàn đang đặt

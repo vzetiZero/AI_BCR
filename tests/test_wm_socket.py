@@ -590,5 +590,102 @@ class AdoptExistingSocketTests(unittest.TestCase):
         self.assertNotEqual(result.get("error"), "no_socket", result)
 
 
+class SocketChoiceMemoryTests(unittest.TestCase):
+    """Chọn socket cược: nhớ socket đã trả lời, tránh socket từng câm.
+
+    Đây là lỗi "tay đầu đặt được, tay sau không": một document có nhiều socket cùng phát
+    khung 21 của bàn (socket sảnh + socket bàn). Chọn "khung 21 mới nhất" có thể trúng
+    socket sảnh; lệnh gửi vào đó thì sàn **im lặng** → ``no_reply``.
+    """
+
+    GROUP = 534
+
+    def _state(self, frames, group=None):
+        return {"recent21": frames, "open_group": group or self.GROUP,
+                "states": [1] * len(frames), "scopes": {i: "top" for i in range(len(frames))}}
+
+    def test_prefers_the_socket_that_already_answered(self):
+        frames = [{"socket": 0, "at": 9000, "data": {"groupID": self.GROUP}},
+                  {"socket": 1, "at": 1000, "data": {"groupID": self.GROUP}}]
+        # Socket "mới nhất" là 0, nhưng socket 1 đã từng trả lời ⇒ phải chọn 1.
+        index, _data, _at = wm_ws.current_table(self._state(frames), prefer=1)
+        self.assertEqual(index, 1)
+
+    def test_avoids_a_socket_that_never_answered(self):
+        frames = [{"socket": 0, "at": 9000, "data": {"groupID": self.GROUP}},
+                  {"socket": 1, "at": 1000, "data": {"groupID": self.GROUP}}]
+        index, _data, _at = wm_ws.current_table(
+            self._state(frames), silent={0: 1.0})
+        self.assertEqual(index, 1, "socket câm phải bị tránh khi còn socket khác")
+
+    def test_falls_back_to_a_silent_socket_when_it_is_the_only_one(self):
+        frames = [{"socket": 0, "at": 9000, "data": {"groupID": self.GROUP}}]
+        picked = wm_ws.current_table(self._state(frames), silent={0: 1.0})
+        self.assertIsNotNone(picked, "không còn lựa chọn thì vẫn phải thử, không bỏ tay")
+        self.assertEqual(picked[0], 0)
+
+    def test_silent_socket_of_another_table_does_not_block(self):
+        frames = [{"socket": 0, "at": 9000, "data": {"groupID": self.GROUP}}]
+        picked = wm_ws.current_table(self._state(frames), silent={999: 1.0})
+        self.assertEqual(picked[0], 0)
+
+
+class SilentSocketMemoryTests(unittest.TestCase):
+    """``mark_unresponsive`` chỉ đánh dấu khi đã xác minh tiền CHƯA đi."""
+
+    def _socket(self, place_result):
+        socket = wm_ws.WMSocket(session=type("S", (), {"wm_open_key": "101_534"})())
+        command = FakeCommand({})
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        state = {"installed": True, "states": [1], "scopes": {0: "top"},
+                 "recent21": [{"socket": 0, "at": 9e12,
+                               "data": {"groupID": 534, "gameNo": 5, "gameNoRound": 9}}],
+                 "last22": None, "recent22": [], "open_group": 534,
+                 "sent": [], "errors": [], "routes": ["page"], "locals": [0]}
+        socket.state = lambda fresh=False: state
+        command.values = {"socket.send": {"ok": True, "bytes": 10, "at": 9e12},
+                          "recent21": {}}
+        socket.place = lambda *a, **k: dict(place_result)
+        return socket
+
+    def test_marks_the_socket_that_stayed_silent(self):
+        socket = self._socket({"ok": False, "error": "no_reply", "sent": True,
+                               "detail": {"group": 534, "socket": 0}})
+        self.assertTrue(socket.mark_unresponsive({"group": 534, "socket": 0}))
+        self.assertIn(0, socket._silent_socket[534])
+        self.assertNotIn(534, socket._reply_socket)
+
+    def test_ignores_missing_detail(self):
+        socket = wm_ws.WMSocket(session=None)
+        self.assertFalse(socket.mark_unresponsive({}))
+        self.assertFalse(socket.mark_unresponsive(None))
+        self.assertEqual(socket._silent_socket, {})
+
+
+class PageClockTests(unittest.TestCase):
+    """Tuổi dữ liệu phải tính bằng ĐỒNG HỒ TRANG, không trộn ``time.time()``."""
+
+    def _socket(self, page_now):
+        socket = wm_ws.WMSocket(session=None)
+        command = FakeCommand({"Date.now": page_now})
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        return socket
+
+    def test_age_uses_the_page_clock(self):
+        socket = self._socket(1_000_000)
+        self.assertEqual(socket._age_ms(985_000), 15_000)
+
+    def test_age_is_unknown_without_the_page_clock(self):
+        socket = self._socket(None)
+        self.assertIsNone(socket._age_ms(985_000))
+
+    def test_age_does_not_depend_on_the_python_clock(self):
+        """Lệch ~105s từng làm mọi phản hồi thật bị coi là "cũ"."""
+        socket = self._socket(5000.0)
+        self.assertEqual(socket._age_ms(4000), 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

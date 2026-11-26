@@ -350,10 +350,16 @@ class LiveSimulation:
         self.letters = letters
         self.results = list(letters)
         self.place_skips += 1
-        # Tay không đặt được KHÔNG phải thua, nên thang cược phải bắt đầu lại từ mức gốc.
-        # Không reset thì mức đang chờ (có thể đã gấp đôi) bị lặp vô hạn: đặt lại đúng
-        # mức đó, thất bại lại, mãi không quay về mức cố định của người dùng.
-        self.progress_stake = None
+        # Tay không đặt được KHÔNG phải thua, nhưng cũng KHÔNG xoá mức cược đang chờ:
+        # thang cược đi theo kết quả THẬT, nên nếu tay trước thua ở mức 10 thì tay kế vẫn
+        # phải là 20 dù tay này không đặt được. Trước đây reset về mức gốc ở đây, khiến
+        # người dùng mất mức gấp đôi chỉ vì một lượt đặt lỗi.
+        #
+        # Đồng thời KHÔNG được để mức leo tiếp: ``last_outcome`` xoá về ``None`` nên
+        # ``progress_stake`` giữ nguyên số vừa chờ (20), không thành 40, 80… mỗi lần lỗi.
+        intended = float(order.get("stake") or 0)
+        if intended > 0:
+            self.progress_stake = intended
         self.last_outcome = None
         self.log.append(dict(time=time.time(), armed_at=order.get("armed_at"),
                              table=self.table_name, table_key=self.table_key,

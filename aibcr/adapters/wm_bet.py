@@ -383,25 +383,35 @@ class WMBet:
                     "error": "Bàn còn %g đv chip đang treo — huỷ trước khi đặt tay mới."
                              % float(current.get("total") or 0)}
         result = socket.place(side, target)
+        if not result.get("ok") and result.get("error") == "no_reply" and result.get("sent"):
+            # ``no_reply`` KHÁC "bị từ chối": lệnh đã rời máy nhưng không khớp được khung
+            # phản hồi. Lấy chip thật làm trọng tài.
+            settled = self._verify_after_send(side, target)
+            if settled is not None:
+                return {"ok": True, "placed": [target], "total": settled, "via": "ws",
+                        "denominations": denominations, "confirmed": True,
+                        "bet_area": BET_AREA[side],
+                        "note": "Đã đặt %d đv vào %s qua WebSocket (xác nhận bằng chip "
+                                "trên bàn).%s" % (target, SIDE_NAME[side], all_in_note)}
+            # Chip vẫn trống ⇒ tiền CHƯA đi. Nguyên nhân thường gặp: lệnh đi vào socket
+            # KHÔNG phải socket cược của bàn (socket sảnh cũng phát khung 21 của bàn, nên
+            # bước chọn socket có thể nhầm). Đánh dấu socket đó là "không trả lời" để tay
+            # sau chọn socket khác — TUYỆT ĐỐI không gửi lại tiền trong cùng tay.
+            mark = getattr(socket, "mark_unresponsive", None)
+            if callable(mark):
+                try:
+                    mark(result.get("detail") or {})
+                except Exception:
+                    pass
         if not result.get("ok"):
-            # ``no_reply`` KHÁC "bị từ chối": lệnh đã gửi đi nhưng không khớp được khung
-            # phản hồi (mirror đổi định dạng, phản hồi về muộn hơn cửa sổ chờ). Tuyệt đối
-            # không báo hỏng ngay — tiền có thể ĐÃ bị trừ. Lấy chip thật trên bàn làm
-            # trọng tài: có đúng số tiền ở đúng cửa thì lệnh thành công.
-            if result.get("error") == "no_reply" and result.get("sent"):
-                settled = self._verify_after_send(side, target)
-                if settled is not None:
-                    return {"ok": True, "placed": [target], "total": settled, "via": "ws",
-                            "denominations": denominations, "confirmed": True,
-                            "bet_area": BET_AREA[side],
-                            "note": "Đã đặt %d đv vào %s qua WebSocket (xác nhận bằng chip "
-                                    "trên bàn).%s" % (target, SIDE_NAME[side], all_in_note)}
             detail = result.get("detail") or {}
             hint = ""
             if detail:
-                hint = (" [bàn group=%s · serial=%s · phản hồi 22=%s · protocol đã thấy=%s]"
-                        % (detail.get("group"), detail.get("serial"),
-                           detail.get("recent22"), detail.get("seen")))
+                hint = (" [bàn group=%s · serial=%s · socket=%s · phản hồi 22=%s · "
+                        "protocol đã thấy=%s · 22 gần nhất=%s]"
+                        % (detail.get("group"), detail.get("serial"), detail.get("socket"),
+                           detail.get("recent22"), detail.get("seen"),
+                           detail.get("replies22")))
             error = result.get("error") or "no_reply"
             if error == "table_mismatch":
                 return {"ok": False, "denominations": denominations, "via": "ws",
