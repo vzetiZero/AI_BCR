@@ -76,6 +76,10 @@ HOOK_JS = r"""(() => {
     };
     const record = (store, idx, proto, msg, raw) => {
         store.protocols[idx] = proto;
+        // Đếm MỌI protocol đã thấy: ``protocols[idx]`` chỉ giữ số CUỐI của mỗi socket nên
+        // không dùng để chẩn đoán được ("hook có thấy protocol 22 không?").
+        store.seen = store.seen || {};
+        store.seen[proto] = (store.seen[proto] || 0) + 1;
         if (proto === 21) {
             store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
             if (store.recent21.length > 60) store.recent21.shift();
@@ -173,6 +177,8 @@ ADOPT_FN = r"""function (store, label) {
         : ((msg.data && msg.data[key] !== undefined) ? msg.data[key] : null);
     const put = (idx, proto, msg, raw) => {
         store.protocols[idx] = proto;
+        store.seen = store.seen || {};
+        store.seen[proto] = (store.seen[proto] || 0) + 1;
         if (proto === 21) {
             store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
             if (store.recent21.length > 60) store.recent21.shift();
@@ -313,7 +319,8 @@ READ_JS = r"""(() => {
     }
     if (!stores.length) return {installed: false, open_group: openGroup};
     const merged = {urls: [], states: [], scopes: {}, protocols: {}, recent21: [],
-                    last22: null, recent22: [], sent: [], errors: [], offsets: {}};
+                    last22: null, recent22: [], sent: [], errors: [], offsets: {},
+                    seen: {}};
     for (const entry of stores) {
         const hook = entry.hook;
         const base = merged.states.length;
@@ -325,6 +332,9 @@ READ_JS = r"""(() => {
         }
         for (const key of Object.keys(hook.protocols || {})) {
             merged.protocols[base + parseInt(key, 10)] = hook.protocols[key];
+        }
+        for (const key of Object.keys(hook.seen || {})) {
+            merged.seen[key] = (merged.seen[key] || 0) + hook.seen[key];
         }
         for (const item of (hook.recent21 || [])) {
             merged.recent21.push({socket: base + item.socket, at: item.at, data: item.data});
@@ -349,7 +359,7 @@ READ_JS = r"""(() => {
         for (const line of (hook.sent || []).slice(-6)) merged.sent.push(line);
     }
     return {installed: true, urls: merged.urls, states: merged.states,
-            scopes: merged.scopes, protocols: merged.protocols,
+            scopes: merged.scopes, protocols: merged.protocols, seen: merged.seen,
             recent21: merged.recent21, last22: merged.last22,
             recent22: merged.recent22,
             open_group: openGroup, sent: merged.sent.slice(-6),
@@ -454,7 +464,7 @@ def merge_states(channels):
     merged = {"installed": False, "urls": [], "states": [], "scopes": {},
               "protocols": {}, "recent21": [], "last22": None, "recent22": [],
               "open_group": None, "sent": [], "errors": [], "offsets": {},
-              "routes": [], "locals": []}
+              "seen": {}, "routes": [], "locals": []}
     for entry in channels or ():
         label, state = (entry or (None, None))
         if not label or not isinstance(state, dict):
@@ -488,6 +498,12 @@ def merge_states(channels):
             except (TypeError, ValueError):
                 continue
             merged["protocols"][base + index] = value
+        for key, value in (state.get("seen") or {}).items():
+            # ``seen`` = đếm mọi protocol đã thấy, giữ nguyên khoá (không cộng ``base``).
+            try:
+                merged["seen"][str(key)] = (merged["seen"].get(str(key)) or 0) + int(value)
+            except (TypeError, ValueError):
+                continue
         for item in (state.get("recent21") or []):
             try:
                 index = int((item or {}).get("socket"))
@@ -499,8 +515,13 @@ def merge_states(channels):
         if isinstance(last, dict):
             at = float(last.get("at") or 0)
             if merged["last22"] is None or at > float(merged["last22"].get("at") or 0):
+                # ``offset`` phải là CỘNG DỒN cả gốc của store trong khung (``READ_JS`` ghi
+                # ``offset`` = vị trí socket đầu của store) lẫn ``base`` của khung. Chỉ ghi
+                # ``base`` thì ``socket - offset`` thành chỉ số TUYỆT ĐỐI trong khung, không
+                # còn là chỉ số cục bộ của store, và phản hồi thật bị lọc oan.
                 merged["last22"] = dict(last, socket=base + int(last.get("socket") or 0),
-                                        scope=label, offset=base)
+                                        scope=label,
+                                        offset=base + int(last.get("offset") or 0))
         for item in (state.get("recent22") or []):
             if not isinstance(item, dict):
                 continue
@@ -508,7 +529,8 @@ def merge_states(channels):
                 index = int(item.get("socket"))
             except (TypeError, ValueError):
                 continue
-            merged["recent22"].append(dict(item, socket=base + index, offset=base,
+            merged["recent22"].append(dict(item, socket=base + index,
+                                           offset=base + int(item.get("offset") or 0),
                                            scope=label))
         if merged["open_group"] is None and state.get("open_group") is not None:
             merged["open_group"] = state.get("open_group")
@@ -1132,6 +1154,8 @@ class WMSocket(threading.Thread):
         game_no, round_no = data.get("gameNo"), data.get("gameNoRound")
         if game_no is None or round_no is None:
             return {"ok": False, "error": "Chưa biết ván hiện tại của bàn."}
+        # Mã bàn: khoá nhận phản hồi của sàn WM (khung thật không có betSerialNumber).
+        table_group = data.get("groupID")
         age = (time.time() * 1000.0) - float(seen_at or 0)
         if age > 15000:
             return {"ok": False, "error": "Dữ liệu bàn đã cũ (%.1fs) — chưa gửi."
@@ -1177,24 +1201,40 @@ class WMSocket(threading.Thread):
                             at = float(candidate.get("at") or 0)
                         except (TypeError, ValueError):
                             continue
-                        if at < sent_at - 500.0:
+                        # Cửa sổ thời gian: chỉ nhận phản hồi đến SAU khi gửi (sai số 300ms
+                        # cho đồng hồ JS/Python). Rộng hơn sẽ nhận nhầm phản hồi của lệnh
+                        # trước đó trên cùng bàn.
+                        if at < sent_at - 300.0:
                             continue
-                        # Cách khớp CHẮC CHẤT NHẤT: server dội lại đúng
-                        # ``betSerialNumber`` của lệnh vừa gửi. Dùng số này thay vì chỉ số
-                        # socket: socket nhận qua ``queryObjects`` có chỉ số khác nhau giữa
-                        # store và khung gộp, nên so theo chỉ số làm phản hồi thật bị bỏ
-                        # qua oan → "WS từ chối lệnh cược (no_reply)" dù tiền đã trừ.
+                        # Khớp 1 — theo ``betSerialNumber``: chỉ một số mirror dội lại
+                        # trường này. Nếu có thì đây là khoá chính xác nhất.
                         if self._same_serial(candidate, serial):
                             reply = candidate
                             break
-                        # Dự phòng: phản hồi không kèm serial (một số mirror bỏ trường này).
-                        # Chỉ nhận khi đúng socket đã gửi VÀ đúng ván, để không nhận nhầm
-                        # phản hồi của socket/lệnh khác.
                         if candidate.get("serial") is not None:
                             continue
                         body = candidate.get("data") or {}
                         if body.get("betSerialNumber") is not None:
                             continue
+                        # Khớp 2 — theo ``groupID``: ĐÂY LÀ DẠNG THẬT của sàn WM. Đã bắt
+                        # được khung phản hồi thật khi cược tay thành công:
+                        #   {"gameID":101,"groupID":506,"areaID":506001,
+                        #    "areaType":85,"bOk":true}
+                        # Không có betSerialNumber, không có gameNo. Nhờ ``groupID`` ta vẫn
+                        # biết chắc phản hồi thuộc bàn đang mở, không phụ thuộc chỉ số
+                        # socket (socket nhận qua ``queryObjects`` bị lệch số).
+                        group_here = body.get("groupID")
+                        if group_here is not None and table_group is not None:
+                            try:
+                                same_table = int(group_here) == int(table_group)
+                            except (TypeError, ValueError):
+                                same_table = False
+                            if not same_table:
+                                continue
+                            reply = candidate
+                            break
+                        # Khớp 3 — dự phòng cho mirror khác: phản hồi không mang serial
+                        # cũng không mang groupID thì đòi đúng ván VÀ đúng socket đã gửi.
                         if body.get("gameNo") is not None and body.get("gameNo") != game_no:
                             continue
                         if (body.get("gameNoRound") is not None
@@ -1223,7 +1263,18 @@ class WMSocket(threading.Thread):
                     return {"ok": bool(ok_flag), "frame": frame, "reply": body,
                             "error": "" if ok_flag else "server_rejected"}
                 time.sleep(0.15)
-        return {"ok": False, "frame": frame, "error": "no_reply", "sent": True}
+        # Hết giờ: trả kèm bằng chứng để lần sau đọc log là biết ngay vì sao không khớp
+        # (định dạng phản hồi đổi? hook không thấy khung 22? chỉ số socket sai?).
+        try:
+            snapshot = self.state(fresh=True) or {}
+        except Exception:
+            snapshot = {}
+        seen = sorted({str(value) for value in (snapshot.get("protocols") or {}).values()})
+        return {"ok": False, "frame": frame, "error": "no_reply", "sent": True,
+                "detail": {"group": table_group, "serial": serial,
+                           "recent22": len(snapshot.get("recent22") or []),
+                           "seen": snapshot.get("seen") or {},
+                           "protocols": seen[:12]}}
 
     @staticmethod
     def _same_serial(candidate, serial):

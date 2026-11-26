@@ -396,9 +396,15 @@ class WMBet:
                             "bet_area": BET_AREA[side],
                             "note": "Đã đặt %d đv vào %s qua WebSocket (xác nhận bằng chip "
                                     "trên bàn).%s" % (target, SIDE_NAME[side], all_in_note)}
+            detail = result.get("detail") or {}
+            hint = ""
+            if detail:
+                hint = (" [bàn group=%s · serial=%s · phản hồi 22=%s · protocol đã thấy=%s]"
+                        % (detail.get("group"), detail.get("serial"),
+                           detail.get("recent22"), detail.get("seen")))
             return {"ok": False, "denominations": denominations, "via": "ws",
-                    "error": "WebSocket từ chối lệnh cược (%s)."
-                             % (result.get("error") or "no_reply")}
+                    "error": "WebSocket từ chối lệnh cược (%s).%s"
+                             % (result.get("error") or "no_reply", hint)}
         # Xác minh bằng số chip thật đang treo trên bàn.
         deadline = time.monotonic() + 2.5
         placed = 0.0

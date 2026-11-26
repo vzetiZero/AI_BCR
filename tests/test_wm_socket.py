@@ -236,59 +236,108 @@ class ReplyMatchingTests(unittest.TestCase):
 
     Lỗi thật: socket nhận qua ``Runtime.queryObjects`` có chỉ số khác nhau giữa store và
     khung gộp, nên so phản hồi theo chỉ số socket làm phản hồi THẬT bị bỏ qua → tool báo
-    "WebSocket từ chối lệnh cược (no_reply)" trong khi tiền đã bị trừ. Phải khớp theo
-    ``betSerialNumber`` của chính lệnh vừa gửi.
+    "WebSocket từ chối lệnh cược (no_reply)" trong khi tiền đã bị trừ.
+
+    Khung phản hồi THẬT của sàn (bắt được khi cược tay thành công trên bàn 506) là::
+
+        {"gameID": 101, "groupID": 506, "areaID": 506001,
+         "areaType": 85, "bOk": true}
+
+    **Không có ``betSerialNumber``, không có ``gameNo``.** Vì vậy khoá nhận phản hồi
+    phải là ``groupID``; khớp theo serial chỉ là đường phụ cho mirror khác.
     """
 
-    def build(self, reply_data, reply_socket=0, reply_offset=0):
+    GROUP = 506
+    #: Khung thật, nguyên văn từ sàn.
+    REAL_REPLY = {"gameID": 101, "groupID": 506, "areaID": 506001,
+                  "areaType": 85, "bOk": True}
+
+    def build(self, reply_data, reply_socket=0, reply_offset=0, top_ok=None,
+              reply_at=1e18, group=None):
         socket = wm_ws.WMSocket(session=None)
         command = FakeCommand({})
         socket._command = command
         socket._page = {"label": "page", "command": command, "ws": None}
+        table = self.GROUP if group is None else group
         state = wm_ws.merge_states([
-            ("page", empty_state(group=7, states=[1], scopes={0: "iframe"})),
+            ("page", empty_state(group=table, states=[1], scopes={0: "iframe"})),
         ])
         state["recent21"] = [{"socket": 0, "at": 9e12,
-                              "data": {"groupID": 7, "gameNo": 5, "gameNoRound": 9}}]
+                              "data": {"groupID": table, "gameNo": 5, "gameNoRound": 9}}]
         socket.state = lambda fresh=False: state
         command.values = {
             "socket.send": {"ok": True, "bytes": 10},
             # ``recent21`` trong expression: READ_JS trả ảnh chụp hook.
             "recent21": {"last22": None, "recent22": [
-                {"socket": reply_socket, "offset": reply_offset, "at": 1e18,
-                 "data": reply_data[1], "ok": reply_data[0].get("bOk"),
-                 "serial": reply_data[0].get("betSerialNumber")},
+                {"socket": reply_socket, "offset": reply_offset, "at": reply_at,
+                 "data": reply_data,
+                 # Hook chép sẵn ``ok`` từ cấp ngoài HOẶC trong ``data``.
+                 "ok": (reply_data or {}).get("bOk") if top_ok is None else top_ok,
+                 "serial": (reply_data or {}).get("betSerialNumber")},
             ]},
         }
         return socket, command
 
-    def test_reply_matched_by_bet_serial_number(self):
-        """Phản hồi khớp đúng ``betSerialNumber`` thì nhận, dù chỉ số socket lệch."""
-        socket, _command = self.build(({"bOk": True, "betSerialNumber": 1},
-                                       {"bOk": True}), reply_socket=3, reply_offset=3)
+    def test_real_market_reply_is_accepted(self):
+        """Khung THẬT của sàn (chỉ groupID + bOk) phải được nhận là thành công.
+
+        Đây là ca đã gây ``no_reply`` trên máy người dùng: phản hồi không có
+        ``betSerialNumber`` nên bộ khớp theo serial bỏ qua, rồi báo lỗi oan.
+        """
+        socket, _command = self.build(dict(self.REAL_REPLY),
+                                      # Chỉ số socket lệch — như socket nhận qua
+                                      # queryObjects. Không được ảnh hưởng kết quả.
+                                      reply_socket=7, reply_offset=5)
         result = socket.place("P", 10, wait_seconds=1)
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["reply"].get("bOk"))
+        self.assertEqual(result["reply"].get("areaID"), 506001)
+
+    def test_real_market_rejected_bet_is_reported(self):
+        """Cùng dạng khung nhưng ``bOk: false`` ⇒ báo sàn từ chối, không phải no_reply."""
+        socket, _command = self.build(dict(self.REAL_REPLY, bOk=False),
+                                      reply_socket=7, reply_offset=5)
+        result = socket.place("P", 10, wait_seconds=1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "server_rejected")
+
+    def test_reply_of_another_table_is_not_taken(self):
+        """Phản hồi của BÀN KHÁC (groupID khác) không được nhận làm của mình."""
+        socket, _command = self.build(dict(self.REAL_REPLY, groupID=999),
+                                      reply_at=1e18)
+        result = socket.place("P", 10, wait_seconds=0.4)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "no_reply")
+
+    def test_stale_reply_from_before_the_send_is_not_taken(self):
+        """Phản hồi cũ (trước lúc gửi) không được nhận — tránh tưởng lệnh mới đã vào."""
+        socket, _command = self.build(dict(self.REAL_REPLY), reply_at=1.0)
+        result = socket.place("P", 10, wait_seconds=0.4)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "no_reply")
+
+    def test_reply_matched_by_bet_serial_number(self):
+        """Mirror có ``betSerialNumber`` vẫn khớp được theo serial."""
+        socket, _command = self.build({"bOk": True, "betSerialNumber": 1},
+                                      reply_socket=3, reply_offset=3)
+        result = socket.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
 
     def test_ok_flag_at_top_level_is_understood(self):
         """Mirror đặt ``bOk`` ở cấp ngoài (không nằm trong ``data``) vẫn phải hiểu."""
-        socket, _command = self.build(({"bOk": True, "betSerialNumber": 1}, None),
-                                      reply_socket=0, reply_offset=0)
+        socket, _command = self.build(None, top_ok=True)
         result = socket.place("P", 10, wait_seconds=1)
         self.assertTrue(result["ok"], result)
 
     def test_reply_of_another_bet_is_not_taken(self):
         """Phản hồi của lệnh KHÁC (serial khác) không được nhận làm của mình."""
-        socket, _command = self.build(({"bOk": True, "betSerialNumber": 99}, {"bOk": True}),
-                                      reply_socket=0, reply_offset=0)
+        socket, _command = self.build({"bOk": True, "betSerialNumber": 99})
         result = socket.place("P", 10, wait_seconds=0.4)
         self.assertFalse(result["ok"])
         self.assertEqual(result.get("error"), "no_reply")
 
     def test_timeout_says_the_order_was_sent(self):
         """Hết giờ chờ vẫn phải báo ``sent`` để nơi gọi kiểm tra chip thật."""
-        socket, _command = self.build(({"bOk": True, "betSerialNumber": 42}, {"bOk": True}),
-                                      reply_socket=0, reply_offset=0)
+        socket, _command = self.build(dict(self.REAL_REPLY, groupID=12345))
         result = socket.place("P", 10, wait_seconds=0.4)
         self.assertEqual(result.get("error"), "no_reply")
         self.assertTrue(result.get("sent"), "phải đánh dấu lệnh ĐÃ gửi đi")

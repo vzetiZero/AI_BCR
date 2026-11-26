@@ -49,7 +49,12 @@ function realm(tag) {
   };
   context.window = context;
   context.top = context;
-  context.document = { querySelectorAll: () => [] };
+  context.document = {
+    querySelectorAll: () => [],
+    getElementById: () => null,
+    defaultView: context,
+  };
+  context.getComputedStyle = () => ({ display: 'block', visibility: 'visible' });
   vm.createContext(context);
   if (tag) context.__tag = tag;
   return context;
@@ -175,6 +180,29 @@ test('phản hồi protocol 22 được chép cả bOk/serial cấp ngoài lẫn
   assert.strictEqual(store.last22.ok, true, 'bOk cấp ngoài phải đọc được');
   assert.strictEqual(store.last22.serial, 8, 'serial cấp ngoài phải đọc được');
   assert.strictEqual(store.recent22.length, 2, 'phải giữ cả hai phản hồi');
+});
+
+test('đếm mọi protocol đã thấy (seen) thay vì chỉ số cuối mỗi socket', () => {
+  const win = realm();
+  vm.runInContext(js('HOOK_JS'), win);
+  const ws = new win.WebSocket('wss://wm/table');
+  ws.deliver(JSON.stringify({ protocol: 21, data: { groupID: 506 } }));
+  ws.deliver(JSON.stringify({ protocol: 24, data: { cards: [] } }));
+  ws.deliver(JSON.stringify({ protocol: 22, bOk: true }));
+  const store = win.__wmHook3;
+  assert.strictEqual(store.seen[21], 1, 'phải đếm protocol 21');
+  assert.strictEqual(store.seen[24], 1, 'phải đếm protocol 24');
+  assert.strictEqual(store.seen[22], 1, 'phải đếm protocol 22');
+  assert.strictEqual(store.protocols[0], 22, 'protocols[idx] chỉ giữ số cuối');
+});
+
+test('READ_JS gộp seen từ nhiều store', () => {
+  const win = realm();
+  vm.runInContext(js('HOOK_JS'), win);
+  win.__wmHook3.seen = {21: 4, 22: 1};
+  const value = vm.runInContext(js('READ_JS'), win);
+  assert.strictEqual(value.seen['21'], 4, 'seen phải đi qua READ_JS');
+  assert.strictEqual(value.seen['22'], 1, 'seen phải đi qua READ_JS');
 });
 
 let failed = 0;

@@ -250,17 +250,23 @@ khi chưa bật tool.
 2. **Gửi lệnh — WebSocket `protocol 22`** (`wm_ws.py`), dùng hook đã bắt được socket của
    **iframe bàn**: `{"betSerialNumber", "gameNo", "gameNoRound",
    "betArr": [{"betArea", "addBetMoney"}], "commission": 0, "remark": "1,0"}` với
-   `betArea` 1 = Banker, 2 = Player, 3 = Hoà. Server trả `{"protocol": 22, "bOk": true}`
-   (hoặc `bOk` trong `data` tuỳ mirror) là lệnh đã vào; `bOk: false` thì báo lỗi —
-   **không rơi về bấm chuột**. Phản hồi được khớp theo `betSerialNumber` của chính lệnh
-   vừa gửi, không theo chỉ số socket: socket nhận qua `queryObjects` có chỉ số khác nhau
-   giữa store và khung gộp, so theo chỉ số từng làm phản hồi thật bị bỏ qua và app báo
-   “WS từ chối lệnh cược (no_reply)” dù tiền đã trừ.
+   `betArea` 1 = Banker, 2 = Player, 3 = Hoà.
+   **Phản hồi thật của sàn** (bắt được khi cược tay thành công trên bàn 506) là:
+   `{"gameID": 101, "groupID": 506, "areaID": 506001, "areaType": 85, "bOk": true}`
+   — **không có `betSerialNumber`, không có `gameNo`**. Vì vậy phản hồi được khớp theo
+   **`groupID` của bàn đang mở** (đường chính), `betSerialNumber` chỉ là đường phụ cho
+   mirror khác còn phát trường này. Không khớp theo chỉ số socket: socket nhận qua
+   `queryObjects` có chỉ số khác nhau giữa store và khung gộp, nên so theo chỉ số từng
+   làm phản hồi thật bị bỏ qua và app báo “WS từ chối lệnh cược (no_reply)” dù tiền đã
+   trừ. `bOk: false` ⇒ báo lỗi, **không rơi về bấm chuột**.
    Hook được cài bằng `Page.addScriptToEvaluateOnNewDocument` **và** chạy ngay trong
    document đang sống, cho **mọi khung**; **không bao giờ tải lại tab** (tải lại sẽ đẩy
    Chrome về sảnh và mất bàn đang đứng). Socket chọn theo `groupID` khớp bàn đang mở,
    ưu tiên socket của iframe bàn — socket khung gốc nhận được dữ liệu bàn nhưng server
    từ chối lệnh cược gửi từ đó.
+   Khi không khớp được phản hồi, thông báo lỗi kèm bằng chứng (`group`, `serial`, số
+   phản hồi 22, đếm protocol đã thấy) và app **đọc lại chip thật trên bàn** để quyết
+   định thay vì báo hỏng oan.
 
    **WM nhúng KHÁC ORIGIN (OOPIF)** — kiểu `https://m.9vnv.com/vn/wm_casino` bọc
    `wmvn.m8810.com` — là trường hợp hay làm app “vào bàn mà không đặt được chip”: tab
