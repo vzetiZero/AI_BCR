@@ -561,6 +561,11 @@ function renderBaConfig(config) {
   setValue('#ba-ai-model', config.ai_model);
   setValue('#ba-ai-every', config.ai_every);
   setValue('#ba-ai-timeout', config.ai_timeout);
+  setValue('#ba-ai-fallback-mode', config.ai_fallback_mode || 'off');
+  setValue('#ba-ai-fallback-url', config.ai_fallback_url);
+  setValue('#ba-ai-fallback-model', config.ai_fallback_model);
+  // Nếu đã có model đang cấu hình thì cho nó hiện sẵn trong ô chọn.
+  if (config.ai_model) fillModels([], config.ai_model);
   setValue('#ba-live-trials', config.live_trials);
   setValue('#ba-live-markov', config.live_markov_weight);
 
@@ -620,14 +625,14 @@ function renderAiPanel(live) {
   const analysis = live.analysis || {};
   const ai = live.ai || {};
   // "CÓ AI" chỉ đúng khi có nhận định CỦA AI cho VÁN NÀY. Thiếu key/hết token thì
-  // ``ai.available`` false và ``analysis`` rỗng → phải nói rõ là chưa gọi model,
+  // ``ai.usable`` false và ``analysis`` rỗng → phải nói rõ là chưa gọi model,
   // không được để người dùng tưởng model đang phân tích (cửa đặt vẫn chạy được vì
   // do ``predict`` local chọn).
   const hasAiView = Boolean(analysis.verdict) && !analysis.stale;
   if (badge) {
     badge.textContent = hasAiView ? 'CÓ AI'
       : (ai.busy ? 'ĐANG HỎI AI'
-        : (ai.available ? 'AI CHƯA CHẠY' : 'KHÔNG CÓ AI'));
+        : (ai.usable ? 'AI CHƯA CHẠY' : 'KHÔNG CÓ AI'));
     badge.className = 'hero-state' + (hasAiView ? ' bet' : '');
   }
   const topSide = pred.top_side && SIDE_NAME[pred.top_side]
@@ -676,9 +681,13 @@ function renderAiPanel(live) {
       bits.push(analysis.age ? `AI ở ván ${analysis.round} (cũ ${analysis.age} ván)` : `AI ở ván ${analysis.round}`);
     }
     if (analysis.confidence) bits.push(`tin cậy: ${analysis.confidence}`);
+    // Nói rõ khi câu trả lời đến từ đường lùi, không phải provider chính.
+    if (hasAiView && analysis.via === 'fallback') bits.push('qua đường lùi');
     if (ai.error) bits.push(`lỗi AI: ${ai.error}`);
-    else if (!ai.available) bits.push('chưa có key → chưa gọi model');
+    else if (!ai.usable) bits.push('chưa có key → chưa gọi model');
+    else if (!ai.available) bits.push('provider chính thiếu key → đang dùng đường lùi');
     else if (!analysis.verdict) bits.push(`AI chạy mỗi ${ai.every || 5} ván`);
+    if (ai.key_source) bits.push(`key: ${ai.key_source}`);
     meta.textContent = bits.filter(Boolean).join(' · ');
   }
 }
@@ -1102,6 +1111,7 @@ $('#ba-save-options').addEventListener('click', async () => {
   '#ba-auto-source',
   '#ba-start-url',
   '#ba-ai-mode', '#ba-ai-url', '#ba-ai-model', '#ba-ai-every', '#ba-ai-timeout',
+  '#ba-ai-fallback-mode', '#ba-ai-fallback-url', '#ba-ai-fallback-model',
   '#ba-live-trials', '#ba-live-markov',
   '#ba-win-w', '#ba-win-h', '#ba-win-scale',
   '#ba-auto-hunt', '#ba-auto-recover', '#ba-favorites-only',
@@ -1238,7 +1248,8 @@ $('#ba-live-analyze').addEventListener('click', async () => {
 
 $('#ba-ai-save').addEventListener('click', async () => {
   const fields = ['#ba-ai-mode', '#ba-ai-url', '#ba-ai-model', '#ba-ai-every',
-    '#ba-ai-timeout', '#ba-live-trials', '#ba-live-markov'];
+    '#ba-ai-timeout', '#ba-live-trials', '#ba-live-markov',
+    '#ba-ai-fallback-mode', '#ba-ai-fallback-url', '#ba-ai-fallback-model'];
   const reply = await call('baccarat', 'config.set', {
     ai_mode: $('#ba-ai-mode').value,
     ai_url: $('#ba-ai-url').value.trim(),
@@ -1247,6 +1258,9 @@ $('#ba-ai-save').addEventListener('click', async () => {
     ai_timeout: Number($('#ba-ai-timeout').value),
     live_trials: Number($('#ba-live-trials').value),
     live_markov_weight: Number($('#ba-live-markov').value),
+    ai_fallback_mode: $('#ba-ai-fallback-mode').value,
+    ai_fallback_url: $('#ba-ai-fallback-url').value.trim(),
+    ai_fallback_model: $('#ba-ai-fallback-model').value.trim(),
   });
   if (!reply) return;
   clearDirty(...fields);
@@ -1257,6 +1271,9 @@ $('#ba-ai-save').addEventListener('click', async () => {
     `Gọi AI mỗi ${$('#ba-ai-every').value} ván · timeout ${$('#ba-ai-timeout').value}s`,
     `Monte Carlo ${fmtUnits($('#ba-live-trials').value)} ván`
       + ` · Markov ${$('#ba-live-markov').value}`,
+    `Đường lùi: ${$('#ba-ai-fallback-mode').value}`
+      + ($('#ba-ai-fallback-url').value.trim()
+        ? ` · ${$('#ba-ai-fallback-url').value.trim()}` : ''),
   ]);
 });
 
@@ -1277,6 +1294,10 @@ $('#ba-ai-check').addEventListener('click', async () => {
     if (reply && reply.ok !== false && result && result.ok) {
       status.dataset.state = 'ok';
       status.textContent = result.message || `Model ${result.model} hoạt động.`;
+      // Key + Base URL hợp lệ ⇒ đổ luôn danh sách model thật để người dùng chọn.
+      if (Array.isArray(result.models) && result.models.length) {
+        fillModels(result.models);
+      }
     } else {
       status.dataset.state = 'error';
       status.textContent = (result && result.error) || (reply && reply.error)
@@ -1287,6 +1308,116 @@ $('#ba-ai-check').addEventListener('click', async () => {
     status.textContent = 'Không gửi được yêu cầu kiểm tra.';
   } finally {
     button.disabled = false;
+  }
+});
+
+/* --- AI: tải danh sách model thật của key đang dùng --- */
+const MODEL_SELECT = () => $('#ba-ai-model-select');
+
+function fillModels(models, keep) {
+  const box = MODEL_SELECT();
+  if (!box) return;
+  const current = keep || $('#ba-ai-model').value.trim();
+  box.innerHTML = '';
+  const list = models || [];
+  list.forEach((row) => {
+    const option = document.createElement('option');
+    option.value = row.id;
+    option.textContent = row.name && row.name !== row.id
+      ? `${row.name} · ${row.id}` : row.id;
+    if (row.id === current) option.selected = true;
+    box.appendChild(option);
+  });
+  if (!list.length) {
+    // Chưa tải danh sách: vẫn phải hiện model đang cấu hình, không được nuốt nó.
+    const option = document.createElement('option');
+    option.value = current || '';
+    option.textContent = current || '— Nhấn “Tải model” để lấy danh sách —';
+    option.selected = true;
+    box.appendChild(option);
+    if (!current) return;
+  }
+  // Nếu model đang cấu hình không có trong danh sách thì vẫn cho thấy nó.
+  if (current && !list.some((row) => row.id === current)) {
+    const option = document.createElement('option');
+    option.value = current;
+    option.textContent = `${current} (không có trong danh sách)`;
+    option.selected = true;
+    box.insertBefore(option, box.firstChild);
+  }
+  if (current) $('#ba-ai-model').value = current;
+}
+
+async function loadModels() {
+  const button = $('#ba-ai-models');
+  const status = $('#ba-ai-check-status');
+  if (button) button.disabled = true;
+  if (status) {
+    status.dataset.state = 'busy';
+    status.textContent = 'Đang tải danh sách model…';
+  }
+  try {
+    const reply = await api.call('baccarat', 'ai.models', {
+      mode: $('#ba-ai-mode').value,
+      url: $('#ba-ai-url').value.trim(),
+      model: $('#ba-ai-model').value.trim(),
+      key: $('#ba-ai-key').value.trim(),
+    });
+    const result = reply && reply.result;
+    if (reply && reply.ok !== false && result && result.ok) {
+      fillModels(result.models || []);
+      if (status) {
+        status.dataset.state = 'ok';
+        status.textContent = `Key hợp lệ · ${result.count || (result.models || []).length} model khả dụng.`;
+      }
+      toast(`Đã tải ${result.count || (result.models || []).length} model từ provider.`);
+    } else {
+      if (status) {
+        status.dataset.state = 'error';
+        status.textContent = (result && result.error) || (reply && reply.error)
+          || 'Không tải được danh sách model.';
+      }
+    }
+  } catch (error) {
+    if (status) {
+      status.dataset.state = 'error';
+      status.textContent = 'Không gửi được yêu cầu tải model.';
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+$('#ba-ai-models').addEventListener('click', loadModels);
+
+// Tự tải danh sách model khi key + Base URL đã sẵn sàng: người dùng không phải bấm
+// thêm một nút chỉ để thấy mình chọn được model nào. Chỉ chạy khi có key thật, và
+// không chạy với endpoint local (ở đó model do server local quyết định).
+let modelAutoTimer = null;
+function scheduleModelLoad() {
+  const key = $('#ba-ai-key').value.trim();
+  const mode = $('#ba-ai-mode').value;
+  if (!key || mode === 'off') return;
+  if (modelAutoTimer) clearTimeout(modelAutoTimer);
+  modelAutoTimer = setTimeout(() => { modelAutoTimer = null; loadModels(); }, 600);
+}
+
+$('#ba-ai-key').addEventListener('blur', scheduleModelLoad);
+$('#ba-ai-key').addEventListener('change', scheduleModelLoad);
+$('#ba-ai-url').addEventListener('change', scheduleModelLoad);
+$('#ba-ai-mode').addEventListener('change', scheduleModelLoad);
+
+MODEL_SELECT().addEventListener('change', () => {
+  const value = MODEL_SELECT().value;
+  if (value) $('#ba-ai-model').value = value;
+});
+
+$('#ba-ai-fallback-save').addEventListener('click', async () => {
+  const key = $('#ba-ai-fallback-key').value.trim();
+  const reply = await call('baccarat', 'ai.key.set', { key, slot: 'fallback' });
+  if (reply) {
+    $('#ba-ai-fallback-key').value = '';
+    toast(reply.note || 'Đã lưu key dự phòng.');
   }
 });
 
@@ -1315,4 +1446,9 @@ $('#ba-ai-key-clear').addEventListener('click', async () => {
   switchGame('baccarat');
   const ba = await call('baccarat', 'state');
   if (ba) renderBaccarat(ba);
+  // Cấu hình đã lưu ở chế độ API: tải sẵn danh sách model để ô chọn có dữ liệu thật
+  // ngay khi mở tab (key có thể đến từ env hoặc file cấu hình trên máy).
+  if (ba && ba.config && ba.config.ai_mode === 'api') {
+    loadModels().catch(() => {});
+  }
 })();

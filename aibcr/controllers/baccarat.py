@@ -55,6 +55,11 @@ AUTO_SIDE_NAME = {
     AUTO_SIDE_HYBRID: "Cầu rõ theo cầu, còn lại theo xác suất",
 }
 
+# Dò cổng CDP: timeout ngắn (cổng đóng phải trả lời ngay) và cache ngắn để UI poll
+# không phải mở lại kết nối ở mỗi nhịp.
+CDP_PROBE_TIMEOUT = 0.35
+CDP_PROBE_TTL = 2.0
+
 # Cấu hình mặc định của tab Baccarat (đơn vị VN2 như hiển thị trên sàn).
 DEFAULT_CONFIG = {
     "capital": 3000.0,          # vốn phiên (VN2)
@@ -98,6 +103,11 @@ DEFAULT_CONFIG = {
     "ai_model": "chib/deepseek-v4.1-flash",
     "ai_every": 5,          # gọi AI mỗi N ván
     "ai_timeout": 8,        # ngắn hơn cửa cược ~25s
+    # Đường lùi: CHỈ dùng khi provider chính lỗi (hết token/mất mạng). Mặc định là
+    # endpoint local nên không tốn token và không bao giờ làm tool dừng.
+    "ai_fallback_mode": "off",
+    "ai_fallback_url": "http://127.0.0.1:11434/v1/chat/completions",
+    "ai_fallback_model": "",
     "live_decks": 8,
     "live_trials": 20000,
     "live_markov_weight": 0.15,
@@ -163,9 +173,13 @@ class BaccaratController:
         self.live_hand = 0
         # API key nhập từ UI: CHỈ RAM. Không đưa vào self.config, state file hay snapshot.
         self.ai_key_override = ""
+        # Key của provider dự phòng (đường lùi): cũng chỉ RAM.
+        self.ai_fallback_key_override = ""
         self.bet_config = {"side": self.config["bet_side"], "stake": self.config["bet_stake"]}
         # Cơ chế đã áp ở lần lưu trước: đổi mức gốc/cơ chế thì thang cược bắt đầu lại.
         self._last_progression = self.config.get("bet_progression", PROGRESS_FLAT)
+        # Cache kết quả dò cổng CDP: (dùng được?, lúc dò). Xem ``_cdp_available``.
+        self._cdp_probe = (False, 0.0)
 
         # cờ bận cho các thao tác web (giống controller Tk)
         self.chrome_busy = False
@@ -307,6 +321,14 @@ class BaccaratController:
         config["ai_model"] = str(config.get("ai_model") or "").strip()[:80]
         config["ai_every"] = min(60, max(1, _as_int(config.get("ai_every"), 5)))
         config["ai_timeout"] = min(30, max(2, _as_int(config.get("ai_timeout"), 8)))
+        fb_mode = str(config.get("ai_fallback_mode") or "local").strip().lower()
+        config["ai_fallback_mode"] = (fb_mode if fb_mode in ("off", "local", "api")
+                                      else "local")
+        fb_url = str(config.get("ai_fallback_url") or "").strip()[:300]
+        config["ai_fallback_url"] = (fb_url if (not fb_url or
+                                                fb_url.startswith(("http://", "https://")))
+                                     else "")
+        config["ai_fallback_model"] = str(config.get("ai_fallback_model") or "").strip()[:80]
         config["live_decks"] = min(16, max(1, _as_int(config.get("live_decks"), 8)))
         config["live_trials"] = min(200000, max(100, _as_int(config.get("live_trials"), 20000)))
         config["live_markov_weight"] = max(0.0, min(1.0, _as_float(
@@ -453,20 +475,35 @@ class BaccaratController:
         qua ``Target.attachToTarget`` nên không cần driver Selenium. Đòi driver ở đây là
         lý do bấm “VÀO BÀN HỢP LỆ”/quét sảnh bị chặn oan dù Chrome đang mở và app đã
         nhận được sảnh qua iframe.
+
+        Kết quả được cache ngắn: ``snapshot()`` gọi hàm này mỗi lần UI poll, nên nếu
+        không cache thì khi Chrome đóng, mỗi nhịp poll bị chặn trọn một timeout và UI
+        đứng hình dù không có việc gì để làm.
         """
         try:
             if self.browser.cdp_attached:
                 return True
             if getattr(self.browser, "driver", None) is not None:
                 return self.browser._cdp_page() is not None
-            # Không có driver: kiểm tra thẳng cổng CDP (đủ cho đường OOPIF/iframe).
-            # Thử đọc /json/version; cổng đóng thì Chrome đang mở không phải của app.
-            import urllib.request
-            with urllib.request.urlopen(
-                    "http://127.0.0.1:%d/json/version" % BR.CDP_PORT, timeout=1.5) as resp:
-                return bool(resp.status == 200)
+            now = time.time()
+            cached = self._cdp_probe
+            if cached and (now - cached[1]) < CDP_PROBE_TTL:
+                return cached[0]
+            ready = self._probe_cdp_port()
+            self._cdp_probe = (ready, now)
+            return ready
         except AttributeError:
             return False
+
+    def _probe_cdp_port(self):
+        """Đọc thẳng ``/json/version`` của cổng CDP (đường OOPIF/iframe)."""
+        try:
+            # Timeout ngắn: cổng đóng/mất mạng nội bộ phải trả lời nhanh, không treo UI.
+            import urllib.request
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:%d/json/version" % BR.CDP_PORT,
+                    timeout=CDP_PROBE_TIMEOUT) as resp:
+                return bool(resp.status == 200)
         except Exception as exc:
             # Cổng đóng: URLError/ConnectionRefusedError đều nghĩa là không có Chrome do
             # app mở. Chỉ lỗi khác mới coi là "có thể dùng được".
@@ -858,6 +895,8 @@ class BaccaratController:
             return {"ok": True, "note": "Chrome đã kết nối."}
         if self.chrome_busy:
             return {"ok": False, "error": "Đang mở Chrome, chờ một chút."}
+        # Xoá cache dò cổng: vừa mở Chrome thì kết quả cũ (đóng) không còn đúng.
+        self._cdp_probe = (False, 0.0)
         self.chrome_busy = True
         self.connection_text = "Đang mở Chrome / gắn CDP 9222…"
         window = self._window()
@@ -892,6 +931,7 @@ class BaccaratController:
     def chrome_attach(self):
         if self.chrome_busy:
             return {"ok": False, "error": "Đang bận thao tác Chrome."}
+        self._cdp_probe = (False, 0.0)
         self.chrome_busy = True
 
         def work():
@@ -1925,7 +1965,8 @@ class BaccaratController:
                 from aibcr.adapters import wm_targets as WT
                 if typed and not WT.looks_like_wm(typed):
                     config["portal_url"] = typed
-            for key in ("ai_mode", "ai_url", "ai_model"):
+            for key in ("ai_mode", "ai_url", "ai_model", "ai_fallback_mode",
+                        "ai_fallback_url", "ai_fallback_model"):
                 if key in params:
                     config[key] = params[key]
                     changed.append(key)
@@ -2901,12 +2942,16 @@ class BaccaratController:
             "ai_model": cfg["ai_model"],
             "ai_every": cfg["ai_every"],
             "ai_timeout": cfg["ai_timeout"],
+            "ai_fallback_mode": cfg["ai_fallback_mode"],
+            "ai_fallback_url": cfg["ai_fallback_url"],
+            "ai_fallback_model": cfg["ai_fallback_model"],
         }
 
     def _live_cfg_private(self):
         """Chỉ dùng khi tạo/cấu hình LiveSession; key không bao giờ ra snapshot."""
         cfg = self._live_cfg()
         cfg["ai_key"] = self.ai_key_override
+        cfg["ai_fallback_key"] = self.ai_fallback_key_override
         return cfg
 
     def _apply_live_config(self):
@@ -2915,11 +2960,27 @@ class BaccaratController:
 
     def live_snapshot(self):
         if self.live_session is None:
+            ai_cfg = None
+            try:
+                ai_cfg = LIVE_AI.config(self._live_cfg_private())
+            except Exception:
+                ai_cfg = None
+            if ai_cfg:
+                ai_view = {
+                    "mode": ai_cfg["mode"], "model": ai_cfg["model"],
+                    "available": LIVE_AI.available(ai_cfg),
+                    "usable": LIVE_AI.usable(ai_cfg),
+                    "key_source": ai_cfg.get("key_source") or "",
+                    "fallback": ai_cfg.get("fallback_mode") or "off",
+                    "busy": False, "error": "",
+                }
+            else:
+                ai_view = {"mode": self.config["ai_mode"], "available": False,
+                           "usable": False, "busy": False, "error": ""}
             return {
                 "ok": False, "running": False, "table": "", "rounds": 0,
                 "prediction": None, "analysis": None,
-                "ai": {"mode": self.config["ai_mode"], "available": False,
-                       "busy": False, "error": ""},
+                "ai": ai_view,
                 "config": self._live_cfg(),
                 "note": "Chưa bật AI live — bấm “Bật AI live” để đọc bàn đang mở (WM/Petalive).",
             }
@@ -3176,15 +3237,26 @@ class BaccaratController:
         return result
 
     def ai_key_set(self, params):
-        """Nhận API key từ UI: chỉ lưu RAM, không ghi file/log/snapshot."""
+        """Nhận API key từ UI: chỉ lưu RAM, không ghi file/log/snapshot.
+
+        ``slot="fallback"`` để đặt key cho provider dự phòng (đường lùi) — mặc định
+        là provider chính.
+        """
         params = params or {}
         key = str(params.get("key") or "").strip()[:300]
+        slot = str(params.get("slot") or "primary").strip().lower()
+        if slot not in ("primary", "fallback"):
+            slot = "primary"
         with self.lock:
-            self.ai_key_override = key
+            if slot == "fallback":
+                self.ai_fallback_key_override = key
+            else:
+                self.ai_key_override = key
             self._apply_live_config()
-        return {"ok": True, "has_key": bool(key),
-                "note": "Đã lưu API key trong phiên này (chỉ RAM)." if key
-                        else "Đã xoá API key tuỳ biến; dùng BCR_AI_KEY nếu có."}
+        label = "dự phòng" if slot == "fallback" else "chính"
+        return {"ok": True, "slot": slot, "has_key": bool(key),
+                "note": ("Đã lưu API key %s trong phiên này (chỉ RAM)." % label) if key
+                        else ("Đã xoá API key %s." % label)}
 
     def ai_check(self, params):
         """Probe the currently entered provider settings without saving the key."""
@@ -3195,7 +3267,32 @@ class BaccaratController:
             "model": params.get("model") or self.config.get("ai_model"),
             "key": params.get("key") or self.ai_key_override,
         }
-        return LIVE_AI.check_model(cfg)
+        result = LIVE_AI.check_model(cfg)
+        # Kèm luôn danh sách model của key đó (nếu provider hỗ trợ /models) để UI đổ
+        # vào ô chọn thay vì bắt người dùng gõ tay tên model.
+        try:
+            listed = LIVE_AI.list_models(cfg)
+        except Exception:
+            listed = {"ok": False}
+        if listed.get("ok"):
+            result = dict(result)
+            result["models"] = listed.get("models") or []
+        return result
+
+    def ai_models(self, params):
+        """Danh sách model mà API key + Base URL đang dùng được trả về.
+
+        Dùng để UI hiện ô chọn model sau khi key hợp lệ — không tự đoán tên model.
+        Không lưu key: chỉ dùng cho request này.
+        """
+        params = params or {}
+        cfg = {
+            "mode": params.get("mode") or self.config.get("ai_mode"),
+            "url": params.get("url") or self.config.get("ai_url"),
+            "model": params.get("model") or self.config.get("ai_model"),
+            "key": params.get("key") or self.ai_key_override,
+        }
+        return LIVE_AI.list_models(cfg)
 
     def wm_socket_state(self):
         """Chẩn đoán socket đặt cược WM: đã nhận được socket nào, khung nào, cửa nào.
@@ -3359,6 +3456,7 @@ class BaccaratController:
             "live.state": lambda p: self.live_state(),
             "live.analyze": lambda p: self.live_analyze(),
             "ai.check": self.ai_check,
+            "ai.models": self.ai_models,
             "ai.key.set": self.ai_key_set,
             "bet.config": self.bet_config_set,
             "bet.place": lambda p: self.bet_place(),

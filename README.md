@@ -386,20 +386,43 @@ Card **Bàn đang theo dõi** cập nhật theo từng ván WebSocket (không ch
 - **Dạng cầu**: dãy chuỗi gần nhất + câu `pattern_note` (số tay mỗi cửa, chuỗi tương
   tự trong lịch sử, cửa có xác suất cao nhất).
 
-**Key AI chỉ có 2 nguồn, không bao giờ nằm trong repo:**
+**Key AI chỉ có 3 nguồn, không bao giờ nằm trong repo:**
 
-- Biến môi trường `BCR_AI_KEY` (đặt trước khi chạy `Start.bat`), ví dụ PowerShell:
+1. **Tự dò cấu hình sẵn trên máy** (mặc định bật): engine đọc
+   `~/.config/opencode/opencode.json` (hoặc `.jsonc`) và dùng lại provider
+   OpenAI-compatible đang cấu hình sẵn — key, Base URL và model. Chỉ **đọc lúc chạy**;
+   giá trị không vào repo, state, log hay snapshot. Tắt bằng `BCR_AI_DISCOVER=0`.
+   Màn hình chỉ hiện nhãn nguồn (`opencode.json:vilao`), không hiện key.
 
-  ```
-  $env:BCR_AI_KEY = "<key của bạn>"
-  .\Start.bat
-  ```
+2. Biến môi trường `BCR_AI_KEY` (đặt trước khi chạy `Start.bat`), ví dụ PowerShell:
 
-- Ô **API key tuỳ biến** trong tab AI: engine nhận qua `ai.key.set` và giữ **trong
-  RAM của tiến trình**. Ô nhập bị xoá ngay sau khi bấm Lưu; key không vào `config`,
-  file state, log, snapshot hay JSON-RPC trả về. Bấm **Xoá key** để quay về env.
+   ```
+   $env:BCR_AI_KEY = "<key của bạn>"
+   .\Start.bat
+   ```
 
-Các biến tuỳ chọn khác: `BCR_AI_MODE`, `BCR_AI_MODEL`, `BCR_AI_URL`, `BCR_AI_TIMEOUT`.
+3. Ô **API key tuỳ biến** trong tab AI: engine nhận qua `ai.key.set` và giữ **trong
+   RAM của tiến trình**. Ô nhập bị xoá ngay sau khi bấm Lưu; key không vào `config`,
+   file state, log, snapshot hay JSON-RPC trả về. Bấm **Xoá key** để quay về env.
+
+Thứ tự ưu tiên: key UI > `BCR_AI_KEY` > key tự dò > mặc định.
+
+**Chọn model bằng danh sách thật, không gõ tay:** nhập key (hoặc để trống cho endpoint
+local), bấm **Tải model** — engine gọi `GET /v1/models` bằng chính key đó và đổ danh
+sách vào ô chọn. Key hợp lệ thì thấy đúng các model key đó dùng được; key sai/hết hạn
+thì báo `HTTP 401` và không bịa danh sách. Nút **Kiểm tra model** cũng tự tải danh sách
+khi kết nối thành công.
+
+**Đường lùi khi API chính hết token / mất mạng:** bật trong tab AI (mục *Đường lùi*).
+Chỉ dùng khi provider chính lỗi thật (401/403/429/không kết nối) — chính chạy được thì
+**không** gọi dự phòng, nên không tốn thêm token. Mặc định là **tắt** vì không tự đoán
+máy bạn có Ollama hay không; bật `local` (`http://127.0.0.1:11434/v1`, không cần key)
+hoặc `api` khác (có key riêng). Endpoint local được **dò cổng trước** (cache 30 giây)
+nên cổng chết bị bỏ qua ngay, không làm chậm ván.
+
+Các biến tuỳ chọn khác: `BCR_AI_MODE`, `BCR_AI_MODEL`, `BCR_AI_URL`, `BCR_AI_TIMEOUT`,
+`BCR_AI_DISCOVER`, `BCR_AI_FALLBACK_MODE`, `BCR_AI_FALLBACK_URL`,
+`BCR_AI_FALLBACK_MODEL`, `BCR_AI_FALLBACK_KEY`.
 
 Nếu từng dán key vào code/chat/bug report thì coi như key đã lộ: **xoay key đó** ở
 nhà cung cấp. Không dán giá trị key vào README, test, log hay issue.

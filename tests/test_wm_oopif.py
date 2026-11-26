@@ -454,6 +454,7 @@ class CdpAvailableTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         controller.browser.driver = None
         controller.browser.cdp_attached = False
+        controller._cdp_probe = (False, 0.0)
 
         class FakeResponse:
             status = 200
@@ -485,6 +486,7 @@ class CdpAvailableTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         controller.browser.driver = None
         controller.browser.cdp_attached = False
+        controller._cdp_probe = (False, 0.0)
 
         def refuse(*args, **kwargs):
             raise ConnectionRefusedError(10061, "refused")
@@ -508,6 +510,42 @@ class CdpAvailableTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         controller.browser.cdp_attached = True
         self.assertTrue(controller._cdp_available())
+
+    def test_result_is_cached_so_polling_does_not_stall(self):
+        """``snapshot()`` gọi hàm này mỗi nhịp poll: phải cache, không dò lại liên tục.
+
+        Lỗi thật: khi Chrome đóng, mỗi lần UI poll bị chặn trọn 1,5 giây (timeout dò
+        cổng) nên cửa sổ đứng hình dù không có gì để làm.
+        """
+        import pathlib
+        import tempfile
+        import time
+
+        from aibcr.controllers.baccarat import BaccaratController
+
+        folder = pathlib.Path(tempfile.mkdtemp())
+        controller = BaccaratController(
+            folder / "s.json", type("E", (), {"event": lambda self, n, d: None})())
+        self.addCleanup(controller.shutdown)
+        controller.browser.driver = None
+        controller.browser.cdp_attached = False
+        calls = []
+
+        def probe():
+            calls.append(time.time())
+            return True
+
+        controller._probe_cdp_port = probe
+        self.assertTrue(controller._cdp_available())
+        for _ in range(20):
+            self.assertTrue(controller._cdp_available())
+        self.assertEqual(len(calls), 1, "20 nhịp poll chỉ được dò cổng một lần")
+
+    def test_probe_timeout_is_short(self):
+        """Cổng đóng phải trả lời nhanh: timeout dò không được lớn như timeout thao tác."""
+        from aibcr.controllers import baccarat as BA
+
+        self.assertLessEqual(BA.CDP_PROBE_TIMEOUT, 0.5)
 
 
 class LiftIframeToTabTests(unittest.TestCase):

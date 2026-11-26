@@ -342,6 +342,16 @@ main::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 
 .ai-check-status[data-state="ok"] { color: var(--green); }
 .ai-check-status[data-state="error"] { color: var(--red); }
 
+.fallback-box {
+  margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--field-panel);
+}
+.fallback-box summary {
+  cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted);
+}
+.fallback-box[open] summary { margin-bottom: 10px; }
+.fallback-box .field { margin-top: 8px; }
+
 .log-card { display: flex; flex-direction: column; height: 100%; }
 .log-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .log-head h3 { margin: 0; }

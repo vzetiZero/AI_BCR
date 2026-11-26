@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -67,7 +67,7 @@ class AiConfigTests(unittest.TestCase):
     def setUp(self):
         cleaner = patch.dict(os.environ, {
             "BCR_AI_KEY": "", "BCR_AI_MODE": "", "BCR_AI_URL": "",
-            "BCR_AI_MODEL": "", "BCR_AI_TIMEOUT": "",
+            "BCR_AI_MODEL": "", "BCR_AI_TIMEOUT": "", "BCR_AI_DISCOVER": "0",
         })
         cleaner.start()
         self.addCleanup(cleaner.stop)
@@ -174,7 +174,8 @@ class AiConfigTests(unittest.TestCase):
 
 class SessionTests(unittest.TestCase):
     def setUp(self):
-        cleaner = patch.dict(os.environ, {"BCR_AI_KEY": "", "BCR_AI_MODE": ""})
+        cleaner = patch.dict(os.environ, {"BCR_AI_KEY": "", "BCR_AI_MODE": "",
+                                          "BCR_AI_DISCOVER": "0"})
         cleaner.start()
         self.addCleanup(cleaner.stop)
 
@@ -205,6 +206,13 @@ class SessionTests(unittest.TestCase):
 
 class RpcTests(unittest.TestCase):
     def setUp(self):
+        # Test KHÔNG được gọi mạng thật: chặn cả env key và bước tự dò key trên máy.
+        cleaner = patch.dict(os.environ, {
+            "BCR_AI_KEY": "", "BCR_AI_MODE": "", "BCR_AI_DISCOVER": "0",
+            "BCR_AI_FALLBACK_MODE": "", "BCR_AI_FALLBACK_URL": "",
+        })
+        cleaner.start()
+        self.addCleanup(cleaner.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -471,7 +479,7 @@ class AiTruthfulnessTests(unittest.TestCase):
     def setUp(self):
         cleaner = patch.dict(os.environ, {
             "BCR_AI_KEY": "", "BCR_AI_MODE": "", "BCR_AI_URL": "",
-            "BCR_AI_MODEL": "", "BCR_AI_TIMEOUT": "",
+            "BCR_AI_MODEL": "", "BCR_AI_TIMEOUT": "", "BCR_AI_DISCOVER": "0",
         })
         cleaner.start()
         self.addCleanup(cleaner.stop)
@@ -557,6 +565,278 @@ class AiTruthfulnessTests(unittest.TestCase):
         self.assertFalse(session.snapshot()["ai"]["available"])
         session2 = LiveSession(trials=600, ai_mode="api", ai_key="dummy")
         self.assertTrue(session2.snapshot()["ai"]["available"])
+
+    def test_snapshot_without_live_session_still_reports_ai_settings(self):
+        """AI live chưa bật **không** có nghĩa là chưa cấu hình AI.
+
+        Lỗi thật: ``live_snapshot`` cũ trả ``available: False`` cứng khi chưa bật live,
+        nên UI hiện “KHÔNG CÓ AI” dù key/model đã sẵn sàng — người dùng tưởng cấu hình
+        hỏng và đi nhập lại key vô ích.
+        """
+        self.controller.config["ai_mode"] = "api"
+        self.controller.ai_key_override = "dummy-key"
+        view = self.controller.live_snapshot()
+        self.assertEqual(view["ai"]["mode"], "api")
+        self.assertTrue(view["ai"]["available"], view["ai"])
+        self.assertTrue(view["ai"]["usable"], view["ai"])
+        self.assertEqual(view["ai"]["key_source"], "ui")
+
+    def test_live_analyze_explains_missing_config(self):
+        """Chưa có key: nút “Phân tích ngay” phải nói rõ lý do, không im lặng."""
+        session = LiveSession(trials=600, ai_mode="api", ai_key="")
+        result = session.analyze_now()
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["error"])
+
+
+    def test_check_model_accepts_reasoning_model_with_empty_content(self):
+        """Model reasoning trả ``content`` rỗng nhưng vẫn là kết nối thành công.
+
+        Lỗi thật: ``deepseek-v4.1-flash`` tiêu hết ``max_tokens`` cho phần suy luận
+        nên ``content`` rỗng (``finish_reason=length``). Bước kiểm tra cũ báo "model
+        không trả nội dung" dù key và endpoint hoàn toàn đúng.
+        """
+        fake = {"model": "deepseek-v4.1-flash", "choices": [{
+            "message": {"content": "", "reasoning_content": "nghĩ..."},
+            "finish_reason": "length"}]}
+        with patch.object(ai, "urlopen", return_value=FakeResponse(fake)):
+            result = ai.check_model({"mode": "api", "url": "https://api.example.test/v1",
+                                     "model": "deepseek-v4.1-flash", "key": "dummy"})
+        self.assertTrue(result["ok"], result)
+
+    def test_check_model_still_fails_on_empty_response(self):
+        fake = {"choices": [{"message": {"content": ""}}]}
+        with patch.object(ai, "urlopen", return_value=FakeResponse(fake)):
+            result = ai.check_model({"mode": "api", "url": "https://api.example.test/v1",
+                                     "model": "m", "key": "dummy"})
+        self.assertFalse(result["ok"])
+        self.assertIn("không trả nội dung", result["error"])
+
+    def test_list_models_reads_openai_shape(self):
+        fake = {"data": [{"id": "gpt-6-luna"}, {"id": "claude-haiku-5-5"},
+                         {"id": "deepseek-v4.1-flash"}]}
+        with patch.object(ai, "urlopen", return_value=FakeResponse(fake)) as mocked:
+            result = ai.list_models({"mode": "api", "url": "https://api.example.test/v1",
+                                     "key": "dummy"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([row["id"] for row in result["models"]],
+                         ["claude-haiku-5-5", "deepseek-v4.1-flash", "gpt-6-luna"])
+        self.assertEqual(mocked.call_args.args[0].full_url,
+                         "https://api.example.test/v1/models")
+        self.assertEqual(mocked.call_args.args[0].get_header("Authorization"),
+                         "Bearer dummy")
+
+    def test_list_models_requires_key_for_api_mode(self):
+        result = ai.list_models({"mode": "api", "url": "https://api.example.test/v1",
+                                 "key": ""})
+        self.assertFalse(result["ok"])
+        self.assertIn("key", result["error"].lower())
+
+    def test_models_url_from_base_and_from_endpoint(self):
+        self.assertEqual(ai.models_url("https://api.vilao.ai/v1"),
+                         "https://api.vilao.ai/v1/models")
+        self.assertEqual(ai.models_url("https://api.vilao.ai/v1/chat/completions"),
+                         "https://api.vilao.ai/v1/models")
+        self.assertEqual(ai.models_url("file:///tmp/x"), "")
+
+    def test_config_accepts_saved_ai_prefixed_keys(self):
+        """Cấu hình lưu trong state dùng tiền tố ``ai_``; ``config`` phải hiểu cả hai.
+
+        Lỗi thật đã gặp: truyền thẳng dict ``{"ai_mode": "api"}`` vào ``config()`` cho
+        ra ``mode: "off"`` — AI bị coi là đã tắt dù người dùng đã bật.
+        """
+        cfg = ai.config({"ai_mode": "api", "ai_url": "https://api.example.test/v1",
+                         "ai_model": "m1", "ai_key": "k1", "ai_timeout": 9,
+                         "ai_fallback_mode": "off"})
+        self.assertEqual(cfg["mode"], "api")
+        self.assertEqual(cfg["url"], "https://api.example.test/v1/chat/completions")
+        self.assertEqual(cfg["model"], "m1")
+        self.assertEqual(cfg["key"], "k1")
+        self.assertEqual(cfg["timeout"], 9)
+        # Dạng ngắn vẫn phải thắng khi cả hai cùng có mặt.
+        cfg2 = ai.config({"ai_mode": "api", "mode": "local",
+                          "url": "http://127.0.0.1:11434/v1"})
+        self.assertEqual(cfg2["mode"], "local")
+
+
+class FallbackTests(unittest.TestCase):
+    """Đường lùi: CHỈ dùng khi provider chính lỗi (hết token/mất mạng)."""
+
+    def setUp(self):
+        cleaner = patch.dict(os.environ, {
+            "BCR_AI_KEY": "", "BCR_AI_MODE": "", "BCR_AI_URL": "",
+            "BCR_AI_MODEL": "", "BCR_AI_FALLBACK_MODE": "",
+            "BCR_AI_FALLBACK_URL": "", "BCR_AI_FALLBACK_MODEL": "",
+            "BCR_AI_FALLBACK_KEY": "", "BCR_AI_DISCOVER": "0",
+        })
+        cleaner.start()
+        self.addCleanup(cleaner.stop)
+        # Test mô phỏng đường lùi ĐANG SỐNG; việc dò cổng thật được kiểm riêng ở
+        # ``test_dead_local_endpoint_is_not_used_as_fallback``.
+        alive = patch.object(ai, "_endpoint_alive", return_value=True)
+        alive.start()
+        self._alive = alive
+        self.addCleanup(alive.stop)
+
+    CFG = {"mode": "api", "url": "https://api.example.test/v1",
+           "model": "primary-model", "key": "primary-key", "timeout": 5,
+           "fallback_mode": "local",
+           "fallback_url": "http://127.0.0.1:11434/v1/chat/completions",
+           "fallback_model": "qwen-local"}
+
+    def test_primary_success_never_touches_fallback(self):
+        """Chính chạy được thì KHÔNG gọi dự phòng (không tốn thêm token)."""
+        fake = FakeResponse(api_reply(json.dumps({"verdict": "BỎ TAY"})))
+        with patch.object(ai, "urlopen", return_value=fake) as mocked:
+            result = ai.analyze_structured(PREDICTION, cfg=self.CFG)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["via"], "primary")
+        self.assertEqual(mocked.call_count, 1)
+        body = json.loads(mocked.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(body["model"], "primary-model")
+
+    def test_falls_back_to_local_when_primary_hits_quota(self):
+        """HTTP 429 (hết quota) ⇒ tự chuyển sang endpoint local."""
+        quota = HTTPError("http://api", 429, "too many", {}, None)
+        fake = FakeResponse(api_reply(json.dumps({"verdict": "BỎ TAY",
+                                                  "explanation": "local trả lời"})))
+        with patch.object(ai, "urlopen", side_effect=[quota, fake]) as mocked:
+            result = ai.analyze_structured(PREDICTION, cfg=self.CFG)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["via"], "fallback")
+        self.assertEqual(result["model"], "qwen-local")
+        self.assertEqual(mocked.call_count, 2)
+        second = json.loads(mocked.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(second["model"], "qwen-local")
+        # Không được gửi key của provider chính sang endpoint local.
+        self.assertIsNone(mocked.call_args.args[0].get_header("Authorization"))
+
+    def test_no_key_still_uses_fallback(self):
+        """Chưa nhập key (401/thiếu key) ⇒ đi thẳng đường lùi, không gửi request hỏng."""
+        cfg = dict(self.CFG, key="")
+        fake = FakeResponse(api_reply(json.dumps({"verdict": "BỎ TAY"})))
+        with patch.object(ai, "urlopen", return_value=fake) as mocked:
+            result = ai.analyze_structured(PREDICTION, cfg=cfg)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["via"], "fallback")
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_error_mentions_both_when_fallback_also_fails(self):
+        primary = HTTPError("http://api", 429, "quota", {}, None)
+        with patch.object(ai, "urlopen", side_effect=[primary, URLError("down")]):
+            result = ai.analyze_structured(PREDICTION, cfg=self.CFG)
+        self.assertFalse(result["ok"])
+        self.assertIn("429", result["error"])
+        self.assertIn("đường lùi", result["error"])
+
+    def test_fallback_off_keeps_original_error(self):
+        cfg = dict(self.CFG, fallback_mode="off")
+        primary = HTTPError("http://api", 429, "quota", {}, None)
+        with patch.object(ai, "urlopen", side_effect=[primary]) as mocked:
+            result = ai.analyze_structured(PREDICTION, cfg=cfg)
+        self.assertFalse(result["ok"])
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_fallback_defaults_to_off(self):
+        """Mặc định KHÔNG đoán: người dùng phải tự bật đường lùi trong tab AI.
+
+        Lỗi thật: mặc định ``local`` trỏ vào 127.0.0.1:11434; máy không có Ollama thì
+        mỗi lần provider chính lỗi app phải chờ thêm trọn một timeout cho cổng chết.
+        """
+        cfg = ai.config({"mode": "api", "key": "dummy"})
+        self.assertEqual(cfg["fallback_mode"], "off")
+        self.assertIsNone(ai._fallback_settings(cfg),
+                          "mặc định không được có đường lùi")
+        # Không có key và không bật đường lùi ⇒ thật sự không dùng được AI.
+        self.assertFalse(ai.usable(ai.config({"mode": "api", "key": "",
+                                              "fallback_mode": "off"})))
+
+    def test_dead_local_endpoint_is_not_used_as_fallback(self):
+        """Cổng local không có ai nghe ⇒ bỏ qua ngay, không chờ timeout."""
+        # Bỏ bản patch "endpoint luôn sống" của setUp, dùng cơ chế dò cổng thật.
+        self._alive.stop()
+        primary = HTTPError("http://api", 429, "quota", {}, None)
+        cfg = dict(self.CFG, fallback_url="http://127.0.0.1:9/v1/chat/completions")
+        ai._ALIVE_CACHE.clear()
+        started = time.time()
+        with patch.object(ai, "urlopen", side_effect=[primary]) as mocked:
+            result = ai.analyze_structured(PREDICTION, cfg=cfg)
+        elapsed = time.time() - started
+        self.assertFalse(result["ok"])
+        self.assertEqual(mocked.call_count, 1, "không được gọi endpoint chết")
+        self.assertLess(elapsed, 2.0, "không được chờ timeout cho cổng chết")
+
+    def test_usable_true_with_only_fallback_but_available_false(self):
+        """Không key chính nhưng có đường lùi ⇒ ``usable`` True, ``available`` vẫn False.
+
+        UI hiển thị ``available`` để nói thật provider chính có cấu hình hay không;
+        ``usable`` là câu hỏi khác: AI có chạy được bằng bất kỳ đường nào.
+        """
+        cfg = ai.config({"mode": "api", "key": "", "fallback_mode": "local",
+                         "fallback_url": "http://127.0.0.1:11434/v1"})
+        self.assertFalse(ai.available(cfg))
+        self.assertTrue(ai.usable(cfg))
+        off = ai.config({"mode": "off", "key": "x", "fallback_mode": "local"})
+        self.assertFalse(ai.usable(off), "chọn Tắt thì không được tự gọi đường lùi")
+
+
+class DiscoverTests(unittest.TestCase):
+    """Tự dùng lại provider đang cấu hình sẵn trên máy — chỉ ĐỌC, không ghi key."""
+
+    def setUp(self):
+        cleaner = patch.dict(os.environ, {
+            "BCR_AI_KEY": "", "BCR_AI_MODE": "", "BCR_AI_DISCOVER": "",
+        })
+        cleaner.start()
+        self.addCleanup(cleaner.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, name, data):
+        path = pathlib.Path(self.tmp.name) / name
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return str(path)
+
+    def test_reads_provider_key_and_models_without_echoing_key(self):
+        path = self._write("opencode.json", {"providers": {"vilao": {
+            "settings": {"baseURL": "https://api.vilao.ai/v1", "apiKey": "secret-key"},
+            "models": {"gpt-6-luna": {}, "deepseek-v4.1-flash": {}}}}})
+        with patch.object(ai, "DISCOVER_PATHS", (path,)):
+            found = ai.discover_credentials()
+        self.assertTrue(found)
+        self.assertEqual(found["url"], "https://api.vilao.ai/v1")
+        self.assertEqual(found["key"], "secret-key")
+        self.assertIn("deepseek-v4.1-flash", found["models"])
+        # Không được để key rò vào mô tả nguồn.
+        self.assertNotIn("secret-key", found["source"])
+
+    def test_jsonc_with_comments_is_accepted(self):
+        path = pathlib.Path(self.tmp.name) / "opencode.jsonc"
+        path.write_text(
+            '{\n  // provider dang dung\n  "providers": {"x": {"settings": '
+            '{"baseURL": "https://api.example/v1", "apiKey": "k1"}}}\n}',
+            encoding="utf-8")
+        with patch.object(ai, "DISCOVER_PATHS", (str(path),)):
+            found = ai.discover_credentials()
+        self.assertEqual(found.get("key"), "k1")
+
+    def test_can_be_disabled_and_skips_non_http_urls(self):
+        path = self._write("opencode.json", {"providers": {"bad": {
+            "settings": {"baseURL": "file:///tmp/x", "apiKey": "k"}}}})
+        with patch.object(ai, "DISCOVER_PATHS", (path,)):
+            self.assertEqual(ai.discover_credentials(), {})
+            with patch.dict(os.environ, {"BCR_AI_DISCOVER": "0"}):
+                self.assertEqual(ai.discover_credentials(), {})
+
+    def test_ui_key_wins_over_discovered_key(self):
+        path = self._write("opencode.json", {"providers": {"vilao": {
+            "settings": {"baseURL": "https://api.vilao.ai/v1", "apiKey": "disk-key"}}}})
+        with patch.object(ai, "DISCOVER_PATHS", (path,)):
+            cfg = ai.config({"mode": "api", "url": "https://mine.example/v1",
+                             "key": "typed-key", "model": "typed-model"})
+        self.assertEqual(cfg["key"], "typed-key")
+        self.assertEqual(cfg["url"], "https://mine.example/v1/chat/completions")
+        self.assertEqual(cfg["model"], "typed-model")
 
 
 if __name__ == "__main__":

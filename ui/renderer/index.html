@@ -226,6 +226,11 @@
                 <input id="ba-ai-url" type="text" placeholder="https://api.openai.com/v1" />
               </label>
               <label class="field">Model
+                <select id="ba-ai-model-select">
+                  <option value="">— Nhập key rồi bấm “Tải model” —</option>
+                </select>
+              </label>
+              <label class="field">hoặc gõ tay tên model
                 <input id="ba-ai-model" type="text" placeholder="qwen2.5:7b-instruct" />
               </label>
               <label class="field">Gọi AI mỗi N ván
@@ -247,6 +252,7 @@
                 <div class="row">
                   <button class="btn" id="ba-ai-key-save">Lưu key (phiên này)</button>
                   <button class="btn" id="ba-ai-key-clear">Xoá key</button>
+                  <button class="btn primary" id="ba-ai-models">Tải model</button>
                 </div>
                 <div class="row ai-check-row">
                   <button class="btn primary" id="ba-ai-check">Kiểm tra model</button>
@@ -254,6 +260,33 @@
                 </div>
                 <p class="ai-key-note">Key chỉ giữ trong bộ nhớ phiên app.</p>
               </div>
+
+              <details class="fallback-box">
+                <summary>Đường lùi khi API chính hết token / mất mạng</summary>
+                <p class="ai-key-note">
+                  Chỉ dùng khi provider chính lỗi (401/403/429/không kết nối). Để
+                  <b>local</b> thì không tốn token; đặt <b>off</b> nếu không muốn dự phòng.
+                </p>
+                <label class="field">Nguồn dự phòng
+                  <select id="ba-ai-fallback-mode">
+                    <option value="off">Tắt đường lùi</option>
+                    <option value="local">Local (Ollama / endpoint localhost)</option>
+                    <option value="api">API khác (OpenAI-compatible)</option>
+                  </select>
+                </label>
+                <label class="field">Base URL dự phòng
+                  <input id="ba-ai-fallback-url" type="text" placeholder="http://127.0.0.1:11434/v1" />
+                </label>
+                <label class="field">Model dự phòng
+                  <input id="ba-ai-fallback-model" type="text" placeholder="qwen2.5:7b-instruct" />
+                </label>
+                <label class="field">API key dự phòng (chỉ khi chọn API khác)
+                  <input id="ba-ai-fallback-key" type="password" autocomplete="off" spellcheck="false" placeholder="Để trống nếu local" />
+                </label>
+                <div class="row">
+                  <button class="btn" id="ba-ai-fallback-save">Lưu key dự phòng</button>
+                </div>
+              </details>
               <button class="btn primary" id="ba-ai-save">Lưu cấu hình AI</button>
             </div>
           </div>

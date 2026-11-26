@@ -48,7 +48,8 @@ class LiveSession:
     def __init__(self, decks=8, trials=predict.DEFAULT_TRIALS,
                  markov_weight=predict.DEFAULT_MARKOV_WEIGHT, table="",
                  ai_mode="off", ai_url="", ai_model="", ai_key="", ai_every=5, ai_timeout=8,
-                 on_prediction=None, on_status=None):
+                 ai_fallback_mode="local", ai_fallback_url="", ai_fallback_model="",
+                 ai_fallback_key="", on_prediction=None, on_status=None):
         self.shoe = cards.Shoe(decks)
         self.decks = int(decks)
         self.trials = int(trials)
@@ -61,6 +62,13 @@ class LiveSession:
         self.ai_key = str(ai_key or "")
         self.ai_every = max(1, int(ai_every))
         self.ai_timeout = max(2, int(ai_timeout))
+        # Đường lùi: chỉ dùng khi provider chính lỗi/hết token. Mặc định local nên
+        # không tốn token và không làm tool dừng.
+        self.ai_fallback_mode = str(ai_fallback_mode or "local")
+        self.ai_fallback_url = str(ai_fallback_url or "")
+        self.ai_fallback_model = str(ai_fallback_model or "")
+        # Key riêng của đường lùi (provider dự phòng khác hãng). Rỗng = không dùng.
+        self.ai_fallback_key = str(ai_fallback_key or "")
         self.on_prediction = on_prediction
         self.on_status = on_status
 
@@ -89,7 +97,9 @@ class LiveSession:
     def configure(self, **kwargs):
         """Cập nhật cấu hình từ UI mà không tạo lại shoe/lịch sử."""
         allowed = ("decks", "trials", "markov_weight", "ai_mode", "ai_url",
-                   "ai_model", "ai_key", "ai_every", "ai_timeout")
+                   "ai_model", "ai_key", "ai_every", "ai_timeout",
+                   "ai_fallback_mode", "ai_fallback_url", "ai_fallback_model",
+                   "ai_fallback_key")
         with self.lock:
             for key in allowed:
                 if key in kwargs and kwargs[key] is not None:
@@ -99,7 +109,11 @@ class LiveSession:
 
     def _ai_cfg(self):
         return {"mode": self.ai_mode, "url": self.ai_url, "model": self.ai_model,
-                "key": self.ai_key, "timeout": self.ai_timeout}
+                "key": self.ai_key, "timeout": self.ai_timeout,
+                "fallback_mode": self.ai_fallback_mode,
+                "fallback_url": self.ai_fallback_url,
+                "fallback_model": self.ai_fallback_model,
+                "fallback_key": self.ai_fallback_key}
 
     def _notify(self):
         if self.on_prediction is None:
@@ -304,7 +318,9 @@ class LiveSession:
 
     def _schedule_analysis(self):
         cfg = ai.config(self._ai_cfg())
-        if not ai.available(cfg):
+        # ``usable`` (không phải ``available``): có đường lùi cũng phải chạy được, nếu
+        # không thì provider chính hết token là AI im lặng mãi dù đã bật dự phòng.
+        if not ai.usable(cfg):
             return
         with self.lock:
             if self.ai_busy or not self.prediction or not self.ai_every:
@@ -341,7 +357,8 @@ class LiveSession:
         if not payload["prediction"]:
             return {"ok": False, "error": "Chưa có ván nào để phân tích."}
         cfg = ai.config(self._ai_cfg())
-        if not ai.available(cfg):
+        # ``usable``: đã bật đường lùi thì nút “Phân tích ngay” vẫn phải chạy.
+        if not ai.usable(cfg):
             return {"ok": False, "error": "Chưa cấu hình AI (chế độ/key/endpoint)."}
         result = ai.analyze_structured(
             payload["prediction"], recent_rounds=payload["recent_rounds"],
@@ -431,6 +448,11 @@ class LiveSession:
                     "url": cfg["url"] if cfg["mode"] == "local" else "",
                     "model": cfg["model"],
                     "available": ai.available(cfg),
+                    "usable": ai.usable(cfg),
+                    # Nhãn nguồn key (vd. ``discovered:opencode.json:vilao``); không bao
+                    # giờ chứa giá trị key. UI hiện nhãn để người dùng biết key từ đâu.
+                    "key_source": cfg.get("key_source") or "",
+                    "fallback": cfg.get("fallback_mode") or "off",
                     "busy": bool(self.ai_busy),
                     "error": self.ai_error,
                     "every": self.ai_every,
