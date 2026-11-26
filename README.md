@@ -368,7 +368,7 @@ Tab **AI dự đoán** bật/tắt luồng live mà không cần terminal:
 
 1. Chọn nguồn: `off` · `local` (Ollama/llama.cpp, **không cần key**) · `api`
    (OpenAI-compatible, cần key). Endpoint/model mặc định:
-   `https://api.vilao.ai/v1/chat/completions` và `chib/deepseek-v4.1-flash`.
+   `https://api.vilao.ai/v1/chat/completions` và `deepseek-v4.1-flash`.
 2. Bấm **Lưu cấu hình AI**, rồi **Bật AI live**. Engine gắn CDP 9222, đọc WebSocket
    bàn Petalive, cập nhật shoe và gọi AI mỗi N ván (mặc định 5) trong **thread riêng**
    — không chặn vòng quét/đặt cược.
@@ -443,9 +443,11 @@ cũng không được trả số liệu mới; mọi con số trên UI đều l�
   không hề do AI chọn;
 - nhận định cũ quá 2 ván bị đánh dấu `stale` và UI hiện `(nhận định cũ — ván N)`.
 
-Muốn kiểm tra đường gọi model có thật sự hoạt động: bấm **Kiểm tra kết nối** trong
-tab AI (gửi một request `max_tokens: 4`). Kết quả `HTTP 401` nghĩa là key sai/hết
-hạn; `429` nghĩa là hết quota; cả hai đều là bằng chứng request đã tới provider.
+Muốn kiểm tra đường gọi model có thật sự hoạt động: bấm **Kiểm tra model** trong
+tab AI. Kết quả `HTTP 401` nghĩa là key sai/hết hạn; `429` nghĩa là hết quota; cả hai
+đều là bằng chứng request đã tới provider. Model reasoning (như `deepseek-v4.1-flash`)
+có thể trả `content` rỗng vì đã dùng hết ngân sách token cho phần suy luận — bước kiểm
+tra vẫn tính là thành công và thử đọc cả `reasoning_content`.
 
 ## Lệnh cược từng tay + tự đặt cược
 
