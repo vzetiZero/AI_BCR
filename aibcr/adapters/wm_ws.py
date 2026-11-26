@@ -80,11 +80,18 @@ HOOK_JS = r"""(() => {
             store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
             if (store.recent21.length > 60) store.recent21.shift();
         } else if (proto === 22) {
-            store.last22 = {socket: idx, at: Date.now(), data: msg.data};
+            // Phản hồi lệnh cược: mirror khác nhau đặt ``bOk``/``betSerialNumber`` ở cấp
+            // ngoài HOẶC trong ``data``. Chép sẵn cả hai dạng để Python không phải đoán
+            // — đọc sai chỗ coi như lệnh thành công là "bị từ chối" và tool đặt lại.
+            const pick = (key) => (msg[key] !== undefined) ? msg[key]
+                : ((msg.data && msg.data[key] !== undefined) ? msg.data[key] : null);
+            const entry = {socket: idx, at: Date.now(), data: msg.data,
+                           ok: pick('bOk'), serial: pick('betSerialNumber')};
+            store.last22 = entry;
             // Giữ lịch sử ngắn: phản hồi của lệnh trước không bị lệnh sau ghi đè trước
             // khi vòng chờ đọc kịp.
             store.recent22 = store.recent22 || [];
-            store.recent22.push({socket: idx, at: Date.now(), data: msg.data});
+            store.recent22.push(entry);
             if (store.recent22.length > 12) store.recent22.shift();
         }
     };
@@ -158,15 +165,21 @@ WINDOWS_JS = r"""(() => {
 # khung sở hữu được truyền vào qua ``arguments``.
 ADOPT_FN = r"""function (store, label) {
     const decoder = new TextDecoder('utf-8');
+    const pick = (msg, key) => (msg[key] !== undefined) ? msg[key]
+        : ((msg.data && msg.data[key] !== undefined) ? msg.data[key] : null);
     const put = (idx, proto, msg) => {
         store.protocols[idx] = proto;
         if (proto === 21) {
             store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
             if (store.recent21.length > 60) store.recent21.shift();
         } else if (proto === 22) {
-            store.last22 = {socket: idx, at: Date.now(), data: msg.data};
+            // Xem ``HOOK_JS``: ``bOk``/``betSerialNumber`` có thể ở cấp ngoài hoặc trong
+            // ``data`` tuỳ mirror, nên chép sẵn cả hai để bộ khớp không đoán sai.
+            const entry = {socket: idx, at: Date.now(), data: msg.data,
+                           ok: pick(msg, 'bOk'), serial: pick(msg, 'betSerialNumber')};
+            store.last22 = entry;
             store.recent22 = store.recent22 || [];
-            store.recent22.push({socket: idx, at: Date.now(), data: msg.data});
+            store.recent22.push(entry);
             if (store.recent22.length > 12) store.recent22.shift();
         }
     };
@@ -1118,8 +1131,8 @@ class WMSocket(threading.Thread):
                                           % (age / 1000.0)}
         # Không tự đoán pha cược bằng ``tableStatus``: server trả ``bOk: false`` khi cửa
         # cược đã đóng, đó mới là căn cứ.
-        frame = bet_frame(side, amount, game_no, round_no,
-                          serial=self._next_serial(game_no, round_no))
+        serial = self._next_serial(game_no, round_no)
+        frame = bet_frame(side, amount, game_no, round_no, serial=serial)
         payload = json.dumps(json.dumps(frame, ensure_ascii=False))
         routes = list(state.get("routes") or [])
         locals_ = list(state.get("locals") or [])
@@ -1153,13 +1166,32 @@ class WMSocket(threading.Thread):
                     for candidate in candidates:
                         if not isinstance(candidate, dict):
                             continue
-                        # ``READ_JS`` gộp socket của nhiều store trong CÙNG khung và ghi
-                        # ``socket = offset + chỉ số cục bộ``. Phải so với chỉ số CỤC BỘ
-                        # của store sở hữu socket vừa gửi, nếu không phản hồi của socket
-                        # khác (cùng khung) sẽ bị nhận nhầm.
                         try:
                             at = float(candidate.get("at") or 0)
                         except (TypeError, ValueError):
+                            continue
+                        if at < sent_at - 500.0:
+                            continue
+                        # Cách khớp CHẮC CHẤT NHẤT: server dội lại đúng
+                        # ``betSerialNumber`` của lệnh vừa gửi. Dùng số này thay vì chỉ số
+                        # socket: socket nhận qua ``queryObjects`` có chỉ số khác nhau giữa
+                        # store và khung gộp, nên so theo chỉ số làm phản hồi thật bị bỏ
+                        # qua oan → "WS từ chối lệnh cược (no_reply)" dù tiền đã trừ.
+                        if self._same_serial(candidate, serial):
+                            reply = candidate
+                            break
+                        # Dự phòng: phản hồi không kèm serial (một số mirror bỏ trường này).
+                        # Chỉ nhận khi đúng socket đã gửi VÀ đúng ván, để không nhận nhầm
+                        # phản hồi của socket/lệnh khác.
+                        if candidate.get("serial") is not None:
+                            continue
+                        body = candidate.get("data") or {}
+                        if body.get("betSerialNumber") is not None:
+                            continue
+                        if body.get("gameNo") is not None and body.get("gameNo") != game_no:
+                            continue
+                        if (body.get("gameNoRound") is not None
+                                and body.get("gameNoRound") != round_no):
                             continue
                         raw_socket = candidate.get("socket")
                         if raw_socket is not None:
@@ -1170,16 +1202,36 @@ class WMSocket(threading.Thread):
                                 continue
                             if local_in_channel != int(local_index):
                                 continue
-                        if at < sent_at - 500.0:
-                            continue
                         if reply is None or at > float(reply.get("at") or 0):
                             reply = candidate
+                    if reply is not None:
+                        break
                 if reply is not None:
                     body = reply.get("data") or {}
-                    return {"ok": bool(body.get("bOk")), "frame": frame, "reply": body,
-                            "error": "" if body.get("bOk") else "server_rejected"}
+                    # ``ok``/``serial`` được hook chép từ cả cấp ngoài lẫn ``data``; ``None``
+                    # = khung không mang trường đó (mirror cũ), khi đó mới xét ``body``.
+                    ok_flag = reply.get("ok")
+                    if ok_flag is None:
+                        ok_flag = body.get("bOk")
+                    return {"ok": bool(ok_flag), "frame": frame, "reply": body,
+                            "error": "" if ok_flag else "server_rejected"}
                 time.sleep(0.15)
-        return {"ok": False, "frame": frame, "error": "no_reply"}
+        return {"ok": False, "frame": frame, "error": "no_reply", "sent": True}
+
+    @staticmethod
+    def _same_serial(candidate, serial):
+        """Phản hồi có đúng ``betSerialNumber`` của lệnh vừa gửi không.
+
+        Hook chép sẵn ``serial`` (đã gộp cả cấp ngoài và trong ``data``); nếu khung không
+        mang trường này thì đọc thẳng từ ``data``.
+        """
+        value = candidate.get("serial")
+        if value is None:
+            value = ((candidate.get("data") or {}).get("betSerialNumber"))
+        try:
+            return int(value) == int(serial)
+        except (TypeError, ValueError):
+            return False
 
 
 # ------------------------------------------------------------------ dùng chung

@@ -161,6 +161,22 @@ test('socket tạo SAU khi nhận socket cũ vẫn được hook bắt', () => {
   assert.strictEqual(store.recent21[store.recent21.length - 1].data.groupID, 99);
 });
 
+test('phản hồi protocol 22 được chép cả bOk/serial cấp ngoài lẫn trong data', () => {
+  const win = realm();
+  vm.runInContext(js('HOOK_JS'), win);
+  const ws = new win.WebSocket('wss://wm/table');
+  // Dạng 1: mọi thứ nằm trong ``data``.
+  ws.deliver(JSON.stringify({ protocol: 22, data: { bOk: true, betSerialNumber: 7 } }));
+  const store = win.__wmHook3;
+  assert.strictEqual(store.last22.ok, true, 'bOk trong data phải đọc được');
+  assert.strictEqual(store.last22.serial, 7, 'serial trong data phải đọc được');
+  // Dạng 2: ``bOk`` ở cấp ngoài, ``data`` null — dạng tài liệu dự án mô tả.
+  ws.deliver(JSON.stringify({ protocol: 22, bOk: true, betSerialNumber: 8 }));
+  assert.strictEqual(store.last22.ok, true, 'bOk cấp ngoài phải đọc được');
+  assert.strictEqual(store.last22.serial, 8, 'serial cấp ngoài phải đọc được');
+  assert.strictEqual(store.recent22.length, 2, 'phải giữ cả hai phản hồi');
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

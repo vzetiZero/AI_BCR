@@ -384,6 +384,18 @@ class WMBet:
                              % float(current.get("total") or 0)}
         result = socket.place(side, target)
         if not result.get("ok"):
+            # ``no_reply`` KHÁC "bị từ chối": lệnh đã gửi đi nhưng không khớp được khung
+            # phản hồi (mirror đổi định dạng, phản hồi về muộn hơn cửa sổ chờ). Tuyệt đối
+            # không báo hỏng ngay — tiền có thể ĐÃ bị trừ. Lấy chip thật trên bàn làm
+            # trọng tài: có đúng số tiền ở đúng cửa thì lệnh thành công.
+            if result.get("error") == "no_reply" and result.get("sent"):
+                settled = self._verify_after_send(side, target)
+                if settled is not None:
+                    return {"ok": True, "placed": [target], "total": settled, "via": "ws",
+                            "denominations": denominations, "confirmed": True,
+                            "bet_area": BET_AREA[side],
+                            "note": "Đã đặt %d đv vào %s qua WebSocket (xác nhận bằng chip "
+                                    "trên bàn).%s" % (target, SIDE_NAME[side], all_in_note)}
             return {"ok": False, "denominations": denominations, "via": "ws",
                     "error": "WebSocket từ chối lệnh cược (%s)."
                              % (result.get("error") or "no_reply")}
@@ -397,17 +409,46 @@ class WMBet:
                 break
             time.sleep(0.2)
         if abs(placed - target) >= 0.01:
-            # Lệch: huỷ ngay để không giữ lệnh sai.
-            undo = self.cancel()
+            # Server đã xác nhận (``bOk: true``) nhưng số chip đọc được chưa khớp. Không
+            # huỷ: chênh lệch thường chỉ là độ trễ vẽ chip, còn bấm huỷ là huỷ một lệnh
+            # THẬT vừa vào. Ghi nhận số đọc được để sổ vốn tính theo tiền thật.
+            if placed <= 0:
+                return {"ok": True, "placed": [target], "total": target, "via": "ws",
+                        "denominations": denominations, "confirmed": True,
+                        "bet_area": BET_AREA[side],
+                        "note": "Server đã nhận %d đv vào %s qua WebSocket (chip hiển thị "
+                                "chưa kịp cập nhật).%s"
+                                % (target, SIDE_NAME[side], all_in_note)}
             return {"ok": False, "placed": [], "denominations": denominations,
-                    "via": "ws", "error": "WS đặt lệch: cần %d, bàn ghi %g%s."
-                             % (target, placed,
-                                " (đã huỷ)" if undo.get("ok") else " (chưa huỷ được!)")}
+                    "via": "ws", "error": "WS đặt lệch: cần %d, bàn ghi %g — không tự huỷ, "
+                             "kiểm tra bàn trước khi đặt tay mới."
+                             % (target, placed)}
         return {"ok": True, "placed": [target], "total": placed, "via": "ws",
                 "denominations": denominations,
                 "confirmed": True, "bet_area": BET_AREA[side],
                 "note": "Đã đặt %d đv vào %s qua WebSocket.%s"
                         % (target, SIDE_NAME[side], all_in_note)}
+
+    def _verify_after_send(self, side, target, wait_seconds=5.0):
+        """Đọc lại chip thật sau khi đã gửi lệnh mà không khớp được phản hồi.
+
+        Trả số tiền đang treo đúng cửa nếu khớp (đặt thành công), ``None`` nếu chưa xác
+        nhận được. Không tự huỷ: chip còn trên bàn là dấu hiệu AN TOÀN (gate chờ bàn dọn
+        chip sẽ không cho đặt chồng tay mới), còn huỷ nhầm một lệnh vừa vào sẽ làm mất
+        tiền thật.
+        """
+        deadline = time.monotonic() + max(0.5, float(wait_seconds))
+        while time.monotonic() < deadline:
+            try:
+                after = self.read_bets()
+            except Exception:
+                after = {}
+            if after.get("ok"):
+                placed = float(((after.get("spots") or {}).get(side) or {}).get("amount") or 0)
+                if abs(placed - target) < 0.01:
+                    return placed
+            time.sleep(0.25)
+        return None
 
     def cancel(self):
         """Huỷ toàn bộ chip đang treo trên bàn bằng nút huỷ (bấm trong trang).

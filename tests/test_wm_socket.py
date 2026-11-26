@@ -231,6 +231,69 @@ class PlaceRoutingTests(unittest.TestCase):
         self.assertEqual(result["error"], "no_socket")
 
 
+class ReplyMatchingTests(unittest.TestCase):
+    """Khớp phản hồi protocol 22 — chỗ từng làm app báo "no_reply" dù đã gửi lệnh.
+
+    Lỗi thật: socket nhận qua ``Runtime.queryObjects`` có chỉ số khác nhau giữa store và
+    khung gộp, nên so phản hồi theo chỉ số socket làm phản hồi THẬT bị bỏ qua → tool báo
+    "WebSocket từ chối lệnh cược (no_reply)" trong khi tiền đã bị trừ. Phải khớp theo
+    ``betSerialNumber`` của chính lệnh vừa gửi.
+    """
+
+    def build(self, reply_data, reply_socket=0, reply_offset=0):
+        socket = wm_ws.WMSocket(session=None)
+        command = FakeCommand({})
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        state = wm_ws.merge_states([
+            ("page", empty_state(group=7, states=[1], scopes={0: "iframe"})),
+        ])
+        state["recent21"] = [{"socket": 0, "at": 9e12,
+                              "data": {"groupID": 7, "gameNo": 5, "gameNoRound": 9}}]
+        socket.state = lambda fresh=False: state
+        command.values = {
+            "socket.send": {"ok": True, "bytes": 10},
+            # ``recent21`` trong expression: READ_JS trả ảnh chụp hook.
+            "recent21": {"last22": None, "recent22": [
+                {"socket": reply_socket, "offset": reply_offset, "at": 1e18,
+                 "data": reply_data[1], "ok": reply_data[0].get("bOk"),
+                 "serial": reply_data[0].get("betSerialNumber")},
+            ]},
+        }
+        return socket, command
+
+    def test_reply_matched_by_bet_serial_number(self):
+        """Phản hồi khớp đúng ``betSerialNumber`` thì nhận, dù chỉ số socket lệch."""
+        socket, _command = self.build(({"bOk": True, "betSerialNumber": 1},
+                                       {"bOk": True}), reply_socket=3, reply_offset=3)
+        result = socket.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["reply"].get("bOk"))
+
+    def test_ok_flag_at_top_level_is_understood(self):
+        """Mirror đặt ``bOk`` ở cấp ngoài (không nằm trong ``data``) vẫn phải hiểu."""
+        socket, _command = self.build(({"bOk": True, "betSerialNumber": 1}, None),
+                                      reply_socket=0, reply_offset=0)
+        result = socket.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
+
+    def test_reply_of_another_bet_is_not_taken(self):
+        """Phản hồi của lệnh KHÁC (serial khác) không được nhận làm của mình."""
+        socket, _command = self.build(({"bOk": True, "betSerialNumber": 99}, {"bOk": True}),
+                                      reply_socket=0, reply_offset=0)
+        result = socket.place("P", 10, wait_seconds=0.4)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "no_reply")
+
+    def test_timeout_says_the_order_was_sent(self):
+        """Hết giờ chờ vẫn phải báo ``sent`` để nơi gọi kiểm tra chip thật."""
+        socket, _command = self.build(({"bOk": True, "betSerialNumber": 42}, {"bOk": True}),
+                                      reply_socket=0, reply_offset=0)
+        result = socket.place("P", 10, wait_seconds=0.4)
+        self.assertEqual(result.get("error"), "no_reply")
+        self.assertTrue(result.get("sent"), "phải đánh dấu lệnh ĐÃ gửi đi")
+
+
 class AdoptExistingSocketTests(unittest.TestCase):
     """Đã vào bàn rồi mới bấm Chạy tool: socket tạo TRƯỚC hook phải nhận được.
 

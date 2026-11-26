@@ -198,9 +198,11 @@ class ReadBetsFormatTests(unittest.TestCase):
 
 
 class _FakeSocket:
-    def __init__(self, ready):
+    def __init__(self, ready, reply=None):
         self._ready = ready
+        self._reply = reply or {"ok": True}
         self.calls = []
+        self.adopted = 0
 
     def is_alive(self):
         return True
@@ -208,9 +210,16 @@ class _FakeSocket:
     def ready(self):
         return self._ready
 
+    def adopt_existing(self):
+        self.adopted += 1
+        return 0
+
+    def wait_ready(self, timeout=6.0):
+        return self._ready
+
     def place(self, side, amount):
         self.calls.append((side, amount))
-        return {"ok": True}
+        return dict(self._reply)
 
 
 class _FakeSession:
@@ -251,6 +260,66 @@ class PlaceIsWebSocketOnlyTests(unittest.TestCase):
         result = bettor.place("P", 25, wait_seconds=1)
         self.assertFalse(result["ok"])
         self.assertEqual(socket.calls, [])
+
+
+class NoReplySafetyTests(unittest.TestCase):
+    """``no_reply`` (gửi được nhưng không khớp phản hồi) phải coi chip thật là trọng tài.
+
+    Đây là lỗi làm mất tiền: báo "chưa đặt" trong khi tiền đã trừ, rồi tay sau lại đặt
+    tiếp. Hai nguyên tắc được khoá bằng test:
+      1. chip đã lên bàn đúng số ⇒ lệnh THÀNH CÔNG (không phải lỗi);
+      2. server xác nhận rồi mà đọc được 0 chip ⇒ tin server, không bấm huỷ.
+    """
+
+    PHASE = {"ok": True, "chips": [{"key": "10", "w": 38, "h": 38,
+                                    "hit": "chip_item chip_b_10"}]}
+
+    def _bettor(self, socket, reads):
+        bettor = wm_bet.WMBet(_FakeSession(socket))
+        bettor.wait_phase = lambda *a, **k: self.PHASE
+        queue = list(reads)
+        state = {"i": 0}
+
+        def read():
+            index = min(state["i"], len(queue) - 1)
+            state["i"] += 1
+            return queue[index]
+
+        bettor.read_bets = read
+        return bettor
+
+    @staticmethod
+    def _spots(player=0.0):
+        return {"ok": True, "spots": {"P": {"amount": player}}, "total": player,
+                "denominations": [10]}
+
+    def test_chip_on_table_turns_no_reply_into_success(self):
+        socket = _FakeSocket(ready=True, reply={"ok": False, "error": "no_reply",
+                                                "sent": True})
+        # Lần đọc đầu (kiểm tra bàn trống) = 0, sau khi gửi = đúng số tiền.
+        bettor = self._bettor(socket, [self._spots(0.0), self._spots(10.0)])
+        result = bettor.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["total"], 10.0)
+        self.assertTrue(result.get("confirmed"))
+
+    def test_no_reply_with_no_chip_stays_an_error(self):
+        socket = _FakeSocket(ready=True, reply={"ok": False, "error": "no_reply",
+                                                "sent": True})
+        bettor = self._bettor(socket, [self._spots(0.0)])
+        result = bettor.place("P", 10, wait_seconds=1)
+        self.assertFalse(result["ok"])
+        self.assertIn("no_reply", result["error"])
+
+    def test_confirmed_bet_is_never_cancelled_by_a_slow_display(self):
+        """Server ``bOk: true`` + chip hiển thị chậm (0) ⇒ KHÔNG được bấm huỷ."""
+        socket = _FakeSocket(ready=True)
+        bettor = self._bettor(socket, [self._spots(0.0)])
+        cancelled = {"n": 0}
+        bettor.cancel = lambda: cancelled.__setitem__("n", cancelled["n"] + 1) or {"ok": True}
+        result = bettor.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(cancelled["n"], 0, "không được huỷ một lệnh đã vào tiền thật")
 
 
 if __name__ == "__main__":

@@ -250,8 +250,12 @@ khi chưa bật tool.
 2. **Gửi lệnh — WebSocket `protocol 22`** (`wm_ws.py`), dùng hook đã bắt được socket của
    **iframe bàn**: `{"betSerialNumber", "gameNo", "gameNoRound",
    "betArr": [{"betArea", "addBetMoney"}], "commission": 0, "remark": "1,0"}` với
-   `betArea` 1 = Banker, 2 = Player, 3 = Hoà. Server trả `{"protocol": 22, "bOk": true}` là
-   lệnh đã vào; `bOk: false` thì báo lỗi — **không rơi về bấm chuột**.
+   `betArea` 1 = Banker, 2 = Player, 3 = Hoà. Server trả `{"protocol": 22, "bOk": true}`
+   (hoặc `bOk` trong `data` tuỳ mirror) là lệnh đã vào; `bOk: false` thì báo lỗi —
+   **không rơi về bấm chuột**. Phản hồi được khớp theo `betSerialNumber` của chính lệnh
+   vừa gửi, không theo chỉ số socket: socket nhận qua `queryObjects` có chỉ số khác nhau
+   giữa store và khung gộp, so theo chỉ số từng làm phản hồi thật bị bỏ qua và app báo
+   “WS từ chối lệnh cược (no_reply)” dù tiền đã trừ.
    Hook được cài bằng `Page.addScriptToEvaluateOnNewDocument` **và** chạy ngay trong
    document đang sống, cho **mọi khung**; **không bao giờ tải lại tab** (tải lại sẽ đẩy
    Chrome về sảnh và mất bàn đang đứng). Socket chọn theo `groupID` khớp bàn đang mở,
@@ -274,8 +278,11 @@ khi chưa bật tool.
    được chạy lại mỗi 3 giây ở vòng nền và ngay trước khi gửi lệnh. Chẩn đoán bằng
    `python tools/kiem_tra_socket_wm.py` (chỉ đọc) hoặc IPC `wm.socket`; UI/log báo
    “đã nhận socket đang sống của bàn” khi thành công.
-3. **Xác minh** bằng số chip thật đang treo trên bàn (`mybet_money`): lệch là huỷ ngay và
-   báo lỗi, không giữ lệnh sai.
+3. **Xác minh** bằng số chip thật đang treo trên bàn (`mybet_money`). Không khớp được
+   khung phản hồi (`no_reply` — mirror đổi định dạng, phản hồi về muộn) **không** bị coi
+   là thất bại ngay: lệnh đã gửi đi nên tiền có thể đã trừ, app đọc lại chip thật để quyết
+   định. Server đã xác nhận mà số chip hiển thị chậm cũng **không** bị huỷ — trước đây
+   bấm huỷ trong trường hợp này là huỷ một lệnh thật vừa vào.
 4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng
    `table_bets.read` nên `compare_chips` / `table_is_clear` dùng lại được.
 5. **EVO chỉ đọc**: bảng cầu và số chip đang trên bàn vẫn đọc bình thường, nhưng đặt cược

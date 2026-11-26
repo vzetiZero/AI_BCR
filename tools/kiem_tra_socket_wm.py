@@ -97,6 +97,15 @@ def main():
             str(scopes.get(index, "")), (urls[index] if index < len(urls) else "")[:90]))
 
     current = wm_ws.current_table(state)
+    replies = state.get("recent22") or []
+    if replies:
+        print("\nPhản hồi protocol 22 gần nhất (%d):" % len(replies))
+        for item in replies[-4:]:
+            data = (item or {}).get("data") or {}
+            print("  socket #%s · ok=%s · serial=%s · data=%s"
+                  % (item.get("socket"), item.get("ok", data.get("bOk")),
+                     item.get("serial", data.get("betSerialNumber")),
+                     str(data)[:80]))
     print("\nMã bàn đang mở (#container group): %s" % state.get("open_group"))
     print("Số khung protocol 21 đã thấy: %d" % len(state.get("recent21") or []))
     if current is None:
