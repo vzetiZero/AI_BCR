@@ -409,8 +409,12 @@ def bet_frame(side, amount, game_no, round_no, serial=1):
                      "commission": 0, "remark": BET_REMARK}}
 
 
-def current_table(state):
+def current_table(state, want_group=None):
     """Socket + khung 21 của ĐÚNG bàn đang mở: ``(index, data, seen_at_ms)`` hoặc ``None``.
+
+    ``want_group`` = ``groupID`` của bàn người dùng đang mở (lấy từ ``wm_open_key``).
+    Rất quan trọng với socket sảnh: một socket phát khung 21 của **nhiều bàn**, nên nếu
+    chỉ lấy "khung mới nhất" thì có thể chọn nhầm bàn khác và đặt tiền vào đó.
 
     Thứ tự chọn:
       1. socket của **iframe bàn** cùng origin (layout nhiều iframe) — đường chuẩn;
@@ -423,6 +427,12 @@ def current_table(state):
     states = (state or {}).get("states") or []
     scopes = (state or {}).get("scopes") or {}
     group = (state or {}).get("open_group")
+    if group is None:
+        group = want_group
+    else:
+        # Bàn đang mở (đọc từ DOM) đáng tin hơn ``#container`` đọc trong khung khác:
+        # với WM nhúng khác origin, READ_JS của tab mẹ không thấy container của bàn.
+        group = want_group if want_group is not None else group
 
     def open_socket(index):
         return 0 <= index < len(states) and states[index] == 1
@@ -1137,18 +1147,34 @@ class WMSocket(threading.Thread):
         if self._command is None:
             return {"ok": False, "error": "not_connected"}
 
+        # Mã bàn đang mở (``game_group``), do watcher đọc từ DOM bàn đang hiển thị.
+        open_key = str(getattr(self.session, "wm_open_key", "") or "")
+        want_group = None
+        if open_key:
+            try:
+                want_group = int(open_key.split("_")[-1])
+            except (TypeError, ValueError):
+                want_group = None
         state = self.state(fresh=True)
-        current = current_table(state)
+        current = current_table(state, want_group)
         if current is None:
             # Lần cuối thử cứu: socket của bàn có thể đã sống trước hook (người dùng vào
             # bàn rồi mới bấm Chạy tool). Nhận nó và thử lại một lần — không tải lại gì.
             try:
                 if self.adopt_existing():
                     state = self.state(fresh=True)
-                    current = current_table(state)
+                    current = current_table(state, want_group)
             except Exception:
                 current = None
         if current is None:
+            if want_group is not None:
+                # Không có khung 21 nào của ĐÚNG bàn đang mở. Không được đoán bàn khác:
+                # socket sảnh phát khung 21 của nhiều bàn, đặt nhầm là mất tiền thật.
+                return {"ok": False, "error": "table_mismatch",
+                        "detail": {"open_key": open_key, "want_group": want_group,
+                                   "note": "Chưa thấy khung 21 của bàn đang mở (group %d) — "
+                                           "không gửi lệnh để tránh đặt nhầm bàn."
+                                           % want_group}}
             return {"ok": False, "error": "no_socket"}
         socket_index, data, seen_at = current
         game_no, round_no = data.get("gameNo"), data.get("gameNoRound")
@@ -1156,6 +1182,9 @@ class WMSocket(threading.Thread):
             return {"ok": False, "error": "Chưa biết ván hiện tại của bàn."}
         # Mã bàn: khoá nhận phản hồi của sàn WM (khung thật không có betSerialNumber).
         table_group = data.get("groupID")
+        if table_group is None and want_group is None:
+            return {"ok": False, "error": "unknown_table",
+                    "detail": {"note": "Không xác định được bàn đang mở — không gửi lệnh."}}
         age = (time.time() * 1000.0) - float(seen_at or 0)
         if age > 15000:
             return {"ok": False, "error": "Dữ liệu bàn đã cũ (%.1fs) — chưa gửi."

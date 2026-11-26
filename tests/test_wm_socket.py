@@ -343,6 +343,65 @@ class ReplyMatchingTests(unittest.TestCase):
         self.assertTrue(result.get("sent"), "phải đánh dấu lệnh ĐÃ gửi đi")
 
 
+class TableSafetyTests(unittest.TestCase):
+    """Không bao giờ gửi lệnh cược vào bàn khác bàn đang mở.
+
+    Socket sảnh phát khung 21 của **nhiều bàn cùng lúc**, nên "khung 21 mới nhất" có thể
+    thuộc bàn khác. Đặt tiền vào bàn khác là mất tiền không cứu được, nên khi không
+    khớp được bàn đang mở (``wm_open_key``) thì phải TỪ CHỐI GỬI.
+    """
+
+    class SpyCommand(FakeCommand):
+        """FakeCommand ghi lại chỉ số socket nếu ``SEND_JS`` được chạy."""
+
+        def __init__(self, values=None):
+            super().__init__(values)
+            self.sent_index = None
+
+        def __call__(self, method, params=None, timeout=None):
+            expression = (params or {}).get("expression") or ""
+            if "const want = " in expression:
+                try:
+                    self.sent_index = int(expression.split("const want = ")[1].split(";")[0])
+                except (IndexError, ValueError):
+                    pass
+            return super().__call__(method, params, timeout)
+
+    def build(self, open_key, frame_groups, open_group=None):
+        socket = wm_ws.WMSocket(session=type("S", (), {"wm_open_key": open_key})())
+        command = self.SpyCommand({})
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        state = {"installed": True, "urls": [""], "states": [1, 1], "scopes": {},
+                 "protocols": {0: 21, 1: 21}, "recent21": [], "last22": None,
+                 "recent22": [], "open_group": open_group, "sent": [], "errors": [],
+                 "offsets": {}, "seen": {}, "routes": ["page", "page"], "locals": [0, 1]}
+        for index, group in enumerate(frame_groups):
+            state["recent21"].append({"socket": index, "at": 9e12,
+                                      "data": {"groupID": group, "gameNo": 5,
+                                               "gameNoRound": 9}})
+        socket.state = lambda fresh=False: state
+        command.values = {"socket.send": {"ok": True, "bytes": 10}, "recent21": {}}
+        return socket, command
+
+    def test_picks_the_frame_of_the_open_table(self):
+        """Có khung 21 của nhiều bàn ⇒ phải chọn ĐÚNG bàn đang mở, không phải mới nhất."""
+        # Bàn đang mở là 981; khung của bàn 626 cũng có mặt nhưng KHÔNG được chọn.
+        socket, command = self.build("101_981", [626, 981])
+        socket.place("P", 10, wait_seconds=0.3)
+        self.assertEqual(command.sent_index, 1,
+                         "phải gửi bằng socket của bàn 981, không phải socket 0 (bàn 626)")
+
+    def test_refuses_when_open_table_has_no_frame(self):
+        """Không có khung 21 của bàn đang mở ⇒ TỪ CHỐI, không đoán bàn khác."""
+        socket, command = self.build("101_981", [626, 555])
+        result = socket.place("P", 10, wait_seconds=0.3)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "table_mismatch")
+        # ``SEND_JS`` không được chạy ⇒ không có lệnh cược nào rời máy.
+        self.assertIsNone(command.sent_index, "không được gửi lệnh vào bàn khác")
+
+
 class AdoptExistingSocketTests(unittest.TestCase):
     """Đã vào bàn rồi mới bấm Chạy tool: socket tạo TRƯỚC hook phải nhận được.
 

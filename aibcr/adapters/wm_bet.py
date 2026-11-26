@@ -402,9 +402,18 @@ class WMBet:
                 hint = (" [bàn group=%s · serial=%s · phản hồi 22=%s · protocol đã thấy=%s]"
                         % (detail.get("group"), detail.get("serial"),
                            detail.get("recent22"), detail.get("seen")))
+            error = result.get("error") or "no_reply"
+            if error == "table_mismatch":
+                return {"ok": False, "denominations": denominations, "via": "ws",
+                        "error": "%s Chưa đọc được khung dữ liệu của đúng bàn đang mở nên "
+                                 "KHÔNG gửi lệnh (tránh đặt nhầm bàn). Thử lại sau vài giây; "
+                                 "nếu vẫn vậy, đóng rồi mở lại bàn." % detail.get("note", "")}
+            if error == "unknown_table":
+                return {"ok": False, "denominations": denominations, "via": "ws",
+                        "error": "Không xác định được bàn đang mở nên KHÔNG gửi lệnh. "
+                                 "Hãy mở đúng bàn rồi thử lại."}
             return {"ok": False, "denominations": denominations, "via": "ws",
-                    "error": "WebSocket từ chối lệnh cược (%s).%s"
-                             % (result.get("error") or "no_reply", hint)}
+                    "error": "WebSocket từ chối lệnh cược (%s).%s" % (error, hint)}
         # Xác minh bằng số chip thật đang treo trên bàn.
         deadline = time.monotonic() + 2.5
         placed = 0.0
