@@ -277,7 +277,6 @@ class ReplyMatchingTests(unittest.TestCase):
             ]},
         }
         return socket, command
-
     def test_real_market_reply_is_accepted(self):
         """Khung THẬT của sàn (chỉ groupID + bOk) phải được nhận là thành công.
 
@@ -341,6 +340,63 @@ class ReplyMatchingTests(unittest.TestCase):
         result = socket.place("P", 10, wait_seconds=0.4)
         self.assertEqual(result.get("error"), "no_reply")
         self.assertTrue(result.get("sent"), "phải đánh dấu lệnh ĐÃ gửi đi")
+
+
+class ClockSkewTests(unittest.TestCase):
+    """Phản hồi phải được so bằng ĐỒNG HỒ CỦA TRANG, không phải đồng hồ Python.
+
+    Lỗi thật: ``SEND_JS`` gửi lệnh rồi Python lấy ``time.time()`` làm mốc, trong khi
+    ``recent22`` đánh dấu bằng ``Date.now()`` của trang. Hai đồng hồ lệch nhau (múi giờ,
+    tiến trình khác nguồn) nên MỌI phản hồi thật bị coi là "cũ" và loại sạch — app báo
+    "no_reply" dù sàn đã trả lời. Trên máy người dùng độ lệch đo được là ~105 giây.
+    """
+
+    GROUP = 534
+    REPLY = {"gameID": 101, "groupID": 534, "areaID": 534001, "areaType": 84,
+             "bOk": True}
+
+    def _socket(self, sent_at_from_page, reply_at):
+        socket = wm_ws.WMSocket(session=type("S", (), {"wm_open_key": "101_534"})())
+        command = FakeCommand({})
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        state = {"installed": True, "urls": [""], "states": [1], "scopes": {0: "top"},
+                 "protocols": {0: 21}, "recent21": [{"socket": 0, "at": 9e12,
+                                                     "data": {"groupID": self.GROUP,
+                                                              "gameNo": 5,
+                                                              "gameNoRound": 9}}],
+                 "last22": None, "recent22": [], "open_group": self.GROUP,
+                 "sent": [], "errors": [], "offsets": {}, "seen": {},
+                 "routes": ["page"], "locals": [0]}
+        socket.state = lambda fresh=False: state
+        command.values = {
+            # ``SEND_JS`` trả mốc theo đồng hồ TRANG.
+            "socket.send": {"ok": True, "bytes": 10, "at": sent_at_from_page},
+            "recent21": {"last22": None, "recent22": [
+                {"socket": 0, "offset": 0, "at": reply_at, "data": dict(self.REPLY),
+                 "ok": True, "serial": None},
+            ]},
+        }
+        return socket
+
+    def test_reply_is_accepted_despite_python_clock_skew(self):
+        """Trang báo lệnh gửi ở mốc 1.000.000; phản hồi ở 1.000.500 ⇒ phải nhận."""
+        socket = self._socket(sent_at_from_page=1000000.0, reply_at=1000500.0)
+        result = socket.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
+
+    def test_reply_just_before_send_mark_is_still_accepted(self):
+        """Cùng mili-giây (phản hồi ghi nhận trước mốc gửi 1 chút) vẫn phải nhận."""
+        socket = self._socket(sent_at_from_page=1000000.0, reply_at=999800.0)
+        result = socket.place("P", 10, wait_seconds=1)
+        self.assertTrue(result["ok"], result)
+
+    def test_old_reply_is_still_rejected(self):
+        """Phản hồi cũ (trước lúc gửi vài phút) vẫn phải bị loại."""
+        socket = self._socket(sent_at_from_page=1000000.0, reply_at=700000.0)
+        result = socket.place("P", 10, wait_seconds=0.4)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "no_reply")
 
 
 class TableSafetyTests(unittest.TestCase):

@@ -397,6 +397,19 @@ class LiveSession:
                 }
             cfg = ai.config(self._ai_cfg())
             last_row = self.rounds[-1] if self.rounds else {}
+            # Nhận định AI là ảnh chụp một ván, không phải trạng thái sống: nếu AI lỗi
+            # (hết token) thì ``self.analysis`` vẫn là kết quả CŨ và UI sẽ mãi hiện
+            # "CÓ AI" như thể đang phân tích. Đánh dấu tuổi/tính cũ để UI nói thật.
+            analysis_view = None
+            if isinstance(self.analysis, dict):
+                analysis_view = dict(self.analysis)
+                hand_now = max(int(self.hand_no or 0), len(self.history))
+                try:
+                    age = hand_now - int(analysis_view.get("round") or 0)
+                except (TypeError, ValueError):
+                    age = None
+                analysis_view["age"] = age
+                analysis_view["stale"] = bool(age is None or age > 2)
             return {
                 "ok": bool(pred and pred.get("ok")),
                 "running": bool(self.running),
@@ -412,7 +425,7 @@ class LiveSession:
                 "history_tail": self.history[-60:],
                 "road": road.big_road(self.history),
                 "prediction": prediction_view,
-                "analysis": dict(self.analysis) if isinstance(self.analysis, dict) else None,
+                "analysis": analysis_view,
                 "ai": {
                     "mode": cfg["mode"],
                     "url": cfg["url"] if cfg["mode"] == "local" else "",
@@ -420,6 +433,7 @@ class LiveSession:
                     "available": ai.available(cfg),
                     "busy": bool(self.ai_busy),
                     "error": self.ai_error,
+                    "every": self.ai_every,
                 },
                 "config": {
                     "decks": self.decks,

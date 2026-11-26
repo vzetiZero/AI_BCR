@@ -226,6 +226,31 @@ ADOPT_FN = r"""function (store, label) {
                 onData(idx, event.data);
             });
         } catch (e) { continue; }
+        // Bọc ``send`` GIỐNG ``HOOK_JS``. Socket nhận qua ``queryObjects`` trước đây chỉ
+        // được gắn listener đọc, nên lệnh gửi đi không được ghi lại: log luôn hiện
+        // "sent: 0 dòng" và không cách nào biết app đã gửi khung gì. Ghi lại cũng cho
+        // ta thấy ĐÚNG định dạng mà trang tự dùng khi người dùng bấm cược tay.
+        try {
+            const native = ws.send;
+            if (!native.__wmWrapped) {
+                const wrapped = function (data) {
+                    try {
+                        const note = (text) => {
+                            store.sent.push(String(text).slice(0, 240));
+                            if (store.sent.length > 60) store.sent.shift();
+                        };
+                        if (typeof data === 'string') note(data);
+                        else if (typeof data.byteLength === 'number') {
+                            try { note(decoder.decode(new Uint8Array(data))); } catch (e) {}
+                        }
+                        store.last_sent = {socket: idx, at: Date.now()};
+                    } catch (e) {}
+                    return native.apply(ws, arguments);
+                };
+                wrapped.__wmWrapped = true;
+                ws.send = wrapped;
+            }
+        } catch (e) {}
         store.sockets.push(ws);
         store.urls.push(String(ws.url || ''));
         store.scope[idx] = label;
@@ -389,7 +414,11 @@ SEND_JS = r"""(() => {
             try {
                 const bytes = new TextEncoder().encode(%s);
                 socket.send(bytes.buffer);
-                return {ok: true, bytes: bytes.length, scope: entry.label};
+                // Trả mốc theo ĐỒNG HỒ CỦA TRANG. Phản hồi 22 được đánh dấu bằng
+                // ``Date.now()`` của trang, nên so với ``time.time()`` của Python
+                // (hai đồng hồ khác nguồn) từng loại oan phản hồi thật.
+                return {ok: true, bytes: bytes.length, scope: entry.label,
+                        at: Date.now()};
             } catch (e) {
                 return {ok: false, error: String(e).slice(0, 120)};
             }
@@ -1217,7 +1246,21 @@ class WMSocket(threading.Thread):
                 return {"ok": False,
                         "error": (result or {}).get("error") or "send_failed",
                         "frame": frame}
+            # Mốc thời gian phải lấy từ ĐỒNG HỒ CỦA TRANG (``SEND_JS`` trả ``at``), vì
+            # ``recent22`` cũng đánh dấu bằng ``Date.now()`` của trang. Trước đây dùng
+            # ``time.time()`` của Python: lệch múi/đồng hồ giữa hai tiến trình làm mọi
+            # phản hồi thật bị coi là "cũ" và loại sạch → báo no_reply dù sàn đã trả lời.
+            try:
+                sent_at = float(result.get("at") or 0)
+            except (TypeError, ValueError):
+                sent_at = 0.0
+            if not sent_at:
+                sent_at = time.time() * 1000.0
             deadline = time.monotonic() + max(1.0, float(wait_seconds))
+            # Thời gian chờ vẽ/đẩy phản hồi của trang: so đồng hồ trang với nhau nên chỉ
+            # cần dung sai nhỏ; vẫn cho phép phản hồi đến trước mốc một chút vì
+            # ``Date.now()`` của trang và của listener có thể lệch trong cùng một ms.
+            grace_ms = 3000.0
             while time.monotonic() < deadline:
                 reply = None
                 for item in self._channels():
@@ -1235,10 +1278,9 @@ class WMSocket(threading.Thread):
                             at = float(candidate.get("at") or 0)
                         except (TypeError, ValueError):
                             continue
-                        # Cửa sổ thời gian: chỉ nhận phản hồi đến SAU khi gửi (sai số 300ms
-                        # cho đồng hồ JS/Python). Rộng hơn sẽ nhận nhầm phản hồi của lệnh
-                        # trước đó trên cùng bàn.
-                        if at < sent_at - 300.0:
+                        # Chỉ nhận phản hồi đến quanh/sau lúc gửi. Chừa ``grace_ms`` vì
+                        # phản hồi có thể được ghi nhận cùng mili-giây với lệnh gửi.
+                        if at < sent_at - grace_ms:
                             continue
                         # Khớp 1 — theo ``betSerialNumber``: chỉ một số mirror dội lại
                         # trường này. Nếu có thì đây là khoá chính xác nhất.

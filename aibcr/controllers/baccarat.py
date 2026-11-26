@@ -572,6 +572,10 @@ class BaccaratController:
 
         ``analysis.focus_side`` là văn bản do AI trả về nên KHÔNG được dùng để chọn
         cửa; AI chỉ giải thích.
+
+        Hệ quả cần biết: hết token API **không** làm tool dừng và **không** đổi cửa —
+        cửa vẫn do ``predict`` local chọn. Vì vậy ``reason`` của lệnh không được ghi
+        "Theo AI" khi không có nhận định AI (xem ``_resolve_order``).
         """
         live = self.live_session.snapshot() if self.live_session is not None else None
         result = {"side": None, "verdict": "", "playable": False, "confidence": "",
@@ -663,18 +667,22 @@ class BaccaratController:
             reason = "Thắng · về lại mức gốc %s" % M.fmt_money(configured)
         if side == "AUTO":
             side = suggestion["side"]
-            bits = []
             if suggestion.get("source") == "road" and suggestion.get("road_pattern"):
-                bits.append("cầu %s" % suggestion["road_pattern"])
+                reason = "Theo cầu %s" % suggestion["road_pattern"]
                 if suggestion.get("road_side"):
-                    bits.append("đánh %s" % suggestion["road_side"])
+                    reason += " · đánh %s" % suggestion["road_side"]
             elif suggestion.get("top_side"):
-                bits.append("xác suất %s %.1f%%" % (
+                reason = "Theo xác suất %s %.1f%%" % (
                     suggestion["top_side"],
-                    float(suggestion.get("probability") or 0) * 100))
+                    float(suggestion.get("probability") or 0) * 100)
+            else:
+                reason = "Theo xác suất cao nhất"
+            # Nhãn cũ ghi "Theo AI" cho MỌI lệnh AUTO, kể cả khi AI chưa từng chạy
+            # (thiếu key / hết token) — vì cửa đặt do ``predict`` local chọn, AI chỉ
+            # viết nhận định. Ghi đúng nguồn để nhật ký tiền không nói dối; nhận định
+            # AI (nếu có) đứng riêng và ghi rõ là tham khảo.
             if suggestion["verdict"]:
-                bits.append(suggestion["verdict"])
-            reason = ("Theo AI · " + " · ".join(bits)) if bits else "Theo AI"
+                reason += " · AI: %s (chỉ tham khảo)" % suggestion["verdict"]
         return {"side": side if side in ("P", "B", "T") else None,
                 "stake": min(1000000.0, max(1.0, stake)),
                 "base_stake": configured,

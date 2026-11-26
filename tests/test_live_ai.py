@@ -460,5 +460,104 @@ class ProgressionTests(unittest.TestCase):
         self.assertEqual(sim.progress_stake, 40.0)
 
 
+class AiTruthfulnessTests(unittest.TestCase):
+    """Nhật ký và UI phải nói thật AI có chạy hay không.
+
+    Hết token/thiếu key **không** dừng tool và **không** đổi cửa: cửa do ``predict``
+    local chọn, AI chỉ viết nhận định. Vì vậy lệnh cược không được ghi "Theo AI" khi
+    không có nhận định AI, và nhận định cũ không được hiện như của ván hiện tại.
+    """
+
+    def setUp(self):
+        cleaner = patch.dict(os.environ, {
+            "BCR_AI_KEY": "", "BCR_AI_MODE": "", "BCR_AI_URL": "",
+            "BCR_AI_MODEL": "", "BCR_AI_TIMEOUT": "",
+        })
+        cleaner.start()
+        self.addCleanup(cleaner.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+        class Emitter:
+            def event(self, name, data):
+                pass
+
+        self.controller = BaccaratController(
+            str(pathlib.Path(self.tmp.name) / "state.json"), Emitter())
+        self.addCleanup(self.controller.shutdown)
+        self.controller.dispatch("bet.config", {"side": "AUTO", "stake": 10})
+
+    def _bind(self):
+        row = {"key": "id:t1", "label": "Bàn test", "letters": "BBP",
+               "ts": time.time(), "table_id": "t1", "stable": 3}
+        self.controller.tables = {row["key"]: row}
+        self.controller.sim.bind(row)
+        self.controller.sim.start(row)
+
+    def _live(self, analysis=None, rounds=4, hand=4):
+        class FakeLive:
+            def snapshot(self):
+                return {
+                    "running": True, "rounds": rounds, "hand": hand,
+                    "table": "Bàn test",
+                    "prediction": {
+                        "ok": True, "playable": False,
+                        "probabilities": {"p_player": 0.44, "p_banker": 0.46,
+                                          "p_tie": 0.10},
+                        "ev": {"P": -0.10, "B": -0.09, "T": -0.20},
+                        "top_side": "B", "top_probability": 0.46,
+                        "best_side": None, "least_bad_side": "B",
+                        "pattern_note": "",
+                    },
+                    "analysis": analysis,
+                }
+
+        return FakeLive()
+
+    def test_reason_never_claims_ai_when_model_did_not_run(self):
+        """Chưa có nhận định AI ⇒ lệnh ghi nguồn xác suất, KHÔNG ghi 'Theo AI'."""
+        self.controller.live_session = self._live(analysis=None)
+        self._bind()
+        order = self.controller._resolve_order()
+        self.assertEqual(order["side"], "B")
+        self.assertNotIn("Theo AI", order["reason"])
+        self.assertIn("xác suất", order["reason"])
+
+    def test_reason_labels_ai_as_reference_only(self):
+        """Có nhận định AI ⇒ ghi rõ là tham khảo, không phải nguồn chọn cửa."""
+        self.controller.live_session = self._live(
+            analysis={"verdict": "Đánh", "focus_side": "P", "confidence": "cao",
+                      "explanation": "AI nói", "round": 4})
+        self._bind()
+        order = self.controller._resolve_order()
+        # AI nói P nhưng predict chốt B: lệnh vẫn B (AI không được đổi cửa).
+        self.assertEqual(order["side"], "B")
+        self.assertIn("tham khảo", order["reason"])
+        self.assertNotIn("Theo AI", order["reason"])
+
+    def test_snapshot_marks_old_analysis_as_stale(self):
+        """Nhận định của ván cũ phải bị đánh dấu cũ, không hiện như ván hiện tại."""
+        session = LiveSession(trials=600, ai_mode="off")
+        session.analysis = {"verdict": "BỎ TAY", "round": 1, "confidence": "thấp"}
+        session.hand_no = 9
+        snapshot = session.snapshot()
+        self.assertTrue(snapshot["analysis"]["stale"])
+        self.assertEqual(snapshot["analysis"]["age"], 8)
+
+    def test_snapshot_fresh_analysis_is_not_stale(self):
+        session = LiveSession(trials=600, ai_mode="off")
+        session.analysis = {"verdict": "BỎ TAY", "round": 9, "confidence": "thấp"}
+        session.hand_no = 9
+        snapshot = session.snapshot()
+        self.assertFalse(snapshot["analysis"]["stale"])
+
+    def test_snapshot_reports_ai_availability_truthfully(self):
+        """Không key ⇒ ``available`` false để UI không hiện 'CÓ AI' giả."""
+        session = LiveSession(trials=600, ai_mode="api", ai_key="")
+        self.assertFalse(session.snapshot()["ai"]["available"])
+        session2 = LiveSession(trials=600, ai_mode="api", ai_key="dummy")
+        self.assertTrue(session2.snapshot()["ai"]["available"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

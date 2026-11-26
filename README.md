@@ -409,11 +409,28 @@ chỉ lấy cửa từ số liệu `predict` (`top_side` = xác suất cao nhấ
 `auto_side_source` là `road`/`hybrid`) — không đọc `analysis.focus_side` do AI viết. AI
 cũng không được trả số liệu mới; mọi con số trên UI đều lấy từ `predict.predict()`.
 
+**Hết token API thì tool vẫn chạy — đây là thiết kế, không phải lỗi.** Cửa đặt do
+`predict` local chọn; AI chỉ viết nhận định nên khi API trả 401/429 hoặc không có key:
+
+- xác suất, EV, cầu, lệnh cược **không đổi** và **vẫn chạy**;
+- panel AI hiện `KHÔNG CÓ AI` / `AI CHƯA CHẠY` kèm `lỗi AI: …` hoặc
+  `chưa có key → chưa gọi model`, **không** hiện `CÓ AI`;
+- nhật ký lệnh ghi nguồn thật (`Theo xác suất …` / `Theo cầu …`), và nếu có nhận
+  định AI thì ghi rõ `AI: … (chỉ tham khảo)` — không còn nhãn `Theo AI` cho lệnh
+  không hề do AI chọn;
+- nhận định cũ quá 2 ván bị đánh dấu `stale` và UI hiện `(nhận định cũ — ván N)`.
+
+Muốn kiểm tra đường gọi model có thật sự hoạt động: bấm **Kiểm tra kết nối** trong
+tab AI (gửi một request `max_tokens: 4`). Kết quả `HTTP 401` nghĩa là key sai/hết
+hạn; `429` nghĩa là hết quota; cả hai đều là bằng chứng request đã tới provider.
+
 ## Lệnh cược từng tay + tự đặt cược
 
 Không còn thang cược hay khối mạnh/yếu. Trong tab **Bàn chơi**, phần **TAY KẾ TIẾP**:
 
-- **Cửa**: `Theo AI (AUTO)` hoặc `P` / `B` / `T`.
+- **Cửa**: `Tự động (AUTO)` hoặc `P` / `B` / `T`. AUTO nghĩa là engine tự chọn cửa
+  từ **số liệu local** (`predict`: xác suất cao nhất, hoặc `road_follow` theo cầu) —
+  **không phải** AI chọn.
 - **Mức gốc mỗi tay**: số đơn vị cấu hình cho tay đầu (mặc định 10 đv = 10.000đ).
 - **Cơ chế mức cược** (`bet_progression`):
   - `flat` — **Cược cố định mỗi tay**: luôn đúng mức gốc, không đổi theo thắng/thua.

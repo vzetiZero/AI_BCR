@@ -205,6 +205,27 @@ test('READ_JS gộp seen từ nhiều store', () => {
   assert.strictEqual(value.seen['22'], 1, 'seen phải đi qua READ_JS');
 });
 
+test('ADOPT_FN bọc send để ghi lại lệnh gửi của socket nhận được', () => {
+  const win = realm();
+  vm.runInContext(js('HOOK_JS'), win);
+  // Socket tạo TRƯỚC hook: hook không thấy nó, phải nhận qua queryObjects.
+  const old = new FakeWebSocket('wss://wm/old');
+  const adopt = vm.runInContext('(' + js('ADOPT_FN') + ')', win);
+  const store = win.__wmHook3;
+  const added = adopt.call([old], store, 'top');
+  assert.strictEqual(added, 1, 'phải nhận được socket cũ');
+  // Gửi một lệnh cược qua socket đã nhận → phải được ghi vào ``sent``.
+  const frame = JSON.stringify({ protocol: 22, data: { betArr: [{ betArea: 2 }] } });
+  old.send(new TextEncoder().encode(frame).buffer);
+  assert.strictEqual(store.sent.length, 1, 'lệnh gửi phải được ghi lại');
+  assert.ok(store.sent[0].indexOf('betArea') >= 0, 'phải ghi nội dung khung gửi');
+  assert.ok(store.last_sent && store.last_sent.at, 'phải nhớ mốc thời gian gửi');
+  // Gọi nhận lần hai không được bọc send hai lần (sẽ đẩy trùng vào ``sent``).
+  adopt.call([old], store, 'top');
+  old.send(new TextEncoder().encode(frame).buffer);
+  assert.strictEqual(store.sent.length, 2, 'không được ghi trùng mỗi lệnh');
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

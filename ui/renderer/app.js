@@ -619,18 +619,32 @@ function renderAiPanel(live) {
   const pred = live.prediction || {};
   const analysis = live.analysis || {};
   const ai = live.ai || {};
+  // "CÓ AI" chỉ đúng khi có nhận định CỦA AI cho VÁN NÀY. Thiếu key/hết token thì
+  // ``ai.available`` false và ``analysis`` rỗng → phải nói rõ là chưa gọi model,
+  // không được để người dùng tưởng model đang phân tích (cửa đặt vẫn chạy được vì
+  // do ``predict`` local chọn).
+  const hasAiView = Boolean(analysis.verdict) && !analysis.stale;
   if (badge) {
-    badge.textContent = analysis.verdict ? 'CÓ AI' : (ai.busy ? 'ĐANG HỎI AI' : 'ĐANG ĐỌC');
-    badge.className = 'hero-state' + (analysis.verdict ? ' bet' : '');
+    badge.textContent = hasAiView ? 'CÓ AI'
+      : (ai.busy ? 'ĐANG HỎI AI'
+        : (ai.available ? 'AI CHƯA CHẠY' : 'KHÔNG CÓ AI'));
+    badge.className = 'hero-state' + (hasAiView ? ' bet' : '');
   }
   const topSide = pred.top_side && SIDE_NAME[pred.top_side]
     ? `${SIDE_NAME[pred.top_side]} ${pct((Number(pred.top_probability) || 0) * 100)}`
     : '';
   if (verdict) {
-    verdict.textContent = analysis.verdict
-      || (pred.ok && topSide
+    if (hasAiView) {
+      verdict.textContent = analysis.verdict;
+    } else if (analysis.verdict) {
+      // Nhận định cũ: vẫn hiện nhưng ghi rõ là của ván trước, không phải kết luận
+      // cho tay sắp tới.
+      verdict.textContent = `${analysis.verdict} (nhận định cũ — ván ${analysis.round ?? '?'})`;
+    } else {
+      verdict.textContent = pred.ok && topSide
         ? `Cửa cao nhất: ${topSide}${pred.pattern_note ? ` · ${pred.pattern_note}` : ''}`
-        : (pred.error || 'Chờ ván đầu tiên…'));
+        : (pred.error || 'Chờ ván đầu tiên…');
+    }
   }
 
   const probs = pred.probabilities || {};
@@ -656,10 +670,15 @@ function renderAiPanel(live) {
   if (risk) risk.textContent = analysis.risk ? `Rủi ro: ${analysis.risk}` : '';
   if (explain) explain.textContent = analysis.explanation || '';
   if (meta) {
-    const bits = [live.table || '?', `tay ${live.hand || live.rounds || 0}`, ai.model || ''];
-    if (analysis.round && analysis.round !== live.rounds) bits.push(`AI ở ván ${analysis.round}`);
+    const bits = [live.table || '?', `tay ${live.hand || live.rounds || 0}`,
+      ai.model ? `model ${ai.model}` : 'model ?'];
+    if (hasAiView && analysis.round != null) {
+      bits.push(analysis.age ? `AI ở ván ${analysis.round} (cũ ${analysis.age} ván)` : `AI ở ván ${analysis.round}`);
+    }
     if (analysis.confidence) bits.push(`tin cậy: ${analysis.confidence}`);
     if (ai.error) bits.push(`lỗi AI: ${ai.error}`);
+    else if (!ai.available) bits.push('chưa có key → chưa gọi model');
+    else if (!analysis.verdict) bits.push(`AI chạy mỗi ${ai.every || 5} ván`);
     meta.textContent = bits.filter(Boolean).join(' · ');
   }
 }
@@ -1002,7 +1021,7 @@ function describeBetReply(reply) {
   const progression = reply.progression === 'win_repeat_loss_double'
     ? 'Thắng về mức gốc · thua gấp đôi' : 'Cược cố định mỗi tay';
   const sideText = reply.side === 'AUTO'
-    ? `Theo AI (AUTO — ${AUTO_SOURCE_NAME[reply.auto_side_source] || 'xác suất cao nhất'})`
+    ? `Tự động (AUTO — ${AUTO_SOURCE_NAME[reply.auto_side_source] || 'xác suất cao nhất'})`
     : (SIDE_NAME[reply.side] || reply.side);
   const lines = [
     `Cửa: ${sideText}`,
