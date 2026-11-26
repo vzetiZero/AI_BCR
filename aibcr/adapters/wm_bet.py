@@ -352,11 +352,27 @@ class WMBet:
         from aibcr.adapters.wm_ws import get_socket
 
         denominations = list(denominations or [])
-        socket = get_socket(self.session, start=False)
-        if socket is None or not socket.ready():
+        socket = get_socket(self.session, start=True)
+        if socket is None:
+            return {"ok": False, "denominations": denominations, "via": "ws",
+                    "error": "Không mở được kết nối WebSocket của bàn WM — đặt cược chỉ "
+                             "hỗ trợ qua WebSocket. Kiểm tra Chrome còn mở (CDP 9222)."}
+        if not socket.ready():
+            # Thử cứu ngay tại chỗ: bàn mở trước khi hook chạy là tình huống thường gặp
+            # (người dùng vào bàn rồi mới bấm Chạy tool). Không tải lại trang.
+            try:
+                socket.adopt_existing()
+            except Exception:
+                pass
+        waited = False
+        if not socket.ready() and hasattr(socket, "wait_ready"):
+            waited = bool(socket.wait_ready(6.0))
+        if not socket.ready() and not waited:
             return {"ok": False, "denominations": denominations, "via": "ws",
                     "error": "Chưa bắt được WebSocket của bàn WM — đặt cược chỉ hỗ trợ "
-                             "qua WebSocket. Mở lại bàn WM rồi thử lại."}
+                             "qua WebSocket. Kiểm tra bằng “python "
+                             "tools/kiem_tra_socket_wm.py” rồi đổi sang bàn khác nếu "
+                             "socket của bàn này không nhận được."}
         current = self.read_bets()
         if not current.get("ok"):
             return {"ok": False, "denominations": denominations, "via": "ws",

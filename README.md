@@ -54,8 +54,7 @@ AI_BCR/
 │  ├─ preload.js             contextBridge `window.aibcr`
 │  └─ renderer/              index.html / app.js / styles.css
 ├─ tests/                    unittest + node --test
-├─ tools/                    script chạy tay (đọc WebSocket, soi CDP, kiểm chọn bàn)
-├─ Start.bat                 mở app (tự cài Electron nếu thiếu)
+├─ tools/                    script chạy tay (đọc WebSocket, soi CDP, kiểm chọn bàn)├─ Start.bat                 mở app (tự cài Electron nếu thiếu)
 ├─ UPDATE.bat                cập nhật mã từ origin/main (git pull --ff-only)
 ├─ install-toan-bo.bat       cài Python deps + Electron
 └─ push_update.bat/.ps1      commit + push lên GitHub
@@ -267,11 +266,14 @@ khi chưa bật tool.
    trạng thái hai khung lại (`merge_states`) — chỉ số socket được dồn tiếp và mỗi socket
    nhớ khung của nó (`routes`/`locals`), nên lệnh cược đi đúng khung.
 
-   **Bàn mở trước khi cài hook** (socket cũ không bắt được): hook được gắn vào các
-   document/target hiện có. Nếu socket cũ không thể quan sát, tool báo WebSocket chưa
-   sẵn sàng và khóa đặt cược qua tool; không tự reload tab, iframe bàn hay iframe sảnh.
-   Hook cũng được cài lại ngay khi sự kiện `table_opened` xảy ra, không chỉ lúc đứng ở
-   sảnh.
+   **Bàn mở trước khi cài hook** (socket cũ không bắt được): `WMSocket.adopt_existing`
+   dùng CDP `Runtime.queryObjects` trên prototype `WebSocket` của **từng window** (khung
+   gốc + mọi iframe cùng origin, và cả target iframe OOPIF) để lấy đúng instance đang
+   sống rồi gắn listener đọc `protocol 21/22`. Nhờ vậy vào bàn trước rồi mới bấm Chạy
+   tool vẫn đặt cược được — **không tải lại tab, iframe bàn hay iframe sảnh**. Việc nhận
+   được chạy lại mỗi 3 giây ở vòng nền và ngay trước khi gửi lệnh. Chẩn đoán bằng
+   `python tools/kiem_tra_socket_wm.py` (chỉ đọc) hoặc IPC `wm.socket`; UI/log báo
+   “đã nhận socket đang sống của bàn” khi thành công.
 3. **Xác minh** bằng số chip thật đang treo trên bàn (`mybet_money`): lệch là huỷ ngay và
    báo lỗi, không giữ lệnh sai.
 4. **Đọc chip của mình**: `mybet_money` trên từng ô (`read_bets`) trả cùng định dạng

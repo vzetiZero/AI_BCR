@@ -51,6 +51,43 @@ HOOK_JS = r"""(() => {
     // Chạy trong CẢ khung gốc lẫn iframe (Page.addScriptToEvaluateOnNewDocument áp cho
     // mọi frame). Socket đặt cược của WM nằm trong iframe bàn, nên phải hook riêng nó —
     // hook khung gốc không thấy socket đó.
+    const onText = (store, handler) => (text) => {
+        try {
+            const msg = JSON.parse(text);
+            const proto = msg && msg.protocol;
+            if (typeof proto !== 'number') return;
+            handler(proto, msg);
+        } catch (e) {
+            if (store.errors.length < 20) store.errors.push(String(e).slice(0, 80));
+        }
+    };
+    // Dữ liệu khung có thể là string, ArrayBuffer, TypedArray hoặc Blob tuỳ
+    // ``binaryType`` của trang — nhận theo cấu trúc để không phụ thuộc realm.
+    const decode = (store, data, handler) => {
+        if (data === null || data === undefined) return;
+        if (typeof data === 'string') { onText(store, handler)(data); return; }
+        if (typeof data.byteLength === 'number') {
+            try { onText(store, handler)(decoder.decode(new Uint8Array(data))); } catch (e) {}
+            return;
+        }
+        if (typeof data.text === 'function') {
+            data.text().then(onText(store, handler)).catch(() => {});
+        }
+    };
+    const record = (store, idx, proto, msg) => {
+        store.protocols[idx] = proto;
+        if (proto === 21) {
+            store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
+            if (store.recent21.length > 60) store.recent21.shift();
+        } else if (proto === 22) {
+            store.last22 = {socket: idx, at: Date.now(), data: msg.data};
+            // Giữ lịch sử ngắn: phản hồi của lệnh trước không bị lệnh sau ghi đè trước
+            // khi vòng chờ đọc kịp.
+            store.recent22 = store.recent22 || [];
+            store.recent22.push({socket: idx, at: Date.now(), data: msg.data});
+            if (store.recent22.length > 12) store.recent22.shift();
+        }
+    };
     const make = (win, store, tag) => {
         if (!win) return;
         const Native = win.WebSocket;
@@ -65,32 +102,22 @@ HOOK_JS = r"""(() => {
                 const send = ws.send.bind(ws);
                 ws.send = function (data) {
                     try {
-                        let text = data;
-                        if (data instanceof ArrayBuffer) text = decoder.decode(new Uint8Array(data));
-                        store.sent.push(String(text).slice(0, 240));
-                        if (store.sent.length > 60) store.sent.shift();
+                        const idx = indexOf(ws);
+                        const note = (text) => {
+                            store.sent.push(String(text).slice(0, 240));
+                            if (store.sent.length > 60) store.sent.shift();
+                        };
+                        if (typeof data === 'string') note(data);
+                        else if (typeof data.byteLength === 'number') {
+                            try { note(decoder.decode(new Uint8Array(data))); } catch (e) {}
+                        }
+                        store.last_sent = {socket: idx, at: Date.now()};
                     } catch (e) {}
                     return send(data);
                 };
                 ws.addEventListener('message', function (event) {
-                    try {
-                        let text = event.data;
-                        if (text instanceof ArrayBuffer) text = decoder.decode(new Uint8Array(text));
-                        if (typeof text !== 'string') return;
-                        const msg = JSON.parse(text);
-                        const proto = msg && msg.protocol;
-                        if (typeof proto !== 'number') return;
-                        const idx = indexOf(ws);
-                        store.protocols[idx] = proto;
-                        if (proto === 21) {
-                            store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
-                            if (store.recent21.length > 60) store.recent21.shift();
-                        } else if (proto === 22) {
-                            store.last22 = {socket: idx, at: Date.now(), data: msg.data};
-                        }
-                    } catch (e) {
-                        if (store.errors.length < 20) store.errors.push(String(e).slice(0, 80));
-                    }
+                    const idx = indexOf(ws);
+                    decode(store, event.data, (proto, msg) => record(store, idx, proto, msg));
                 });
             } catch (e) {}
             return ws;
@@ -100,9 +127,86 @@ HOOK_JS = r"""(() => {
         win.WebSocket = Wrapped;
     };
     window.__wmMakeHook = make;
+    window.__wmDecode = decode;
+    window.__wmRecord = record;
     make(window, hook, label);
     return 'installed:' + label;
 })()"""
+
+# Danh sách window (khung hiện tại + mọi iframe CÙNG origin). ``Runtime.queryObjects``
+# chỉ tìm được instance trong đúng realm của prototype, nên phải query RIÊNG từng khung:
+# hỏi mỗi khung gốc thì socket đặt cược của iframe bàn sẽ bị bỏ sót.
+WINDOWS_JS = r"""(() => {
+    const list = [window];
+    for (const frame of document.querySelectorAll('iframe')) {
+        try { if (frame.contentWindow) list.push(frame.contentWindow); } catch (e) {}
+    }
+    return list;
+})()"""
+
+# Gắn socket ĐÃ TỒN TẠI (tạo trước khi cài hook) vào store của chính khung sở hữu nó.
+# Đây là chìa khoá cho tình huống "đã vào bàn rồi mới bấm Chạy tool": hook chỉ bọc được
+# socket tạo SAU khi chạy, còn socket của bàn đã có sẵn. Thay vì tải lại khung bàn (làm
+# nháy bàn, mất trạng thái cược), ta lấy đúng instance đang sống rồi gắn listener đọc
+# protocol 21/22. Gửi lệnh không phụ thuộc wrapper ``send`` — ``SEND_JS`` gọi thẳng
+# ``socket.send`` — nên chỉ cần giữ tham chiếu socket là đặt cược được.
+#
+# ``this`` là mảng socket do ``Runtime.queryObjects`` trả về; ``store``/``label`` của
+# khung sở hữu được truyền vào qua ``arguments``.
+ADOPT_FN = r"""function (store, label) {
+    const decoder = new TextDecoder('utf-8');
+    const put = (idx, proto, msg) => {
+        store.protocols[idx] = proto;
+        if (proto === 21) {
+            store.recent21.push({socket: idx, at: Date.now(), data: msg.data});
+            if (store.recent21.length > 60) store.recent21.shift();
+        } else if (proto === 22) {
+            store.last22 = {socket: idx, at: Date.now(), data: msg.data};
+            store.recent22 = store.recent22 || [];
+            store.recent22.push({socket: idx, at: Date.now(), data: msg.data});
+            if (store.recent22.length > 12) store.recent22.shift();
+        }
+    };
+    const onText = (idx, text) => {
+        try {
+            const msg = JSON.parse(text);
+            const proto = msg && msg.protocol;
+            if (typeof proto !== 'number') return;
+            put(idx, proto, msg);
+        } catch (e) {
+            if (store.errors.length < 20) store.errors.push(String(e).slice(0, 80));
+        }
+    };
+    const onData = (idx, data) => {
+        if (data === null || data === undefined) return;
+        if (typeof data === 'string') { onText(idx, data); return; }
+        if (typeof data.byteLength === 'number') {
+            try { onText(idx, decoder.decode(new Uint8Array(data))); } catch (e) {}
+            return;
+        }
+        if (typeof data.text === 'function') {
+            data.text().then((text) => onText(idx, text)).catch(() => {});
+        }
+    };
+    let added = 0;
+    for (let i = 0; i < this.length; i++) {
+        const ws = this[i];
+        if (!ws || typeof ws.readyState !== 'number') continue;
+        if (store.sockets.indexOf(ws) >= 0) continue;
+        const idx = store.sockets.length;
+        try {
+            ws.addEventListener('message', function (event) {
+                onData(idx, event.data);
+            });
+        } catch (e) { continue; }
+        store.sockets.push(ws);
+        store.urls.push(String(ws.url || ''));
+        store.scope[idx] = label;
+        added += 1;
+    }
+    if (added) store.adopted = (store.adopted || 0) + added;
+    return added;
+}"""
 
 # Cài hook vào iframe bàn hiện tại (iframe có thể đã tồn tại trước khi cài hook).
 # Quét MỌI iframe cùng origin, không chỉ ``iframe_101``: mirror đổi id/tên khung, và
@@ -188,7 +292,7 @@ READ_JS = r"""(() => {
     }
     if (!stores.length) return {installed: false, open_group: openGroup};
     const merged = {urls: [], states: [], scopes: {}, protocols: {}, recent21: [],
-                    last22: null, sent: [], errors: [], offsets: {}};
+                    last22: null, recent22: [], sent: [], errors: [], offsets: {}};
     for (const entry of stores) {
         const hook = entry.hook;
         const base = merged.states.length;
@@ -204,6 +308,13 @@ READ_JS = r"""(() => {
         for (const item of (hook.recent21 || [])) {
             merged.recent21.push({socket: base + item.socket, at: item.at, data: item.data});
         }
+        // Phản hồi lệnh cược: giữ theo từng socket để nơi gọi khớp đúng socket đã gửi
+        // (``last22`` chỉ là cái mới nhất toàn khung nên dễ nhận nhầm socket khác).
+        const replies = (hook.recent22 || (hook.last22 ? [hook.last22] : []));
+        for (const item of replies.slice(-12)) {
+            merged.recent22.push({socket: base + item.socket, at: item.at,
+                                  data: item.data, offset: base, scope: entry.label});
+        }
         if (hook.last22) {
             const at = hook.last22.at || 0;
             if (!merged.last22 || at > (merged.last22.at || 0)) {
@@ -217,6 +328,7 @@ READ_JS = r"""(() => {
     return {installed: true, urls: merged.urls, states: merged.states,
             scopes: merged.scopes, protocols: merged.protocols,
             recent21: merged.recent21, last22: merged.last22,
+            recent22: merged.recent22,
             open_group: openGroup, sent: merged.sent.slice(-6),
             errors: merged.errors, offsets: merged.offsets};
 })()"""
@@ -317,8 +429,9 @@ def merge_states(channels):
     nhắm sai socket (hoặc không tìm thấy).
     """
     merged = {"installed": False, "urls": [], "states": [], "scopes": {},
-              "protocols": {}, "recent21": [], "last22": None, "open_group": None,
-              "sent": [], "errors": [], "offsets": {}, "routes": [], "locals": []}
+              "protocols": {}, "recent21": [], "last22": None, "recent22": [],
+              "open_group": None, "sent": [], "errors": [], "offsets": {},
+              "routes": [], "locals": []}
     for entry in channels or ():
         label, state = (entry or (None, None))
         if not label or not isinstance(state, dict):
@@ -365,6 +478,15 @@ def merge_states(channels):
             if merged["last22"] is None or at > float(merged["last22"].get("at") or 0):
                 merged["last22"] = dict(last, socket=base + int(last.get("socket") or 0),
                                         scope=label, offset=base)
+        for item in (state.get("recent22") or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("socket"))
+            except (TypeError, ValueError):
+                continue
+            merged["recent22"].append(dict(item, socket=base + index, offset=base,
+                                           scope=label))
         if merged["open_group"] is None and state.get("open_group") is not None:
             merged["open_group"] = state.get("open_group")
         merged["sent"].extend(list(state.get("sent") or [])[-6:])
@@ -395,6 +517,8 @@ class WMSocket(threading.Thread):
         self._rescued_group = None
         self._rescue_at = 0.0
         self._oopif_try_at = 0.0
+        # Nhịp thử nhận socket đang sống (queryObjects) — tránh gọi liên tục.
+        self._adopt_try_at = 0.0
         self.last_error = ""
         self.ready_at = 0.0
 
@@ -478,6 +602,143 @@ class WMSocket(threading.Thread):
             if isinstance(result, str) and result.startswith("ok"):
                 installed += 1
         return installed
+
+    def adopt_existing(self):
+        """Bắt socket ĐÃ TẠO TRƯỚC hook của mọi khung — không tải lại gì cả.
+
+        Tình huống thật: người dùng vào bàn trước, rồi mới bấm Chạy tool. Socket của bàn
+        đã sống nên hook ``WebSocket`` (chỉ bọc constructor) không bao giờ thấy nó, và
+        app báo "chưa bắt được WebSocket" dù đang đứng giữa bàn.
+
+        CDP có ``Runtime.queryObjects``: đưa vào prototype của ``WebSocket`` thì trả về
+        MỌI instance đang sống trong context group đó. Ta lấy prototype của từng khung
+        (gốc + mọi iframe cùng origin), query riêng từng cái, rồi chạy ``ADOPT_FN``
+        trong chính khung sở hữu để gắn listener đọc protocol 21/22.
+
+        Trả tổng số socket vừa nhận (0 = không có socket nào đang sống).
+        """
+        adopted = 0
+        for channel in self._channels():
+            try:
+                adopted += self._adopt_in(channel)
+            except Exception:
+                continue
+        if adopted:
+            # Ảnh chụp cũ (đọc trước khi nhận socket) không có các socket vừa nhận →
+            # buộc lần ``state()`` kế tiếp đọc lại ngay.
+            self._state_at = 0.0
+        return adopted
+
+    def _adopt_in(self, channel):
+        """Nhận socket cũ của MỘT khung (tab cổng hoặc target iframe WM).
+
+        ``Runtime.queryObjects`` cần ``prototypeObjectId`` và chỉ thấy instance trong
+        đúng realm của prototype đó. Vì vậy với mỗi window (khung gốc + từng iframe
+        cùng origin) ta lấy prototype WebSocket **của chính window ấy**, query riêng, rồi
+        chạy ``ADOPT_FN`` bằng ``Runtime.callFunctionOn`` trên mảng kết quả — nhờ đó
+        ``store`` và nhãn 'top'/'iframe' là của đúng khung sở hữu socket.
+        """
+        group = "wm-adopt"
+        found = 0
+        with self.lock:
+            channel["command"]("Runtime.enable")
+            reply = channel["command"]("Runtime.evaluate", {
+                "expression": WINDOWS_JS, "returnByValue": False, "silent": True,
+                "objectGroup": group,
+            })
+            list_id = (reply.get("result") or {}).get("objectId")
+            if not list_id:
+                return 0
+            try:
+                length = ((channel["command"]("Runtime.callFunctionOn", {
+                    "objectId": list_id, "objectGroup": group,
+                    "functionDeclaration": "function(){return this.length;}",
+                    "returnByValue": True,
+                }).get("result") or {}).get("value"))
+                try:
+                    length = int(length or 0)
+                except (TypeError, ValueError):
+                    return 0
+                for index in range(min(length, 16)):
+                    try:
+                        found += self._adopt_window(channel, list_id, index, group)
+                    except Exception:
+                        # Khung khác origin / context đã chết: bỏ qua khung đó, không làm
+                        # hỏng việc nhận socket của các khung còn lại.
+                        continue
+            finally:
+                try:
+                    channel["command"]("Runtime.releaseObjectGroup",
+                                       {"objectGroup": group})
+                except Exception:
+                    pass
+        return found
+
+    def _adopt_window(self, channel, list_id, index, group):
+        """Nhận socket cũ của MỘT window trong danh sách ``WINDOWS_JS``."""
+        window_id = ((channel["command"]("Runtime.callFunctionOn", {
+            "objectId": list_id, "objectGroup": group,
+            "functionDeclaration": "function(i){return this[i];}",
+            "arguments": [{"value": index}], "returnByValue": False,
+        }).get("result") or {}).get("objectId"))
+        if not window_id:
+            return 0
+        raw = (channel["command"]("Runtime.callFunctionOn", {
+            "objectId": window_id, "objectGroup": group,
+            "functionDeclaration": (
+                "function(){"
+                "  return JSON.stringify({top: this === this.top,"
+                "    proto: !!(this.WebSocket && this.WebSocket.prototype),"
+                "    href: String(this.location && this.location.href || '')});"
+                "}"),
+            "returnByValue": True,
+        }).get("result") or {}).get("value")
+        try:
+            flags = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return 0
+        if not isinstance(flags, dict) or not flags.get("proto"):
+            return 0
+        # Store của chính window này (hook đã tạo khi cài cho document hiện tại). Nếu
+        # chưa có thì tạo — socket vẫn dùng được qua SEND_JS, chỉ thiếu store để đọc.
+        store_id = ((channel["command"]("Runtime.callFunctionOn", {
+            "objectId": window_id, "objectGroup": group,
+            "functionDeclaration": (
+                "function(){"
+                "  if (!this.__wmHook3) {"
+                "    this.__wmHook3 = {sockets: [], urls: [], protocols: {},"
+                "      recent21: [], last22: null, sent: [], errors: [], scope: {},"
+                "      top: (this === this.top), adopted: 0};"
+                "  }"
+                "  return this.__wmHook3;"
+                "}"),
+            "returnByValue": False,
+        }).get("result") or {}).get("objectId"))
+        if not store_id:
+            return 0
+        proto_id = ((channel["command"]("Runtime.callFunctionOn", {
+            "objectId": window_id, "objectGroup": group,
+            "functionDeclaration": "function(){return this.WebSocket.prototype;}",
+            "returnByValue": False,
+        }).get("result") or {}).get("objectId"))
+        if not proto_id:
+            return 0
+        array_id = ((channel["command"]("Runtime.queryObjects", {
+            "prototypeObjectId": proto_id, "objectGroup": group,
+        }).get("objects") or {}).get("objectId"))
+        if not array_id:
+            return 0
+        label = "top" if flags.get("top") else "iframe"
+        value = (channel["command"]("Runtime.callFunctionOn", {
+            "objectId": array_id, "objectGroup": group,
+            "functionDeclaration": ADOPT_FN,
+            "arguments": [{"objectId": store_id}, {"value": label}],
+            "returnByValue": True,
+        }).get("result") or {}).get("value")
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def state(self, fresh=False):
         """Ảnh chụp hook của MỌI khung, gộp lại (đọc trực tiếp nếu cần).
@@ -685,21 +946,38 @@ class WMSocket(threading.Thread):
         return False
 
     def rescue_table(self, timeout=18.0):
-        """Giữ bàn nguyên trạng nếu socket cũ không bắt được.
+        """Giữ bàn nguyên trạng và CỨU socket cũ bằng ``Runtime.queryObjects``.
 
         Việc reload khung WM có thể làm mất giao diện/trạng thái cược và không an toàn
-        với mọi layout. Chỉ gắn hook cho các document đang mở; nếu socket được tạo trước
-        hook thì báo chưa sẵn sàng, không tự reload.
+        với mọi layout, nên đường cứu duy nhất là nhận chính instance ``WebSocket`` đang
+        sống (xem ``adopt_existing``) — không tải lại bất cứ thứ gì.
         """
         if self.ready():
             return True
         state = self.state(fresh=True)
         group = state.get("open_group")
+        # Nhận socket đang sống (bàn mở trước hook). Chặn nhịp để không queryObjects
+        # liên tục mỗi 0,5 giây khi đang đứng ở sảnh.
+        adopted = 0
+        if time.monotonic() >= self._adopt_try_at:
+            self._adopt_try_at = time.monotonic() + 3.0
+            try:
+                adopted = self.adopt_existing()
+            except Exception:
+                adopted = 0
+        if adopted and self.wait_ready(min(3.0, max(1.0, float(timeout)))):
+            self._rescued_group = group
+            self._status("Đã nhận socket đang sống của bàn (không tải lại) · "
+                         "đặt cược đi qua WebSocket.", "win")
+            return True
         if group is None:
             # Đang ở sảnh (hoặc khung bàn đang tải lại): hook đã cài sẵn, socket của bàn
             # sẽ được bắt khi bàn mở ra. Không nạp lại gì để tránh nháy bàn — đồng thời
             # xoá mốc "đã cứu" để lần vào lại CÙNG bàn vẫn được thử lại một lần.
             self._rescued_group = None
+            return False
+        if self._rescued_group == group:
+            # Đã thử cứu bàn này rồi: không spam log mỗi vòng 0,5 giây.
             return False
         self._rescued_group = group
         self._status("Chưa bắt được WebSocket của bàn đã mở. Giữ nguyên giao diện; "
@@ -707,10 +985,11 @@ class WMSocket(threading.Thread):
         return False
 
     def prepare(self, timeout=25.0):
-        """Kết nối + cài hook cho bàn đang mở.
+        """Kết nối + cài hook + nhận socket cũ của bàn đang mở.
 
-        Cài hook cho các khung hiện có. Nếu bàn đã tạo socket trước hook thì giữ nguyên
-        trang và báo chưa sẵn sàng thay vì tự tải lại bàn/tab.
+        Thứ tự: cài hook cho các khung hiện có → nhận socket ĐÃ SỐNG (người dùng vào bàn
+        trước rồi mới bấm Chạy tool là tình huống thường gặp) → nếu vẫn không có thì giữ
+        nguyên trang và báo chưa sẵn sàng. Không bao giờ tải lại tab hay khung bàn.
         """
         if not self._connect():
             return False
@@ -719,6 +998,11 @@ class WMSocket(threading.Thread):
         try:
             self.install_everywhere()
             if self.ready():
+                return True
+        except Exception:
+            pass
+        try:
+            if self.adopt_existing() and self.wait_ready(3.0):
                 return True
         except Exception:
             pass
@@ -755,6 +1039,9 @@ class WMSocket(threading.Thread):
                         self.install_everywhere()
                     except Exception:
                         pass
+                    # Socket của bàn có thể đã sống TRƯỚC khi hook chạy (người dùng vào
+                    # bàn rồi mới bật tool) — ``rescue_table`` nhận thẳng instance đang
+                    # sống, không reload. Nó tự chặn nhịp nên không gọi dồn dập.
                     self.rescue_table()
                 if self.ready():
                     if warned:
@@ -800,6 +1087,15 @@ class WMSocket(threading.Thread):
         state = self.state(fresh=True)
         current = current_table(state)
         if current is None:
+            # Lần cuối thử cứu: socket của bàn có thể đã sống trước hook (người dùng vào
+            # bàn rồi mới bấm Chạy tool). Nhận nó và thử lại một lần — không tải lại gì.
+            try:
+                if self.adopt_existing():
+                    state = self.state(fresh=True)
+                    current = current_table(state)
+            except Exception:
+                current = None
+        if current is None:
             return {"ok": False, "error": "no_socket"}
         socket_index, data, seen_at = current
         game_no, round_no = data.get("gameNo"), data.get("gameNoRound")
@@ -840,10 +1136,32 @@ class WMSocket(threading.Thread):
                         info = self._evaluate_in(item, READ_JS) or {}
                     except Exception:
                         continue
-                    candidate = info.get("last22") or {}
-                    if float(candidate.get("at") or 0) >= sent_at:
-                        if reply is None or float(candidate.get("at") or 0) > \
-                                float((reply or {}).get("at") or 0):
+                    candidates = list(info.get("recent22") or [])
+                    if info.get("last22"):
+                        candidates.append(info["last22"])
+                    for candidate in candidates:
+                        if not isinstance(candidate, dict):
+                            continue
+                        # ``READ_JS`` gộp socket của nhiều store trong CÙNG khung và ghi
+                        # ``socket = offset + chỉ số cục bộ``. Phải so với chỉ số CỤC BỘ
+                        # của store sở hữu socket vừa gửi, nếu không phản hồi của socket
+                        # khác (cùng khung) sẽ bị nhận nhầm.
+                        try:
+                            at = float(candidate.get("at") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        raw_socket = candidate.get("socket")
+                        if raw_socket is not None:
+                            try:
+                                local_in_channel = (int(raw_socket)
+                                                    - int(candidate.get("offset") or 0))
+                            except (TypeError, ValueError):
+                                continue
+                            if local_in_channel != int(local_index):
+                                continue
+                        if at < sent_at - 500.0:
+                            continue
+                        if reply is None or at > float(reply.get("at") or 0):
                             reply = candidate
                 if reply is not None:
                     body = reply.get("data") or {}
@@ -857,8 +1175,9 @@ class WMSocket(threading.Thread):
 def install_hook(session):
     """Cài hook WebSocket cho tab, cho mọi khung đang mở và cho target iframe WM.
 
-    Dùng khi người dùng đang đứng trong bàn: chỉ cài hook sẵn, không tải lại tab hay
-    iframe. Nếu socket cũ được tạo trước hook thì giữ nguyên trang và báo chưa sẵn sàng.
+    Dùng khi người dùng đang đứng trong bàn: không tải lại tab hay iframe. Socket đã tạo
+    trước hook được nhận lại bằng ``adopt_existing`` (``Runtime.queryObjects``) nên vẫn
+    đặt cược được mà không phải mở lại bàn.
     """
     helper = WMSocket(session)
     ok = False
@@ -867,6 +1186,10 @@ def install_hook(session):
         helper._attach_oopif()
         try:
             helper.install_everywhere()
+        except Exception:
+            pass
+        try:
+            helper.adopt_existing()
         except Exception:
             pass
     except Exception:

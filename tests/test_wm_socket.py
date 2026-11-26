@@ -231,5 +231,137 @@ class PlaceRoutingTests(unittest.TestCase):
         self.assertEqual(result["error"], "no_socket")
 
 
+class AdoptExistingSocketTests(unittest.TestCase):
+    """Đã vào bàn rồi mới bấm Chạy tool: socket tạo TRƯỚC hook phải nhận được.
+
+    Đây là lỗi làm UI báo "Chưa bắt được WebSocket của bàn WM" dù đang đứng giữa bàn:
+    hook ``WebSocket`` chỉ bọc được socket tạo SAU khi cài. Cách sửa là
+    ``Runtime.queryObjects`` trên prototype của TỪNG window, không tải lại trang.
+    """
+
+    class QueryCommand(FakeCommand):
+        """Fake CDP trả objectId theo từng bước của luồng queryObjects."""
+
+        def __init__(self, adopt_count=2, windows=2):
+            super().__init__()
+            self.adopt_count = adopt_count
+            self.windows = windows
+            self.queries = 0
+
+        def __call__(self, method, params=None, timeout=None):
+            self.calls.append((method, params or {}))
+            params = params or {}
+            decl = str(params.get("functionDeclaration") or "")
+            if method == "Runtime.evaluate":
+                return {"result": {"objectId": "list-1"}}
+            if method == "Runtime.callFunctionOn":
+                if "this.length" in decl:
+                    return {"result": {"value": self.windows}}
+                if "JSON.stringify" in decl:
+                    return {"result": {"value": "{\"top\": true, \"proto\": true}"}}
+                if "__wmHook3" in decl:
+                    return {"result": {"objectId": "store-1"}}
+                if "WebSocket.prototype" in decl:
+                    return {"result": {"objectId": "proto-1"}}
+                if "return this[i]" in decl:
+                    return {"result": {"objectId": "win-1"}}
+                if "__wm" in decl or "TextDecoder" in decl:
+                    return {"result": {"value": self.adopt_count}}
+                return {"result": {"value": self.adopt_count}}
+            if method == "Runtime.queryObjects":
+                self.queries += 1
+                return {"objects": {"objectId": "array-1"}}
+            return {}
+
+    def build(self, command):
+        socket = wm_ws.WMSocket(session=None)
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        return socket
+
+    def test_adopt_queries_the_websocket_prototype_per_window(self):
+        command = self.QueryCommand(adopt_count=2, windows=2)
+        socket = self.build(command)
+        self.assertEqual(socket.adopt_existing(), 4)
+        methods = command.methods()
+        self.assertIn("Runtime.queryObjects", methods)
+        self.assertEqual(command.queries, 2, "phải query RIÊNG từng window")
+        # Không được tải lại gì cả: đây là điều kiện an toàn của bàn đang mở.
+        self.assertFalse([name for name in methods
+                          if name in ("Page.reload", "Page.navigate")])
+
+    def test_adopt_runs_the_hook_in_the_owning_window(self):
+        command = self.QueryCommand(adopt_count=1, windows=1)
+        socket = self.build(command)
+        socket.adopt_existing()
+        adopted = [params for name, params in command.calls
+                   if name == "Runtime.callFunctionOn"
+                   and "__wmHook3" in str(params.get("functionDeclaration"))]
+        self.assertTrue(adopted, "store của CHÍNH window sở hữu socket phải được dùng")
+        args = [params for name, params in command.calls
+                if name == "Runtime.callFunctionOn"
+                and "TextDecoder" in str(params.get("functionDeclaration"))]
+        self.assertTrue(args, "ADOPT_FN phải chạy trên mảng kết quả của queryObjects")
+        self.assertIn("top", str(args[0].get("arguments")))
+
+    def test_place_retries_adoption_when_the_socket_came_first(self):
+        """``place`` phải tự cứu socket cũ rồi đặt được, không báo no_socket."""
+
+        class SocketCommand(FakeCommand):
+            def __init__(self):
+                super().__init__()
+                self.state = "before"
+
+            def __call__(self, method, params=None, timeout=None):
+                params = params or {}
+                expression = str(params.get("expression") or "")
+                self.calls.append((method, params))
+                if "socket.send" in expression:
+                    return {"result": {"value": {"ok": True, "bytes": 10}}}
+                if "recent21" in expression and "open_group" in expression:
+                    if self.state == "before":
+                        return {"result": {"value": {"installed": True, "states": [],
+                                                     "scopes": {}, "recent21": [],
+                                                     "last22": None,
+                                                     "open_group": 7}}}
+                    return {"result": {"value": {
+                        "installed": True, "states": [1], "scopes": {"0": "iframe"},
+                        "recent21": [{"socket": 0, "at": 9e12,
+                                      "data": {"groupID": 7, "gameNo": 1,
+                                               "gameNoRound": 2}}],
+                        "last22": None, "open_group": 7}}}
+                if method == "Runtime.queryObjects":
+                    return {"objects": {"objectId": "array-1"}}
+                if method == "Runtime.evaluate":
+                    return {"result": {"objectId": "list-1"}}
+                if method == "Runtime.callFunctionOn":
+                    decl = str(params.get("functionDeclaration") or "")
+                    # ADOPT_FN chứa cả "TextDecoder" lẫn "this.length": kiểm nó TRƯỚC
+                    # hàm lấy độ dài mảng, nếu không sẽ khớp nhầm.
+                    if "TextDecoder" in decl:
+                        self.state = "after"
+                        return {"result": {"value": 1}}
+                    if "this.length" in decl:
+                        return {"result": {"value": 1}}
+                    if "JSON.stringify" in decl:
+                        return {"result": {"value": "{\"top\": true, \"proto\": true}"}}
+                    if "__wmHook3" in decl:
+                        return {"result": {"objectId": "store-1"}}
+                    if "WebSocket.prototype" in decl:
+                        return {"result": {"objectId": "proto-1"}}
+                    return {"result": {"objectId": "obj-1"}}
+                return {}
+
+        command = SocketCommand()
+        socket = wm_ws.WMSocket(session=None)
+        socket._command = command
+        socket._page = {"label": "page", "command": command, "ws": None}
+        socket.wait_ready = lambda timeout=6.0: True
+        self.assertFalse(socket.ready())
+        result = socket.place("P", 10, wait_seconds=1)
+        # Không còn ``no_socket``: socket cũ đã được nhận và lệnh đã gửi đi.
+        self.assertNotEqual(result.get("error"), "no_socket", result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

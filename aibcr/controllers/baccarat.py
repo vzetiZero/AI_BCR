@@ -30,6 +30,7 @@ from aibcr.adapters import browser as BR
 from aibcr.adapters import lobby_stream as LS
 from aibcr.adapters import table_bets as TB
 from aibcr.adapters.wm_bet import WMBet
+from aibcr.adapters.wm_ws import current_table as wm_ws_current
 from aibcr.config import *  # noqa: F401,F403
 from aibcr.live.reader import LiveReader
 from aibcr.live.session import LiveSession
@@ -3188,6 +3189,40 @@ class BaccaratController:
         }
         return LIVE_AI.check_model(cfg)
 
+    def wm_socket_state(self):
+        """Chẩn đoán socket đặt cược WM: đã nhận được socket nào, khung nào, cửa nào.
+
+        Dùng khi UI báo "chưa bắt được WebSocket": hàm này nói rõ hook có thấy socket
+        không, socket nào đang mở, có khung 21 của bàn đang mở không, và (nếu chưa) nó
+        đã cố nhận socket cũ chưa.
+        """
+        socket = getattr(self.browser, "wm_socket", None)
+        if socket is None:
+            return {"ok": False, "error": "Chưa có kết nối socket WM (tool chưa bật)."}
+        adopted = 0
+        try:
+            adopted = socket.adopt_existing()
+        except Exception:
+            adopted = 0
+        state = socket.state(fresh=True)
+        current = None
+        try:
+            current = wm_ws_current(state)
+        except Exception:
+            current = None
+        return {"ok": True, "adopted": adopted,
+                "ready": bool(current),
+                "installed": bool(state.get("installed")),
+                "open_group": state.get("open_group"),
+                "sockets": [{"index": index, "state": value,
+                             "scope": (state.get("scopes") or {}).get(index, ""),
+                             "url": (state.get("urls") or [""] * (index + 1))[index]
+                             if index < len(state.get("urls") or []) else ""}
+                            for index, value in enumerate(state.get("states") or [])],
+                "tables_seen": len(state.get("recent21") or []),
+                "bet_round": (current or (None, None, None))[1],
+                "errors": state.get("errors") or []}
+
     def bet_config_set(self, params):
         """Cấu hình lệnh cho tay kế tiếp: cửa (AUTO/P/B/T), số chip gốc + cơ chế mức cược."""
         params = params or {}
@@ -3319,6 +3354,7 @@ class BaccaratController:
             "ai.key.set": self.ai_key_set,
             "bet.config": self.bet_config_set,
             "bet.place": lambda p: self.bet_place(),
+            "wm.socket": lambda p: self.wm_socket_state(),
         }
         handler = table.get(method)
         if handler is None:
