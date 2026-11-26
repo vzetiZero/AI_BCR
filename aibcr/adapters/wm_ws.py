@@ -433,6 +433,11 @@ def current_table(state, want_group=None):
         # Bàn đang mở (đọc từ DOM) đáng tin hơn ``#container`` đọc trong khung khác:
         # với WM nhúng khác origin, READ_JS của tab mẹ không thấy container của bàn.
         group = want_group if want_group is not None else group
+    if group is None:
+        # KHÔNG biết bàn nào đang mở. Socket sảnh phát khung 21 của nhiều bàn, nên chọn
+        # "khung mới nhất" ở đây là đặt tiền vào bàn người dùng không nhìn thấy. Thà
+        # không đặt còn hơn đặt nhầm bàn.
+        return None
 
     def open_socket(index):
         return 0 <= index < len(states) and states[index] == 1

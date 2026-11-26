@@ -24,6 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from aibcr.adapters import browser as BR  # noqa: E402
+from aibcr.adapters import wm as WM  # noqa: E402
 from aibcr.adapters import wm_targets as WT  # noqa: E402
 from aibcr.adapters import wm_ws  # noqa: E402
 
@@ -81,7 +82,7 @@ def main():
         adopted = socket.adopt_existing()
         state = socket.state(fresh=True)
     finally:
-        socket._close()
+        pass
 
     print("\nHook: %s · socket nhận thêm từ trang đang sống: %d"
           % ("đã cài" if state.get("installed") else "CHƯA cài", adopted))
@@ -96,7 +97,25 @@ def main():
             index, SCOPE_NAME.get(value, str(value)),
             str(scopes.get(index, "")), (urls[index] if index < len(urls) else "")[:90]))
 
-    current = wm_ws.current_table(state)
+    # Bàn ĐANG MỞ theo DOM (nguồn tin cậy nhất): ``game_group``, vd ``101_506``. Đây
+    # chính là khoá mà app dùng để chốt an toàn tiền trước khi gửi lệnh.
+    open_key = ""
+    want_group = None
+    try:
+        value = socket.evaluate(WM.WM_OPEN_TABLE_JS)
+        if isinstance(value, dict) and value.get("group") is not None \
+                and value.get("game") is not None:
+            open_key = WM.table_key(value["game"], value["group"])
+            want_group = int(value["group"])
+            print("\nBàn ĐANG MỞ theo DOM: %s (dealer: %s)"
+                  % (open_key, str(value.get("dealer") or "")[:40]))
+        else:
+            print("\nBàn ĐANG MỞ theo DOM: KHÔNG xác định (%s)"
+                  % str((value or {}).get("reason") or "không đọc được"))
+    except Exception as exc:
+        print("\nBàn ĐANG MỞ theo DOM: KHÔNG đọc được (%s)" % type(exc).__name__)
+
+    current = wm_ws.current_table(state, want_group)
     replies = state.get("recent22") or []
     if replies:
         print("\nPhản hồi protocol 22 gần nhất (%d):" % len(replies))
@@ -111,9 +130,16 @@ def main():
     print("\nMã bàn đang mở (#container group): %s" % state.get("open_group"))
     print("Số khung protocol 21 đã thấy: %d" % len(state.get("recent21") or []))
     if current is None:
-        print("\nKẾT LUẬN: CHƯA đặt cược được — chưa có socket nào gửi protocol 21 của bàn này.")
+        if want_group is not None:
+            print("\nKẾT LUẬN: CHƯA đặt cược được — chưa thấy khung protocol 21 của bàn "
+                  "đang mở (group %d)." % want_group)
+            print("App sẽ TỪ CHỐI gửi lệnh trong trạng thái này để không đặt nhầm bàn.")
+        else:
+            print("\nKẾT LUẬN: CHƯA đặt cược được — không xác định được bàn đang mở.")
+            print("Hãy mở đúng bàn trong Chrome rồi chạy lại lệnh này.")
         print("Nếu danh sách socket ở trên rỗng: giữ nguyên bàn, đợi ~3 giây rồi chạy lại")
         print("(tool trong app tự làm việc này mỗi 3 giây); hoặc đổi bàn rồi quay lại.")
+        socket._close()
         return 1
     index, data, seen_at = current
     print("\nKẾT LUẬN: ĐẶT CƯỢC ĐƯỢC.")
@@ -129,6 +155,15 @@ def main():
         age = None
     if age is not None:
         print("  khung 21 gần nhất cách đây %.1f giây" % (age / 1000.0))
+    if want_group is not None and data.get("groupID") is not None:
+        try:
+            if int(data.get("groupID")) != int(want_group):
+                print("\nCẢNH BÁO: khung 21 chọn được KHÔNG phải bàn đang mở "
+                      "(group %s vs %s) — app sẽ từ chối gửi lệnh."
+                      % (data.get("groupID"), want_group))
+        except (TypeError, ValueError):
+            pass
+    socket._close()
     return 0
 
 

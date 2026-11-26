@@ -108,10 +108,26 @@ class CurrentTableTests(unittest.TestCase):
         index, _data, _at = wm_ws.current_table(self._state(frames))
         self.assertEqual(index, 2)
 
-    def test_falls_back_to_any_socket_when_group_unknown(self):
+    def test_refuses_when_no_table_is_known(self):
+        """Không biết bàn đang mở (không ``open_group``, không ``want_group``) ⇒ KHÔNG đặt.
+
+        Socket sảnh phát khung 21 của nhiều bàn; chọn "khung mới nhất" ở đây là đặt tiền
+        vào bàn người dùng không nhìn thấy. Thà không đặt còn hơn đặt nhầm bàn.
+        """
         frames = [{"socket": 1, "at": 9000, "data": {"groupID": 613}}]
         state = self._state(frames, group=None)
-        self.assertEqual(wm_ws.current_table(state)[0], 1)
+        self.assertIsNone(wm_ws.current_table(state))
+
+    def test_want_group_selects_the_open_table(self):
+        """Biết bàn đang mở (từ ``wm_open_key``) thì chọn đúng khung của bàn đó."""
+        frames = [
+            {"socket": 0, "at": 9000, "data": {"groupID": 613, "gameNo": 1}},
+            {"socket": 1, "at": 8000, "data": {"groupID": 981, "gameNo": 2}},
+        ]
+        index, data, _at = wm_ws.current_table(self._state(frames, group=None),
+                                               want_group=981)
+        self.assertEqual(index, 1)
+        self.assertEqual(data["gameNo"], 2)
 
     def test_uses_embedded_wm_socket_when_no_same_origin_frame(self):
         """WM nhúng khác origin: socket bàn nằm ở khung nhúng, không có 'iframe'."""
